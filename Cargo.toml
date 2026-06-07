@@ -1,0 +1,94 @@
+[package]
+name = "lode"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.96.0"
+license = "MIT"
+description = "Universal, single-binary update lode: verifies integrity + publisher identity, then launches and manages a packaged app as a child process."
+repository = "https://github.com/dotns/lode"
+default-run = "lode"
+
+[[bin]]
+name = "lode"
+path = "src/main.rs"
+
+[workspace]
+resolver = "3"
+
+# === Lock 4 — workspace lints (deny-warnings policy lives here, not on the CLI) ===
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
+unsafe_code = "forbid"
+unreachable_pub = "warn"
+elided_lifetimes_in_paths = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+multiple_crate_versions = "allow"
+# Conflicts with rustc `unreachable_pub`; for a binary crate we prefer `pub(crate)`.
+redundant_pub_crate = "allow"
+todo = "warn"
+
+[lints]
+workspace = true
+
+[dependencies]
+# CLI / config
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+# errors / logging
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "ansi", "std"] }
+# verification
+sha2 = "0.10"
+ed25519-dalek = "2"
+base64 = "0.22"
+getrandom = "0.2"
+# manifest / versions
+semver = "1"
+# packaging / extraction (pure Rust)
+flate2 = "1"
+tar = "0.4"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# tls / http (rustls + aws-lc-rs provider per pma-rust Lock 2)
+rustls = "0.23"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# process / signals / hardening: Unix-only (see [target.'cfg(unix)'.dependencies])
+
+# lode is a Unix process supervisor (PID-1 subreaper, signal forwarding, exec
+# passthrough, rlimit) — these crates have no Windows equivalent, so the
+# supervisor deps are gated to cfg(unix) and lode targets Linux/macOS only.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.3"
+nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+rlimit = "0.10"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+debug = "line-tables-only"
+
+[profile.dist]
+inherits = "release"
+opt-level = "z"
+strip = "symbols"
+panic = "abort"
+debug = false
+
+[profile.dev]
+debug = "line-tables-only"

@@ -1,0 +1,184 @@
+name: Release
+
+# Builds per-platform binaries and UPLOADS them to a GitHub Release.
+#
+# Triggered when a Release is *published* on GitHub (which creates the tag
+# server-side) — NOT by pushing a tag. So you cut a release entirely on the
+# remote (`gh release create vX.Y.Z …` or the GitHub UI) and this workflow
+# attaches the binaries; a local `git push --tags` never triggers a build.
+#
+# Packaging:
+#   Unix:    lode-<subpkg>.tar.gz   (contains ./lode + a ./lode-cli symlink)
+#
+# lode is a Unix process supervisor (PID-1 subreaper, signal forwarding, exec
+# passthrough) with no Windows equivalent — Linux + macOS targets only.
+#
+# Docker images are built and pushed to Docker Hub by the separate `docker.yml`
+# workflow (manual dispatch with the release tag).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to (re)build and upload assets for (e.g. v0.1.0)"
+        required: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # The release tag drives both the checkout ref and the upload target.
+  RELEASE_TAG: ${{ github.event.release.tag_name || github.event.inputs.tag }}
+
+jobs:
+  build-linux:
+    name: build linux (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            subpkg: linux-x64
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            subpkg: linux-arm64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --profile dist --target ${{ matrix.target }} --locked
+
+      - name: Package tarball
+        run: |
+          set -eu
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/dist/lode" "lode"
+          chmod +x "lode"
+          # lode is a multi-call binary; ship a `lode-cli` symlink that enables the
+          # operator/publisher subcommands (the loader `lode` has none).
+          ln -sf lode "lode-cli"
+          tar -czf "dist/lode-${{ matrix.subpkg }}.tar.gz" "lode" "lode-cli"
+          rm "lode" "lode-cli"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: asset-${{ matrix.subpkg }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  build-macos:
+    name: build macos (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-26-intel
+            subpkg: darwin-x64
+          - target: aarch64-apple-darwin
+            os: macos-26
+            subpkg: darwin-arm64
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --profile dist --target ${{ matrix.target }} --locked
+
+      - name: Package tarball
+        run: |
+          set -eu
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/dist/lode" "lode"
+          chmod +x "lode"
+          # lode is a multi-call binary; ship a `lode-cli` symlink that enables the
+          # operator/publisher subcommands (the loader `lode` has none).
+          ln -sf lode "lode-cli"
+          tar -czf "dist/lode-${{ matrix.subpkg }}.tar.gz" "lode" "lode-cli"
+          rm "lode" "lode-cli"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: asset-${{ matrix.subpkg }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  upload:
+    name: upload assets to the release
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all platform assets
+        uses: actions/download-artifact@v8
+        with:
+          pattern: asset-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la artifacts/
+
+      - name: Upload assets to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ env.RELEASE_TAG }}
+          # A secret cannot be referenced in `if:`, so map it to an env var and
+          # branch on the string at runtime. Unset by default -> signing is a
+          # strict no-op and uploads are identical to an unsigned release.
+          LODE_SIGNING_KEY: ${{ secrets.LODE_SIGNING_KEY }}
+        run: |
+          set -eu
+          if [ -n "${LODE_SIGNING_KEY:-}" ]; then
+            # Signing requested: make the `lode-cli` publisher toolkit available.
+            # This job runs on ubuntu-latest (linux x64); extract the matching
+            # static-musl binary from its own release tarball. lode is a multi-call
+            # binary and the tarball already ships a `lode-cli` symlink, but
+            # recreate it defensively if a future tarball ever omits it.
+            mkdir -p bin
+            tar -xzf artifacts/lode-linux-x64.tar.gz -C bin
+            [ -e bin/lode-cli ] || ln -sf lode bin/lode-cli
+            cli="$PWD/bin/lode-cli"
+          fi
+          for f in artifacts/*.tar.gz; do
+            if [ -n "${LODE_SIGNING_KEY:-}" ]; then
+              # `lode-cli sign` prints `sha256:`, `sig:` and `key_id:` lines; the
+              # base64 on the `sig:` line is the v3 signature, which is exactly the
+              # GitHub asset label. Upload as `path#label` so the label carries it.
+              sig=$("$cli" sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY | awk '/^sig:/ {print $2}')
+              if [ -z "$sig" ]; then
+                echo "::error::failed to obtain signature for $(basename "$f")" >&2
+                exit 1
+              fi
+              gh release upload "$TAG" "$f#$sig" --clobber
+            else
+              gh release upload "$TAG" "$f" --clobber
+              echo "::warning::LODE_SIGNING_KEY not set — $(basename "$f") uploaded UNSIGNED"
+            fi
+          done

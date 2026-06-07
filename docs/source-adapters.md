@@ -1,0 +1,280 @@
+# lode source adapters — signing & implementation guide
+
+**English** · [中文](source-adapters.zh-CN.md)
+
+lode fetches updates from exactly one source: a **native** manifest URL, or a
+**GitHub Releases** repo. Both resolve to the same internal artifact and the same
+signature, so verification and install never branch on the source. This document
+is the normative spec for the signed message, the asset/manifest shapes, the
+operator config, and the publisher signing workflow.
+
+The operator names the exact asset to install; that filename is the selection key
+in both sources. There is no platform detection and no arch-alias table.
+
+---
+
+## 1. The signed artifact message
+
+The signature is ed25519 over a canonical message — UTF-8, `\n`-separated, **no
+trailing newline**:
+
+```
+lode.artifact.v1
+{name}
+{version}
+{sha256}
+```
+
+| field | meaning | source |
+|---|---|---|
+| `name` | the **asset filename** (e.g. `myapp-linux-x64.tar.gz`) | the selection key; what the signature's identity binds |
+| `version` | the release version | github: `tag_name` minus a leading `v`; native: the `versions` map key |
+| `sha256` | lowercase hex of the **raw downloaded file** (pre-unpack) | github: asset `digest`; native: the asset's `sha256` |
+
+`name` is the **asset filename, not the application name**. It is the only field
+that binds *which* artifact a signature authorises, so it prevents replaying one
+artifact's signature under another asset or version. The filename also carries the
+brand and platform by convention, and its extension determines the format — none
+of which need to be signed separately.
+
+### Keys
+
+- ed25519, 32-byte keys distributed as base64. `key_id` = first 16 hex chars of
+  `sha256(public_key)`.
+- Operators pin publishers in `[trust].trusted_keys` as `key_id:base64pub`.
+- Sign: `sig = base64(ed25519_sign(private_key, message))`.
+- Verify: lode accepts the artifact iff `sig` validates against **any** trusted
+  key over the reconstructed message **and** the downloaded bytes hash to
+  `sha256`.
+
+### What the signature binds — and does not
+
+Binds: which asset (`name`), which release (`version`), which bytes (`sha256`).
+Does **not** bind `platform`, `format`, `entry`, or `url` — these are derived from
+the filename or are operator-local (below). Because `name` is the filename and is
+signed, a tampered catalog cannot move a genuine signature onto different bytes,
+a different asset, or a different version.
+
+## 2. Catalog (manifest-level) signature
+
+The native manifest may carry a top-level `key_id` + `sig` over the catalog,
+protecting the channel→version pointers and the asset set against tampering before
+any download. Canonical message:
+
+```
+lode.manifest.v1
+{name}
+{key_id}
+{canonical}        # deterministic, sig-free serialization of channels + versions
+```
+
+`canonical` lists, in sorted order, each `channel\t{name}\t{latest}` and per
+version each `asset\t{name}\t{sha256}`. GitHub has no catalog signature — its
+freshness comes from tag authority (§5).
+
+## 3. Asset naming & format
+
+- The **filename is the selection key.** The operator sets `[update].asset` to the
+  exact asset they want on this host; lode matches it against the source's asset
+  list by `name`.
+- **`format` is derived at runtime from the filename extension** (longest match):
+
+  | suffix | format |
+  |---|---|
+  | `.tar.gz`, `.tgz` | `tar.gz` |
+  | `.gz` | `gz` |
+  | `.zip` | `zip` |
+  | (anything else / none) | `raw` |
+
+  The extension is authoritative — name assets so the suffix reflects the real
+  packaging.
+
+## 4. `entry` resolution (never signed)
+
+`entry` is the in-archive path lode executes. It is a **runtime** concern and
+appears in **no** signed message. Resolution order:
+
+```
+manifest advisory entry  >  lode.toml [update].entry  >  convention ({app} at archive root)
+```
+
+The security boundary is the **signed archive contents** (`sha256`): `entry` only
+ever selects among already-authenticated files, and the resolved path is validated
+against directory traversal. The manifest's advisory `entry` is a convenience hint
+from the publisher (who knows the layout) and is not authoritative.
+
+## 5. Source adapter — GitHub Releases
+
+```toml
+[update]
+github = "owner/repo"
+asset  = "myapp-linux-x64.tar.gz"
+```
+
+| internal field | from the GitHub API |
+|---|---|
+| `name` | asset `name` (matched against `asset`) |
+| `version` | release `tag_name` (drop a leading `v` before a digit) |
+| `sha256` | asset `digest` (strip the `sha256:` prefix), re-verified against the downloaded bytes |
+| `sig` | asset **`label`** (the only arbitrary-string slot the API returns) |
+| `url` (runtime) | `browser_download_url` |
+
+- **Version pointer = tag authority.** `channel = stable` → `/releases/latest`;
+  any other channel → newest non-draft prerelease; `pin` → `/releases/tags/{tag}`.
+- No advisory `entry` slot → `entry` comes from lode.toml / convention.
+- `browser_download_url` 302-redirects to a CDN host; this is transparent —
+  verification uses the recorded fields, never the redirect target.
+
+### Publishing — GitHub Actions release workflow
+
+A tag push runs the release job. **Signing is optional**: the job signs only when a
+signing key is configured (the `LODE_SIGNING_KEY` secret is non-empty), and falls
+back to uploading unsigned assets otherwise — so forks and key-less repos still cut
+releases. Steps:
+
+1. **Build** the assets for each target into `dist/` using the agreed naming
+   (`lode-<os>-<arch>.tar.gz`).
+2. **Create** the release for the tag.
+3. **For each asset, sign-if-keyed then upload:** if `LODE_SIGNING_KEY` is set, sign
+   it and upload with the signature as the asset `label` (`file#label`); otherwise
+   upload the bare file and warn that it is unsigned.
+
+```yaml
+# .github/workflows/release.yml
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write                       # create the release + upload assets
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      LODE_SIGNING_KEY: ${{ secrets.LODE_SIGNING_KEY }}   # optional — empty in forks / when unset
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release assets        # -> dist/lode-<os>-<arch>.tar.gz  (+ the lode-cli binary)
+        run: ./scripts/build-release.sh "$GITHUB_REF_NAME"
+      - name: Create release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes --verify-tag
+      - name: Sign (only if a key is configured) and upload
+        run: |
+          set -euo pipefail
+          TAG="$GITHUB_REF_NAME"
+          for f in dist/lode-*.tar.gz; do
+            if [ -n "${LODE_SIGNING_KEY:-}" ]; then
+              sig=$(lode-cli sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY)
+              gh release upload "$TAG" "$f#$sig"      # label = signature
+            else
+              gh release upload "$TAG" "$f"           # unsigned
+              echo "::warning::LODE_SIGNING_KEY not set — $(basename "$f") uploaded UNSIGNED"
+            fi
+          done
+```
+
+Notes:
+
+- **Key-existence gate.** A secret cannot be used in a step `if:`, so it is mapped to
+  `env` and tested with `[ -n "${LODE_SIGNING_KEY:-}" ]`. In forks and unconfigured
+  repos the secret is empty → the job uploads unsigned and never fails for lack of a
+  key.
+- **`--key-env`** reads the base64 key seed from the named env var so the private key
+  never touches disk in CI. The key must live in a protected repo/org secret (or be
+  signed out-of-band offline for the strongest custody).
+- **`lode-cli`** is the multi-call binary built in step 1; sign with the freshly built
+  one (other projects install `lode-cli` first).
+- **Unsigned consequences.** An asset with no `label` is unsigned: consumers must run
+  `require_signature = off` (or `auto` with no trusted keys → installs **UNVERIFIED**
+  with a warning). Under `require_signature = enforce` an unsigned asset is rejected.
+
+## 6. Source adapter — native manifest
+
+```toml
+[update]
+manifest = "https://releases.example.com/myapp/manifest.json"
+asset    = "myapp-linux-x64.tar.gz"
+```
+
+The manifest is an operator-hosted JSON shaped like a self-hosted release listing.
+Schema `lode/v1`; per-version `assets[]` keyed by `name`:
+
+```json
+{
+  "schema": "lode/v1",
+  "name": "myapp",
+  "key_id": "<key_id>",
+  "channels": { "stable": { "latest": "1.5.0" } },
+  "versions": {
+    "1.5.0": {
+      "min_lode": "0.0.1",
+      "notes": "…",
+      "assets": [
+        { "name": "myapp-linux-x64.tar.gz",
+          "url": "https://.../myapp-linux-x64.tar.gz",
+          "sha256": "…", "sig": "…",
+          "entry": "bin/myapp", "size": 5242880 },
+        { "name": "myapp-darwin-arm64.tar.gz",
+          "url": "https://.../myapp-darwin-arm64.tar.gz",
+          "sha256": "…", "sig": "…" }
+      ]
+    }
+  },
+  "sig": "<catalog signature — optional, see §2>"
+}
+```
+
+| asset field | required | meaning |
+|---|---|---|
+| `name` | ✓ | selection key; matched against `[update].asset` |
+| `url` | ✓ | absolute download URL |
+| `sha256` | ✓ | lowercase hex of the raw file |
+| `sig` | enforce / auto+keys | base64 ed25519 over the §1 message; inline, or supply a `.sig` sidecar alongside the asset |
+| `entry` | | advisory in-archive path (§4) |
+| `size` | | expected byte count (extra integrity check) |
+| `auth` | | default `true`; `false` = don't attach `[http].headers` to this URL |
+
+- **Version pointer.** `channels.<c>.latest` must be **signed** (the §2 catalog
+  signature) **or** the operator must `pin` a version — otherwise downgrade is
+  possible.
+- Native may carry more than GitHub (`channels`, `min_lode`, `notes`, detached
+  `.sig`, `size`, `auth`); all of it still reduces to `(name, version, sha256) +
+  sig` at the bottom.
+
+**Publishing:**
+
+```bash
+lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
+    --key private.key --into manifest.json     # upserts the asset by name, sets channels.latest
+lode-cli manifest-sign --into manifest.json --key private.key   # §2 catalog signature
+```
+
+Host `manifest.json` + the assets at any HTTPS URLs.
+
+## 7. Operator config (`lode.toml`)
+
+```toml
+[update]
+github   = "owner/repo"           # OR  manifest = "https://.../manifest.json"  (pick one)
+asset    = "myapp-linux-x64.tar.gz"   # the asset filename for THIS host (the selection key)
+channel  = "stable"
+policy   = "auto"                 # off | check | auto
+# pin    = "1.4.2"                # lock a version (disables auto-update)
+# entry  = "bin/myapp"            # override the in-archive entry (§4); usually omitted
+
+[trust]
+require_signature = "enforce"     # off | auto | enforce
+trusted_keys = ["<key_id>:<base64-pubkey>"]
+```
+
+## 8. Component responsibilities (implementation map)
+
+| module | responsibility |
+|---|---|
+| `verify.rs` | the §1 artifact message (`lode.artifact.v1`) and §2 catalog message (`lode.manifest.v1`); `verify_artifact_sig` over `(name, version, sha256)` |
+| `manifest.rs` | internal `Manifest` with per-version `assets[]` keyed by `name`; select the asset by `name`; derive `format` from the extension; both adapters (`fetch_github`, `fetch_native`) produce the identical internal model |
+| `config.rs` | `[update].asset`, `[update].entry` override; `manifest`/`github` stay mutually exclusive |
+| `download.rs` | fetch by `url`; attach `[http].headers` only same-origin; cross-check the GitHub `digest` and re-hash the downloaded file against the signed `sha256` |
+| `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256)` signature and the GitHub `label` string; native `manifest` assembly + `manifest-sign` over the §2 catalog form |
+
+Downstream (`resolve_target`, install, supervise) is shared and source-agnostic.

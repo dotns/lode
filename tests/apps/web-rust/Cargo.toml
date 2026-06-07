@@ -1,0 +1,26 @@
+[package]
+name = "web-rust"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96.0"
+publish = false
+description = "Minimal std-only HTTP test app conforming to the lode app contract."
+
+[[bin]]
+name = "web-rust"
+path = "src/main.rs"
+
+# --- SEPARATE workspace (intentional) -------------------------------------
+# An empty `[workspace]` table makes this crate its OWN workspace root, so it
+# is NOT pulled into lode's root workspace. That keeps lode's cargo gate
+# (`cargo test --all-targets --locked` at the repo root) clean and fast — it
+# never tries to build this example. The crate also uses ZERO external crates
+# (std only), so its lockfile is trivial and it builds into a self-contained,
+# static-friendly binary.
+[workspace]
+
+[profile.release]
+# Small, self-contained binary — this is the artifact lode installs.
+opt-level = "z"
+lto = true
+strip = true

@@ -1,0 +1,9 @@
+# typos config — allow domain terms that the default dictionary misreads.
+
+[default.extend-identifiers]
+# Crate name `flate2` (DEFLATE via miniz_oxide); its `flate` stem is not "flat".
+flate2 = "flate2"
+
+[default.extend-words]
+# POSIX BRE = Basic Regular Expression — a real acronym, not a typo of "BE".
+BRE = "BRE"

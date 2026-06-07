@@ -1,0 +1,8 @@
+/target
+/data
+.lode
+.git
+*.key
+publisher.*
+docs
+README.md

@@ -1,0 +1,73 @@
+# docker-compose stack for lode's end-to-end integration test
+# (tests/src/integration/compose.test.ts). Everything is LOCAL and deterministic:
+# images are built by the test (lode:e2e from the repo Dockerfile; lode-fileserver:e2e
+# from tests/compose/fileserver), and the manifest/artifact "registry" is a local
+# fileserver — no real network, no GitHub.
+#
+# File exchange and probing go through `docker cp` / `docker exec`, NOT host
+# bind-mounts or published ports, so the test works both on a normal docker host
+# (CI) and in docker-out-of-docker sandboxes where the test process shares the
+# daemon socket but not its network/mount namespaces:
+#   * config:   the test `docker cp`s tests/compose/<svc>/lode.toml -> /etc/lode.toml
+#               (LODE_CONFIG) into each created container before starting it.
+#   * registry: the test `docker cp`s the manifest/artifacts into fileserver:/www.
+#   * publish:  a new version = `docker cp` of the new manifest/artifact at runtime.
+#   * probe:    `docker exec fileserver /lodetest get http://<svc-ip>:8080/version`
+#               (container-to-container, by IP — the fileserver has the client).
+#
+# The lode containers reach the fileserver over a FIXED IP (10.123.231.2), so the
+# static (distroless) binaries never need DNS/NSS. ${TRUSTED_KEY} (the per-run
+# publisher key_id:base64) is supplied via the `docker compose` process env.
+
+networks:
+  default:
+    name: lode_e2e_net
+    ipam:
+      config:
+        - subnet: 10.123.231.0/24
+
+services:
+  # Writable manifest/artifact server. /www is populated (and new versions are
+  # published) by `docker cp`; lodetest serves it fresh on each request. Fixed IP.
+  fileserver:
+    image: lode-fileserver:e2e
+    networks:
+      default:
+        ipv4_address: 10.123.231.2
+    restart: "no"
+
+  # Native (no-runtime) Rust app: v0.0.1 -> auto v0.0.2, crashing v0.0.3 rollback.
+  svc-rust:
+    image: lode:e2e
+    depends_on: [fileserver]
+    environment:
+      LODE_CONFIG: /etc/lode.toml
+      LODE_TRUSTED_KEYS: "${TRUSTED_KEY}"
+      PORT: "8080"
+    # lode mirrors the child; a plain app exit shouldn't end the test, and the
+    # UPDATE/ROLLBACK assertions observe lode-INITIATED relaunches (in-process),
+    # not container restarts.
+    restart: unless-stopped
+
+  # Script app under the stub `bun` [runtime]: same update/rollback, plus
+  # update-by-app-exit (the app writes state.target then exits -> new version).
+  svc-bun:
+    image: lode:e2e
+    depends_on: [fileserver]
+    environment:
+      LODE_CONFIG: /etc/lode.toml
+      LODE_TRUSTED_KEYS: "${TRUSTED_KEY}"
+      PORT: "8080"
+    restart: unless-stopped
+
+  # Opt-in restart policy: restart=always + restart_max=3 feeding a crashing app.
+  # lode bounds the restarts then exits (status=error); docker `restart: "no"`
+  # leaves it exited so the test can read the terminal state.
+  svc-restart:
+    image: lode:e2e
+    depends_on: [fileserver]
+    environment:
+      LODE_CONFIG: /etc/lode.toml
+      LODE_TRUSTED_KEYS: "${TRUSTED_KEY}"
+      PORT: "8080"
+    restart: "no"

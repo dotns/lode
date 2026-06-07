@@ -1,0 +1,6 @@
+# bun dependencies (restored via `bun install --frozen-lockfile`)
+node_modules/
+
+# stray runtime scratch (tests use the OS temp dir; this is just a safety net)
+.tmp/
+*.log

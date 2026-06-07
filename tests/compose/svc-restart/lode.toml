@@ -1,0 +1,42 @@
+# svc-restart — demonstrates the OPT-IN crash-restart policy (the mirror-default's
+# counterpart). With `restart = "always"` lode relaunches the child on any exit,
+# bounded by `restart_max`; once the cap of consecutive restarts is hit lode gives
+# up (status=error) and exits with the child's code. Its app is a crashing native
+# binary (the web-rust BUILD_BAD=1 build), so lode restarts it restart_max times
+# then exits — proving the bound. Docker `restart: "no"` keeps it exited so the
+# test can inspect the terminal state.
+#
+# policy = "off": this service never updates; it only exercises restart bounding.
+
+[global]
+app      = "crash"
+data_dir = "/data"
+
+[update]
+manifest = "http://10.123.231.2:8080/crash/manifest.json"
+asset    = "crashbin"   # the asset filename to install on this host (selection key, §3)
+channel  = "stable"
+policy   = "off"
+
+[http]
+# The fileserver is a local, non-TLS fixture on a fixed compose IP (not loopback),
+# so opt out of the default HTTPS-only gate for this deliberately-local test.
+allow_insecure = true
+
+[trust]
+require_signature = "enforce"
+# trusted_keys injected via env LODE_TRUSTED_KEYS
+
+[command]
+run     = "{entry}"
+exec    = "{entry}"
+workdir = "{dir}"
+
+[supervise]
+restart             = "always"   # relaunch on any exit...
+restart_max         = 3          # ...but give up after 3 consecutive restarts
+restart_backoff     = 100        # ms (exponential base)
+restart_backoff_max = 1000       # ms cap
+readiness           = "none"
+health_grace        = 2
+stop_timeout        = 5

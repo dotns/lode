@@ -1,0 +1,82 @@
+# lode.toml — lode config for one app.  Precedence: CLI > env (LODE_*) > this file > defaults.
+# Files: lode.toml = config (operator) · state.json = runtime comms (lode+app) · manifest.json = remote.
+# Sections follow the lifecycle: global → fetch (update/http/trust) → run (command/runtime) → manage (supervise/signals).
+
+[global]
+app       = "myapp"        # must match manifest "name"; namespaces data dir + lock
+data_dir  = "/srv/lode"    # base dir: lode.toml + versions/ + state.json + lode.pid + runtime/ (default; override via LODE_DATA_DIR)
+log_level = "info"         # trace | debug | info | warn | error
+
+# --- fetch: source + when to upgrade ---
+# REQUIRED: set exactly one source (mutually exclusive): `manifest` -> native (a
+# lode/v1 JSON); `github` -> GitHub Releases. See design §12. Until one is set,
+# lode reports "no update source configured".
+[update]
+manifest = "https://releases.example.com/myapp/manifest.json"   # native: lode/v1 manifest URL  ← edit this
+# github     = "owner/myapp"               # ...or GitHub Releases instead of `manifest`
+# github_api = "https://api.github.com"    # override for GitHub Enterprise
+#   (github: the release's own assets are the catalog — no manifest.json asset needed)
+
+asset          = "myapp-linux-x86_64.tar.gz"   # the asset filename to install on THIS host (the selection key) ← edit this
+# entry        = "bin/myapp"                    # override the in-archive entry path (advisory; usually omit)
+channel        = "stable"  # native: channel key ; github: stable=/releases/latest, else newest prerelease
+policy         = "check"   # off | check | auto
+check_interval = 300       # seconds; 0 = check once at startup
+keep_versions  = 3         # old versions kept for rollback (rest GC'd)
+# pin          = "1.4.2"   # force a version/tag (disables auto-update)
+
+# --- fetch: headers for a private source (${ENV} expanded; per-artifact auth=false to skip) ---
+[http]
+headers = [
+  "Authorization: Bearer ${RELEASE_TOKEN}",
+  "X-Api-Key: ${API_KEY}",
+]
+# Credentials (the headers above) are attached to an artifact download ONLY when its
+# host is same-origin with the source (the `manifest`/`github_api` host; for github,
+# also github.com + the release-asset hosts) — so a tampered manifest can't redirect
+# the token to an attacker. List any *additional* trusted hosts (e.g. a separate CDN)
+# here; a cross-origin host not listed gets no credentials (dropped, with a warning).
+# A `[runtime].download` has no source origin, so it needs its host listed here too.
+# credential_hosts = ["cdn.example.com"]
+# allow_insecure = false   # default: refuse plain-http remote fetches (manifest, GitHub API,
+#                          # artifacts, runtime). Loopback http (localhost / 127.0.0.0/8 / ::1)
+#                          # is ALWAYS allowed. Set true (or pass --allow-insecure-http) only for
+#                          # a trusted non-TLS source — credentials then travel in the clear.
+
+# --- fetch: verify publisher identity (ed25519) ---
+[trust]
+require_signature = "auto"   # off | auto | enforce
+trusted_keys = ["9787ab11e55b4cbc:nyQSShSI8fAtHZNiJWDemBbcaX6V9OvmXtovkITm4fc="]
+# trusted_keys_file = "/run/secrets/lode_keys"
+
+# --- run: how to launch.  run = bare `lode` (entry auto-appended); exec = `lode <args>` base ---
+[command]
+run     = "bun run"   # bare `lode`   -> bun run <entry>
+exec    = "bun"       # `lode <args>` -> bun <args>   (so `lode run db:init` == `bun run db:init`)
+workdir = "{dir}"     # "{dir}" (version dir) or an absolute path
+# self-contained binary instead:  run = "{entry} serve"   exec = "{entry}"
+
+# --- run: optional runtime; downloaded to $DATA_DIR/runtime if absent from PATH ---
+[runtime]
+runtime  = "bun"
+download = "https://example.com/bun-linux-x64.zip"
+# format = "zip"   # entry = "bun"   # sha256 = "<hex>"   # sig = "<base64>"
+
+# --- manage: supervise the service (bare `lode` only) ---
+[supervise]
+restart             = "off"          # off (default) = mirror the child (lode exits with its code); on-failure | always = relaunch on crash/exit
+                                     # update / rollback / explicit restart relaunch regardless of this policy
+readiness           = "none"         # none = alive for health_grace ; state = wait for app to write state.ready
+ready_timeout       = 30             # (readiness=state) seconds to wait for ready before failing
+health_grace        = 15             # (readiness=none) seconds a new version must survive; also the single-strike rollback window
+stop_timeout        = 10             # graceful-stop seconds before SIGKILL (set >= app cleanup, < container grace)
+restart_backoff     = 500            # ms, exponential base (only used when restart != off)
+restart_backoff_max = 30000          # ms cap (only used when restart != off)
+restart_max         = 0              # 0 = unlimited consecutive restarts (only used when restart != off)
+restart_mode        = "stop-start"   # stop-start | reuseport-overlap | socket-activation
+# listen            = "0.0.0.0:3000" # required for socket-activation
+
+# --- manage: signals ---
+[signals]
+# forward = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGWINCH"]  # forwarded to the child (default set)
+# restart = "SIGUSR2"   # this signal triggers a graceful restart instead of being forwarded

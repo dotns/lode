@@ -1,0 +1,35 @@
+# cargo-deny policy — pma-rust Lock 1/2: pure-Rust, rustls only, no OpenSSL/native-tls.
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[[bans.deny]]
+name = "openssl"
+reason = "rustls only (pma-rust Lock 2); also breaks musl static link"
+
+[[bans.deny]]
+name = "openssl-sys"
+reason = "rustls only (pma-rust Lock 2); also breaks musl static link"
+
+[[bans.deny]]
+name = "native-tls"
+reason = "rustls only (pma-rust Lock 2)"
+
+[[bans.deny]]
+name = "native-tls-sys"
+reason = "rustls only (pma-rust Lock 2)"
+
+[licenses]
+version = 2
+# CDLA-Permissive-2.0 covers webpki-roots' bundled Mozilla CA trust-anchor data
+# (pulled in via ureq's rustls TLS stack) — a permissive data license, not code.
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Zlib", "MPL-2.0", "CDLA-Permissive-2.0"]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

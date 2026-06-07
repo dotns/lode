@@ -1,0 +1,13 @@
+{
+  "name": "lode-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end suite that drives the real lode binary across the 8 design scenarios (bun + TypeScript, no shell, no real network).",
+  "scripts": {
+    "test": "bun test --timeout 30000 src/"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0"
+  }
+}

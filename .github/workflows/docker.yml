@@ -1,0 +1,84 @@
+name: docker
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag whose assets to package (e.g. v0.1.0)"
+        required: true
+
+env:
+  IMAGE_NAME: dotns/lode
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve tag
+        id: tag
+        env:
+          TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -eu
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Download lode binaries from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.tag.outputs.name }}
+        run: |
+          set -eu
+          mkdir -p docker-context/linux-amd64 docker-context/linux-arm64 release-assets
+          gh release download "$TAG" \
+            --pattern 'lode-linux-x64.tar.gz' \
+            --pattern 'lode-linux-arm64.tar.gz' \
+            --dir release-assets
+          tar -xzf release-assets/lode-linux-x64.tar.gz   -C docker-context/linux-amd64
+          tar -xzf release-assets/lode-linux-arm64.tar.gz -C docker-context/linux-arm64
+          cp Dockerfile docker-context/Dockerfile
+          ls -laR docker-context/
+
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.tag.outputs.name }}
+            type=raw,value=latest
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKER_USER }}
+          password: ${{ secrets.DOCKER_PWD }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: docker-context
+          file: docker-context/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Supply-chain attestations: SLSA provenance + SBOM. Docker Hub supports
+          # OCI attestation manifests, so the multi-arch index push succeeds (the
+          # attestations appear as extra unknown/unknown manifest entries — cosmetic,
+          # not a push failure). If a future Docker Hub change rejects the OCI index,
+          # set both back to false and document the specific push error here.
+          provenance: true
+          sbom: true

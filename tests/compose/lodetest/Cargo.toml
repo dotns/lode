@@ -1,0 +1,24 @@
+[package]
+name = "lodetest"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.96.0"
+publish = false
+description = "Static, std-only multi-tool for lode's docker-compose integration test: a read-fresh HTTP file/manifest server and a tiny 'bun' runtime stub that runs the web-bun app contract in distroless/static."
+
+[[bin]]
+name = "lodetest"
+path = "src/main.rs"
+
+# --- SEPARATE workspace (intentional, mirrors tests/apps/web-rust) ------------
+# An empty `[workspace]` table makes this crate its OWN workspace root, so it is
+# NOT pulled into lode's root workspace: the repo cargo gate
+# (`cargo clippy/test --all-targets --locked`) never builds or lints it. It uses
+# ZERO external crates (std only), so it builds into a small, self-contained,
+# static binary that runs in `gcr.io/distroless/static` (no libc, no shell).
+[workspace]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true

@@ -1,0 +1,2 @@
+# build output of the static helper binary (its own workspace)
+lodetest/target/

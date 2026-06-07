@@ -1,0 +1,49 @@
+{
+  "schema": "lode/v1",
+  "name": "myapp",
+  "key_id": "9787ab11e55b4cbc",
+
+  "channels": {
+    "stable": { "latest": "1.5.0" },
+    "beta":   { "latest": "1.6.0-beta.2" }
+  },
+
+  "versions": {
+    "1.5.0": {
+      "min_lode": "0.1.0",
+      "notes": "First stable.",
+      "assets": [
+        {
+          "name": "myapp-linux-x86_64.tar.gz",
+          "url": "https://releases.example.com/myapp/1.5.0/myapp-linux-x86_64.tar.gz",
+          "sha256": "a97ad2265ae84cdeff1219b1c83db8e6f096e444c81f733bc93355f0fff368a1",
+          "size": 5242880,
+          "sig": "Izn/bTO7W4gOFBlpPswTE6ZjmyfqktRinRISNW4P8+B+InbQ6xyclGguJrv6aitYO4hBKSP7e7zz34Mb+mYYCw==",
+          "key_id": "9787ab11e55b4cbc",
+          "entry": "bin/myapp",
+          "auth": true
+        },
+        {
+          "name": "myapp-darwin-arm64.tar.gz",
+          "url": "https://releases.example.com/myapp/1.5.0/myapp-darwin-arm64.tar.gz",
+          "sha256": "b1c2d3e4f5060718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
+          "entry": "bin/myapp"
+        }
+      ]
+    },
+
+    "1.6.0-beta.2": {
+      "min_lode": "0.1.0",
+      "assets": [
+        {
+          "name": "myapp-linux-x86_64.gz",
+          "url": "https://releases.example.com/myapp/1.6.0-beta.2/myapp-linux-x86_64.gz",
+          "sha256": "d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff0011223344",
+          "entry": "myapp"
+        }
+      ]
+    }
+  },
+
+  "sig": "<optional: base64 ed25519 over the lode.manifest.v1 message — set by `lode-cli manifest-sign --into manifest.json --key private.key`; pairs with the top-level key_id>"
+}

@@ -1,0 +1,26 @@
+# Rust build output
+/target/
+
+# Docker build context staging for the local `lode:e2e` image: the integration
+# test stages the static lode binary here so `docker build -t lode:e2e .` (which
+# uses the prebuilt-binary repo Dockerfile) can COPY it. Build artifact, not source.
+/linux-amd64/
+/linux-arm64/
+
+# lode runtime data (downloaded versions, locks, state)
+/data/
+.lode/
+
+# publisher private keys — never commit
+*.key
+publisher.*
+
+# local env / secrets
+.env
+.env.local
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.swp
