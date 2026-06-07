@@ -139,6 +139,23 @@ fn run_tool() -> Result<ExitCode> {
         }
         ToolCommand::Restart => commands::restart::run(&config::resolve(&cli.globals)?)?,
         ToolCommand::Versions => commands::versions::run(&config::resolve(&cli.globals)?)?,
+        ToolCommand::Seed {
+            app_bin,
+            version,
+            entry,
+            no_activate,
+        } => {
+            // Scaffold a sourceless config if the data dir has none, so seeding a
+            // fresh dir doesn't trip the source-requiring starter scaffold.
+            config::ensure_sourceless_toml(&cli.globals)?;
+            commands::seed::run(
+                &config::resolve(&cli.globals)?,
+                &app_bin,
+                &version,
+                entry.as_deref(),
+                !no_activate,
+            )?;
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

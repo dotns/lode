@@ -187,12 +187,14 @@ assets at any HTTPS URLs:
 ```bash
 lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
     --key private.key --into manifest.json   # upserts the asset by name, sets channels.latest
-lode-cli manifest-sign --into manifest.json --key private.key   # signs the catalog
+lode-cli manifest-sign --into manifest.json --key private.key   # optional: tamper-evidence over the catalog
 ```
 
 Manifest shape + the per-asset field table live in
-[source-adapters.md §6](source-adapters.md). `channels.<c>.latest` must be signed
-(`manifest-sign`) or the operator must `pin` a version.
+[source-adapters.md §6](source-adapters.md). `manifest-sign` is **optional**
+(verify-if-present tamper-evidence); `channels.<c>.latest` rollback is caught
+client-side by the downgrade floor, and a `pin` removes trust in the pointer
+entirely.
 
 ### Signing model (both sources)
 

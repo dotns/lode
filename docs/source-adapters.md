@@ -55,11 +55,25 @@ the filename or are operator-local (below). Because `name` is the filename and i
 signed, a tampered catalog cannot move a genuine signature onto different bytes,
 a different asset, or a different version.
 
-## 2. Catalog (manifest-level) signature
+## 2. Catalog (manifest-level) signature — optional, verify-if-present
 
-The native manifest may carry a top-level `key_id` + `sig` over the catalog,
-protecting the channel→version pointers and the asset set against tampering before
-any download. Canonical message:
+The native manifest **may** carry a top-level `key_id` + `sig` over the catalog. It
+is an *optional* tamper-evidence layer, **never required** and **not** gated by
+`require_signature`:
+
+- **present** → the loader verifies it (a swapped `latest`, an added/removed version
+  or a rewritten asset digest is caught before any download); a present-but-invalid
+  signature is rejected.
+- **absent** → accepted under every policy, including `enforce`.
+
+What enforces trust is therefore *not* the catalog signature but two source-agnostic
+layers that always apply: the **per-artifact** signature (§1), which `require_signature`
+does gate and which binds every downloaded file; and the **client-side downgrade
+floor** (§2a), which protects the channel `latest` pointer against rollback. This is
+why a GitHub release (no catalog signature, §5) and a native catalog that signs only
+its artifacts both work under `enforce`.
+
+Canonical message (when a catalog *is* signed):
 
 ```
 lode.manifest.v1
@@ -71,6 +85,21 @@ lode.manifest.v1
 `canonical` lists, in sorted order, each `channel\t{name}\t{latest}` and per
 version each `asset\t{name}\t{sha256}`. GitHub has no catalog signature — its
 freshness comes from tag authority (§5).
+
+### 2a. Client-side downgrade floor (`latest` rollback protection)
+
+Because the catalog signature is optional, the defence for the channel `latest`
+pointer lives on the client, not in the catalog: when *following* `latest` (the
+default, or an explicit `update --version latest`), the loader refuses to resolve a
+version **older than the floor** — the highest version it has already committed to
+(`max(current, last_good)` from `state.json`). A tampered *or replayed* catalog that
+points `latest` back at an older — even legitimately-signed — version is rejected
+before any download.
+
+Only *pointer-following* resolution is guarded. A deliberate downgrade is always
+allowed: an explicit `update --version X`, a configured `[update].pin`, or
+`lode rollback`. Comparison is by semver precedence; a non-semver `latest`/floor
+can't be ordered, so a downgrade can't be proven and is allowed.
 
 ## 3. Asset naming & format
 
@@ -233,9 +262,10 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
 | `size` | | expected byte count (extra integrity check) |
 | `auth` | | default `true`; `false` = don't attach `[http].headers` to this URL |
 
-- **Version pointer.** `channels.<c>.latest` must be **signed** (the §2 catalog
-  signature) **or** the operator must `pin` a version — otherwise downgrade is
-  possible.
+- **Version pointer.** Rollback of `channels.<c>.latest` is caught client-side by
+  the downgrade floor (§2a) — no catalog signature is required for it. Signing the
+  catalog (§2) is still recommended as up-front tamper-evidence; a `pin` removes all
+  trust in the pointer entirely.
 - Native may carry more than GitHub (`channels`, `notes`, detached
   `.sig`, `size`, `auth`); all of it still reduces to `(name, version, sha256) +
   sig` at the bottom.
@@ -245,7 +275,7 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
 ```bash
 lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
     --key private.key --into manifest.json     # upserts the asset by name, sets channels.latest
-lode-cli manifest-sign --into manifest.json --key private.key   # §2 catalog signature
+lode-cli manifest-sign --into manifest.json --key private.key   # optional §2 catalog tamper-evidence
 ```
 
 Host `manifest.json` + the assets at any HTTPS URLs.
@@ -262,7 +292,11 @@ policy   = "auto"                 # off | check | auto
 # entry  = "bin/myapp"            # override the in-archive entry (§4); usually omitted
 
 [trust]
-require_signature = "enforce"     # off | auto | enforce
+require_signature = "enforce"     # off | auto | enforce — gates the PER-ARTIFACT
+                                  #   signature (§1). off: integrity only. auto:
+                                  #   required once a trusted key is configured.
+                                  #   enforce: always required. The catalog signature
+                                  #   (§2) is verify-if-present and never gated here.
 trusted_keys = ["<key_id>:<base64-pubkey>"]
 ```
 

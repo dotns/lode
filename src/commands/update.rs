@@ -25,14 +25,24 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
             manifest.name, cfg.global.app
         )));
     }
-    // Verify the catalog's publisher signature before trusting any of its pointers.
+    // Verify the catalog signature if it carries one (verify-if-present); a missing
+    // catalog signature is fine — the per-artifact check below binds the download.
     install::verify_manifest_identity(cfg, &manifest)?;
+
+    // Anti-downgrade floor: the highest version we've already committed to. It gates
+    // only the channel-`latest`-following resolution, so a tampered or replayed
+    // catalog cannot silently roll us back; an explicit `--version` or `pin` is the
+    // operator's deliberate choice and is never blocked.
+    let state_path = cfg.global.data_dir.join("state.json");
+    let prior = state::read(&state_path)?.unwrap_or_default();
+    let floor = install::version_floor(prior.current.as_deref(), prior.last_good.as_deref());
 
     let target = manifest::resolve_target(
         &manifest,
         &cfg.update.channel,
         cfg.update.pin.as_deref(),
         version,
+        floor.as_deref(),
     )?;
     let entry = manifest::version_entry(&manifest, &target)?;
 
@@ -58,15 +68,16 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
         writeln!(out, "  notes: {notes}")?;
     }
 
-    let path = cfg.global.data_dir.join("state.json");
-    let mut st = state::read(&path)?.unwrap_or_default();
+    // Re-read state (a running supervisor may have written it since `prior`) before
+    // the read-modify-write, so we never clobber a concurrent update.
+    let mut st = state::read(&state_path)?.unwrap_or_default();
     st.channel = Some(cfg.update.channel.clone());
 
     if running_instance(&st) {
         // Hand off to the running supervisor via the app-owned request channel.
         st.available = Some(target.clone());
         st.target = Some(target.clone());
-        state::write(&path, &st)?;
+        state::write(&state_path, &st)?;
         writeln!(
             out,
             "  a service is running — requested hot-update to {target}"
@@ -78,7 +89,7 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
             st.last_good = Some(target.clone());
         }
         st.available = None;
-        state::write(&path, &st)?;
+        state::write(&state_path, &st)?;
         writeln!(out, "  activated {target} (current)")?;
     }
 

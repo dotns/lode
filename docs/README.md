@@ -10,6 +10,7 @@ Most docs come in two single-language versions: `X.md` (English) and
 | Project overview / quick start | [`../README.md`](../README.md) | [`../README.zh-CN.md`](../README.zh-CN.md) |
 | Integration — configure → run → publish | [`integration.md`](integration.md) | [`integration.zh-CN.md`](integration.zh-CN.md) |
 | Architecture (the authoritative spec) | [`architecture.md`](architecture.md) | [`architecture.zh-CN.md`](architecture.zh-CN.md) |
+| Local testing offline (`lode-cli seed`) | [`dev-local-testing.md`](dev-local-testing.md) | [`dev-local-testing.zh-CN.md`](dev-local-testing.zh-CN.md) |
 
 Reference (language-neutral):
 

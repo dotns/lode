@@ -229,13 +229,19 @@ fn bootstrap(cfg: &Config, requested: Option<&str>) -> Result<String> {
             manifest.name, cfg.global.app
         )));
     }
-    // Verify the catalog's publisher signature before trusting any of its pointers.
+    // Verify the catalog signature if it carries one (verify-if-present); absence is
+    // fine — the per-artifact check binds each download.
     install::verify_manifest_identity(cfg, &manifest)?;
+    // Anti-downgrade floor from any prior state (a clean bootstrap has none, so this
+    // never blocks the first install); it only gates a `latest`-following resolution.
+    let prior = state::read(&cfg.global.data_dir.join("state.json"))?.unwrap_or_default();
+    let floor = install::version_floor(prior.current.as_deref(), prior.last_good.as_deref());
     let target = manifest::resolve_target(
         &manifest,
         &cfg.update.channel,
         cfg.update.pin.as_deref(),
         requested,
+        floor.as_deref(),
     )?;
     let entry = manifest::version_entry(&manifest, &target)?;
     let asset = manifest::select_asset(entry, required_asset(cfg)?)?;
@@ -1333,11 +1339,16 @@ impl<'c> Supervisor<'c> {
         if manifest.name != self.cfg.global.app {
             return None;
         }
+        // No `floor` here: the periodic poll's own `is_newer` gate (against the
+        // running version) already refuses a downgrade, so resolving the raw latest
+        // and filtering downstream keeps a benign older `latest` from logging as an
+        // error.
         manifest::resolve_target(
             &manifest,
             &self.cfg.update.channel,
             self.cfg.update.pin.as_deref(),
             Some("latest"),
+            None,
         )
         .ok()
     }
@@ -1542,11 +1553,14 @@ impl<'c> Supervisor<'c> {
             );
             return;
         }
+        // No `floor`: `policy_action`'s `is_newer` gate (below, against the running
+        // version) already refuses a downgrade, so resolve the raw latest here.
         let latest = match manifest::resolve_target(
             &manifest,
             &self.cfg.update.channel,
             self.cfg.update.pin.as_deref(),
             Some("latest"),
+            None,
         ) {
             Ok(v) => v,
             Err(e) => {

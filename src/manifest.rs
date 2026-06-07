@@ -22,9 +22,11 @@ use crate::idval::validate_id;
 /// The only manifest schema this loader understands.
 const SCHEMA: &str = "lode/v1";
 
-/// A parsed `lode/v1` manifest. `key_id`/`sig` are the (optional) top-level
-/// publisher identity + whole-catalog signature, verified by
-/// [`crate::install::verify_manifest_identity`] over [`Manifest::signing_message`].
+/// A parsed `lode/v1` manifest. `key_id`/`sig` are the **optional** top-level
+/// publisher identity + whole-catalog signature: when present they are verified by
+/// [`crate::install::verify_manifest_identity`] over [`Manifest::signing_message`]
+/// (verify-if-present tamper-evidence), but they are never required — `latest`
+/// rollback is instead guarded client-side by [`resolve_target`]'s downgrade floor.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Manifest {
     pub(crate) schema: String,
@@ -35,14 +37,6 @@ pub(crate) struct Manifest {
     pub(crate) sig: Option<String>,
     pub(crate) channels: BTreeMap<String, Channel>,
     pub(crate) versions: BTreeMap<String, VersionEntry>,
-    /// Fetch-time flag — **never** read from JSON. Set by [`fetch_native`] when
-    /// following this native catalog's `latest` pointer would be an unverified
-    /// downgrade (§2): the manifest carries no top-level catalog signature and
-    /// `require_signature != off`. Enforced in [`resolve_target`]'s
-    /// `latest`-following branches. GitHub-sourced manifests leave it `false` — a
-    /// release's freshness is its tag authority, not a catalog signature (§5).
-    #[serde(skip)]
-    pub(crate) block_unsigned_latest: bool,
 }
 
 impl Manifest {
@@ -198,25 +192,18 @@ pub(crate) fn allowed_hosts(cfg: &Config) -> Vec<String> {
     hosts
 }
 
-/// Native source: download the `lode/v1` JSON over HTTP, parse it, then apply the
-/// two native-only refinements the GitHub adapter never needs:
-/// - **§2 downgrade guard:** flag whether following the catalog's `latest` pointer
-///   would be an unverified downgrade ([`Manifest::block_unsigned_latest`], enforced
-///   by [`resolve_target`]).
-/// - **§6 detached signatures:** back-fill any `.sig` sidecar for the install-target
-///   asset that carries no inline `sig` ([`resolve_native_sidecars`]).
-///
-/// Both operate on the freshly-parsed, still-owned manifest, so the downstream
-/// `select_asset`/verify/install path stays identical (and source-agnostic) for
-/// both adapters.
+/// Native source: download the `lode/v1` JSON over HTTP, parse it, then back-fill
+/// any detached `.sig` sidecar (§6) for the install-target asset that carries no
+/// inline `sig` ([`resolve_native_sidecars`]) — the one native-only refinement the
+/// GitHub adapter never needs. It operates on the freshly-parsed, still-owned
+/// manifest, so the downstream `select_asset`/verify/install path stays identical
+/// (and source-agnostic) for both adapters. Rollback protection for the channel
+/// `latest` pointer is source-agnostic and lives in [`resolve_target`] (the
+/// client-side downgrade floor), not here.
 fn fetch_native(cfg: &Config, url: &str) -> Result<Manifest> {
     let headers = crate::http::expand_headers(&cfg.http.headers)?;
     let bytes = crate::http::get_bytes(url, &headers, cfg.http.allow_insecure)?;
     let mut manifest = parse(&bytes)?;
-    // §2: an unsigned native catalog must not be *followed* via `latest` unless the
-    // operator pins a version or opts out of signing entirely.
-    manifest.block_unsigned_latest =
-        manifest.sig.is_none() && cfg.trust.require_signature != RequireSignature::Off;
     // §6: when a signature is required and the selected asset has no inline `sig`,
     // fall back to its `<url>.sig` sidecar.
     resolve_native_sidecars(cfg, &mut manifest, &allowed_hosts(cfg))?;
@@ -455,9 +442,6 @@ fn map_release(
         sig: None,
         channels,
         versions,
-        // GitHub freshness is tag authority, not a catalog signature (§5) — never
-        // block following `latest`.
-        block_unsigned_latest: false,
     })
 }
 
@@ -547,27 +531,33 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest> {
 /// the channel's `latest`. The resolved id must exist in `versions`.
 ///
 /// Following the channel `latest` pointer (the default, or an explicit `"latest"`,
-/// with no `pin`) is gated by [`guard_latest_pointer`]: an unsigned native catalog
-/// is refused as a downgrade risk (§2). An explicit concrete version or a `pin` is
-/// the operator's responsibility and is never blocked.
+/// with no `pin`) is gated by [`guard_downgrade`] against `floor` — the highest
+/// version this client has committed to (`max(current, last_good)`): a catalog that
+/// points `latest` at an older version is refused as a rollback risk. An explicit
+/// concrete version or a `pin` is the operator's deliberate choice and is never
+/// blocked (pass `floor` from the caller's state; it is consulted only on the
+/// `latest`-following branches).
 pub(crate) fn resolve_target(
     manifest: &Manifest,
     channel: &str,
     pin: Option<&str>,
     requested: Option<&str>,
+    floor: Option<&str>,
 ) -> Result<String> {
     let want = match requested {
         Some("latest") => {
-            guard_latest_pointer(manifest, pin)?;
-            channel_latest(manifest, channel)?
+            let latest = channel_latest(manifest, channel)?;
+            guard_downgrade(&latest, floor)?;
+            latest
         }
         Some(version) => version.to_owned(),
         None => {
             if let Some(version) = pin {
                 version.to_owned()
             } else {
-                guard_latest_pointer(manifest, None)?;
-                channel_latest(manifest, channel)?
+                let latest = channel_latest(manifest, channel)?;
+                guard_downgrade(&latest, floor)?;
+                latest
             }
         }
     };
@@ -583,22 +573,31 @@ pub(crate) fn resolve_target(
     Ok(want)
 }
 
-/// Refuse to *follow* a native catalog's channel `latest` pointer when doing so
-/// would be an unverified downgrade (§2): the manifest carries no verified catalog
-/// signature ([`Manifest::block_unsigned_latest`], set by [`fetch_native`]) and the
-/// operator has not pinned a version. An explicit version request or a `pin`
-/// (`pin.is_some()`) takes responsibility for the choice and is never blocked here;
-/// GitHub manifests never set the flag (their freshness is tag authority, §5), so
-/// this is a no-op for the GitHub adapter.
-fn guard_latest_pointer(manifest: &Manifest, pin: Option<&str>) -> Result<()> {
-    if pin.is_none() && manifest.block_unsigned_latest {
-        return Err(Error::Manifest(
-            "refusing to follow the channel `latest` pointer: this native manifest has no \
-             verified catalog signature and no version is pinned, so following `latest` risks a \
-             silent downgrade. Sign the manifest (`lode-cli manifest-sign`), pin a version with \
-             [update].pin, or set [trust].require_signature = \"off\" to override."
-                .to_owned(),
-        ));
+/// Client-side rollback protection: refuse to *follow* the channel `latest` pointer
+/// onto a version older than `floor` — the highest version this client has already
+/// committed to (`max(current, last_good)`, see [`crate::install::version_floor`]).
+/// This replaces the former catalog-signature requirement as the defence for the
+/// `latest` pointer: a tampered *or replayed* catalog that points `latest` back at
+/// an older — even legitimately-signed — version is refused before any download.
+///
+/// Only *pointer-following* resolution is guarded; an explicit `--version`, a `pin`,
+/// or a `rollback` is the operator's deliberate choice and never reaches here.
+/// Comparison is by semver precedence; a non-semver `latest` or `floor` cannot be
+/// ordered, so a downgrade can't be proven and is allowed (documented limitation).
+fn guard_downgrade(latest: &str, floor: Option<&str>) -> Result<()> {
+    if let Some(floor) = floor
+        && let (Ok(l), Ok(f)) = (
+            semver::Version::parse(latest),
+            semver::Version::parse(floor),
+        )
+        && l < f
+    {
+        return Err(Error::Manifest(format!(
+            "refusing to follow the channel `latest` pointer onto {latest:?}: it is older than \
+             the installed {floor:?}. A tampered or replayed catalog must not silently downgrade \
+             you. Use `lode rollback` or `update --version` for a deliberate downgrade, or pin a \
+             version with [update].pin."
+        )));
     }
     Ok(())
 }
@@ -710,25 +709,28 @@ mod tests {
     #[test]
     fn resolves_channel_pin_and_explicit() {
         let m = example();
-        // channel latest
-        assert_eq!(resolve_target(&m, "stable", None, None).unwrap(), "1.5.0");
+        // channel latest (no floor → no downgrade gate)
         assert_eq!(
-            resolve_target(&m, "beta", None, None).unwrap(),
+            resolve_target(&m, "stable", None, None, None).unwrap(),
+            "1.5.0"
+        );
+        assert_eq!(
+            resolve_target(&m, "beta", None, None, None).unwrap(),
             "1.6.0-beta.2"
         );
         // explicit "latest" re-resolves to the channel latest (ignores pin)
         assert_eq!(
-            resolve_target(&m, "stable", Some("1.5.0"), Some("latest")).unwrap(),
+            resolve_target(&m, "stable", Some("1.5.0"), Some("latest"), None).unwrap(),
             "1.5.0"
         );
         // pin wins when nothing explicit is requested
         assert_eq!(
-            resolve_target(&m, "stable", Some("1.6.0-beta.2"), None).unwrap(),
+            resolve_target(&m, "stable", Some("1.6.0-beta.2"), None, None).unwrap(),
             "1.6.0-beta.2"
         );
         // explicit version wins over pin
         assert_eq!(
-            resolve_target(&m, "stable", Some("1.5.0"), Some("1.6.0-beta.2")).unwrap(),
+            resolve_target(&m, "stable", Some("1.5.0"), Some("1.6.0-beta.2"), None).unwrap(),
             "1.6.0-beta.2"
         );
     }
@@ -736,9 +738,9 @@ mod tests {
     #[test]
     fn rejects_unknown_channel_and_version() {
         let m = example();
-        assert!(resolve_target(&m, "nope", None, None).is_err());
-        assert!(resolve_target(&m, "stable", None, Some("9.9.9")).is_err());
-        assert!(resolve_target(&m, "stable", Some("9.9.9"), None).is_err());
+        assert!(resolve_target(&m, "nope", None, None, None).is_err());
+        assert!(resolve_target(&m, "stable", None, Some("9.9.9"), None).is_err());
+        assert!(resolve_target(&m, "stable", Some("9.9.9"), None, None).is_err());
     }
 
     #[test]
@@ -800,43 +802,54 @@ mod tests {
         assert_eq!(effective_sig(None, None), None);
     }
 
-    // --- native: §2 downgrade guard (`latest` pointer) ---------------------
+    // --- client-side downgrade floor (`latest` pointer) --------------------
 
     #[test]
-    fn downgrade_guard_refuses_unsigned_unpinned_latest() {
-        let mut m = example();
-        // Simulate `fetch_native` marking an unsigned native catalog under a signing
-        // policy (`require_signature != off`).
-        m.block_unsigned_latest = true;
-        // Following `latest` with no pin is refused — both the default resolution and
-        // an explicit `"latest"` request.
-        assert!(resolve_target(&m, "stable", None, None).is_err());
-        assert!(resolve_target(&m, "stable", None, Some("latest")).is_err());
-        // …but a pin takes responsibility for the choice and is allowed…
+    fn downgrade_guard_refuses_latest_below_floor() {
+        let m = example(); // channel `stable` latest = 1.5.0
+        // The client has already committed to 1.6.0 (floor). A catalog whose `latest`
+        // points back to the older 1.5.0 must be refused when *following* the pointer
+        // — both the default resolution and an explicit `"latest"` request.
+        let floor = Some("1.6.0");
+        assert!(resolve_target(&m, "stable", None, None, floor).is_err());
+        assert!(resolve_target(&m, "stable", None, Some("latest"), floor).is_err());
+        // An explicit `"latest"` re-resolves to the channel pointer (overriding the
+        // pin), so it is *also* a pointer-follow and stays guarded even with a pin set.
+        assert!(resolve_target(&m, "stable", Some("1.5.0"), Some("latest"), floor).is_err());
+        // …but an *actually-used* pin (no explicit request) takes responsibility for
+        // the version and is allowed…
         assert_eq!(
-            resolve_target(&m, "stable", Some("1.5.0"), None).unwrap(),
+            resolve_target(&m, "stable", Some("1.5.0"), None, floor).unwrap(),
             "1.5.0"
         );
+        // …as is an explicit concrete version (a deliberate downgrade, not a follow).
         assert_eq!(
-            resolve_target(&m, "stable", Some("1.5.0"), Some("latest")).unwrap(),
-            "1.5.0"
-        );
-        // …as is an explicit concrete version (not a pointer-follow).
-        assert_eq!(
-            resolve_target(&m, "stable", None, Some("1.5.0")).unwrap(),
+            resolve_target(&m, "stable", None, Some("1.5.0"), floor).unwrap(),
             "1.5.0"
         );
     }
 
     #[test]
-    fn downgrade_guard_allows_signed_or_exempt_latest() {
-        let mut m = example();
-        // A verified/exempt catalog (flag clear — signed manifest, or
-        // require_signature=off, or a GitHub source) follows `latest` normally.
-        m.block_unsigned_latest = false;
-        assert_eq!(resolve_target(&m, "stable", None, None).unwrap(), "1.5.0");
+    fn downgrade_guard_allows_latest_at_or_above_floor() {
+        let m = example(); // stable latest = 1.5.0
+        // No floor (clean first install) → follow `latest` freely.
         assert_eq!(
-            resolve_target(&m, "stable", None, Some("latest")).unwrap(),
+            resolve_target(&m, "stable", None, None, None).unwrap(),
+            "1.5.0"
+        );
+        // Floor equal to latest is not a downgrade → allowed.
+        assert_eq!(
+            resolve_target(&m, "stable", None, None, Some("1.5.0")).unwrap(),
+            "1.5.0"
+        );
+        // Floor below latest (a normal upgrade) → allowed.
+        assert_eq!(
+            resolve_target(&m, "stable", None, None, Some("1.4.0")).unwrap(),
+            "1.5.0"
+        );
+        // A non-semver floor can't be ordered → no provable downgrade → allowed.
+        assert_eq!(
+            resolve_target(&m, "stable", None, Some("latest"), Some("nightly")).unwrap(),
             "1.5.0"
         );
     }
@@ -918,7 +931,7 @@ mod tests {
         assert!(m.key_id.is_none());
         assert_eq!(m.channels["beta"].latest, "1.6.0-beta.2");
         assert_eq!(
-            resolve_target(&m, "beta", None, None).unwrap(),
+            resolve_target(&m, "beta", None, None, None).unwrap(),
             "1.6.0-beta.2"
         );
 
@@ -957,10 +970,13 @@ mod tests {
         assert!(m.versions.contains_key("1.5.0"));
         assert!(m.versions.contains_key("v1.5.0"));
         assert_eq!(
-            resolve_target(&m, "stable", Some("v1.5.0"), None).unwrap(),
+            resolve_target(&m, "stable", Some("v1.5.0"), None, None).unwrap(),
             "v1.5.0"
         );
-        assert_eq!(resolve_target(&m, "stable", None, None).unwrap(), "1.5.0");
+        assert_eq!(
+            resolve_target(&m, "stable", None, None, None).unwrap(),
+            "1.5.0"
+        );
     }
 
     #[test]

@@ -46,14 +46,20 @@ export class Harness {
     this.#tmps.push(dataDir, buildDir, keysDir);
   }
 
-  static async start(): Promise<Harness> {
+  /**
+   * Start a world. By default the server signs every manifest.json (catalog
+   * signature) so it is VERIFIED under `require_signature`. Pass
+   * `{ signCatalog: false }` to serve an *unsigned* catalog while still signing
+   * each artifact — the catalog signature is verify-if-present (never required), so
+   * this must still install/verify fine under `enforce`.
+   */
+  static async start(opts: { signCatalog?: boolean } = {}): Promise<Harness> {
     const dataDir = mkTmp("lode-data-");
     const buildDir = mkTmp("lode-build-");
     const keysDir = mkTmp("lode-keys-");
     const signer = await Signer.create(keysDir);
-    // The server signs every manifest.json with the publisher key, so the new
-    // manifest-level signature verification passes under require_signature.
-    const server = ManifestServer.start(APP_NAME, signer.privPath);
+    const catalogKey = (opts.signCatalog ?? true) ? signer.privPath : undefined;
+    const server = ManifestServer.start(APP_NAME, catalogKey);
     return new Harness(server, signer, dataDir, buildDir, keysDir);
   }
 

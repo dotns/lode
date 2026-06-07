@@ -202,9 +202,10 @@ lode.manifest.v1
 ### Trusted public keys / strength
 
 - `LODE_TRUSTED_KEYS` = comma-separated `key_id:base64(32-byte raw ed25519 public key)`; or `LODE_TRUSTED_KEYS_FILE` (each line `key_id base64`). Multiple keys are supported (rotation). `key_id` = the first 16 hex digits of `sha256(32-byte public key)`.
-- `LODE_REQUIRE_SIGNATURE` = `off` (sha256 only) | `auto` (default) | `enforce` (recommended for production).
-  - **`auto` is fail-closed once any trusted key is configured**: both the manifest signature and the artifact signature are then required — a missing *or* invalid signature is rejected. Only when **no** trusted key is configured does `auto` skip the signature check and log the source as **UNVERIFIED**.
-  - **`enforce`** always requires trusted keys plus a valid manifest signature and a valid artifact signature.
+- `LODE_REQUIRE_SIGNATURE` = `off` (sha256 only) | `auto` (default) | `enforce` (recommended for production). **It gates the per-artifact signature only.** The catalog (manifest-level) signature is *verify-if-present* — verified when a catalog carries one, never required, and so independent of this setting (see *Catalog signature* below).
+  - **`auto` is fail-closed once any trusted key is configured**: the *artifact* signature is then required — a missing *or* invalid signature is rejected. Only when **no** trusted key is configured does `auto` skip the artifact check and log the source as **UNVERIFIED**.
+  - **`enforce`** always requires trusted keys plus a valid *artifact* signature.
+  - **Catalog signature (verify-if-present).** A manifest's optional top-level `sig` is verified when present (a present-but-invalid one is rejected) but is **never required** — an unsigned catalog installs fine under `enforce`. Rollback of the channel `latest` pointer is instead caught client-side by the **downgrade floor**: following `latest` never resolves a version older than `max(current, last_good)`; an explicit `--version`/`pin`/`rollback` is a deliberate choice and is exempt.
 
 ### CLI (publisher)
 
@@ -414,7 +415,7 @@ headers = [
 
 The remote manifest is provided by the publisher, in **JSON format** (UTF-8), fetched by lode from `[update].manifest`, and **not stored locally**. **For a complete maximal example, see [`docs/manifest.example.json`](./manifest.example.json)**. Structural contract:
 
-- Top level: `schema` (required, `"lode/v1"`), `name` (required, must match `app` in `lode.toml`), `key_id` (optional, the default signing public-key id), `sig` (optional, the ed25519 catalog signature, §6).
+- Top level: `schema` (required, `"lode/v1"`), `name` (required, must match `app` in `lode.toml`), `key_id` (optional, the default signing public-key id), `sig` (optional, the ed25519 catalog signature, §6 — *verify-if-present*: checked when present, never required).
 - `channels` (required): an object, keyed by channel name, with values containing `latest` (a version id). **Multiple channels are allowed**, and lode follows one per `channel`.
 - `versions` (required): an object, keyed by version id (referenced by a channel's `latest`), with values containing `notes` (optional) + an `assets` array (≥1).
 - Each asset is keyed by its **filename** (`name`); the operator selects one via `[update].asset`:

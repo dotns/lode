@@ -9,6 +9,7 @@
 | 项目概览 / 快速上手 | [`../README.md`](../README.md) | [`../README.zh-CN.md`](../README.zh-CN.md) |
 | 集成 —— 配置 → 运行 → 发布 | [`integration.md`](integration.md) | [`integration.zh-CN.md`](integration.zh-CN.md) |
 | 架构文档(权威规范) | [`architecture.md`](architecture.md) | [`architecture.zh-CN.md`](architecture.zh-CN.md) |
+| 离线本地测试(`lode-cli seed`) | [`dev-local-testing.md`](dev-local-testing.md) | [`dev-local-testing.zh-CN.md`](dev-local-testing.zh-CN.md) |
 
 参考(语言中立):
 
