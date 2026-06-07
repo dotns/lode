@@ -859,6 +859,10 @@ struct Supervisor<'c> {
     instance_seq: u64,
     /// The current child's `LODE_INSTANCE` value (for the readiness handshake).
     instance: String,
+    /// Per-process random key mixed into `LODE_INSTANCE`, so a stale `state.ready`
+    /// from a previous lode — even one that reused this OS pid — can never satisfy
+    /// a fresh spawn's readiness handshake.
+    boot: String,
     /// Update lifecycle: normal supervision vs. observing an applied target.
     phase: Phase,
     /// When `state.json`'s mtime was last polled (`None` => never).
@@ -899,6 +903,7 @@ impl<'c> Supervisor<'c> {
             restart_at: None,
             instance_seq: 0,
             instance: String::new(),
+            boot: random_boot_key(),
             phase: Phase::Run,
             last_state_poll: None,
             last_state_mtime: None,
@@ -998,7 +1003,7 @@ impl<'c> Supervisor<'c> {
     /// writes the phase-appropriate status afterwards.
     fn spawn_child(&mut self) -> Result<Pid> {
         self.instance_seq = self.instance_seq.saturating_add(1);
-        let instance = format!("{}-{}", std::process::id(), self.instance_seq);
+        let instance = format!("{}-{}-{}", std::process::id(), self.boot, self.instance_seq);
         let entry = self.target.entry.to_string_lossy();
         let dir = self.target.dir.to_string_lossy();
         let argv = build_run_argv(&self.cfg.command.run, &entry, &dir)?;
@@ -1728,7 +1733,35 @@ fn startup_cleanup(cfg: &Config) -> Result<()> {
             terminate_external(pid, Duration::from_secs(cfg.supervise.stop_timeout));
         }
     }
+    clear_stale_ready(&state_path)?;
     install::gc(cfg)
+}
+
+/// Drop a stale `state.ready` left by a previous lode run so it can never be
+/// mistaken for this run's first spawn — defence-in-depth alongside the
+/// per-process random `LODE_INSTANCE` key ([`random_boot_key`]). All other state
+/// fields (`current` / `last_good` / …) are preserved.
+fn clear_stale_ready(state_path: &Path) -> Result<()> {
+    if let Some(mut st) = state::read(state_path)?
+        && st.ready.is_some()
+    {
+        st.ready = None;
+        state::write(state_path, &st)?;
+    }
+    Ok(())
+}
+
+/// A per-process random key (8 lowercase hex chars) mixed into `LODE_INSTANCE`.
+/// With the monotonic per-spawn `seq` it makes the readiness-handshake id unique
+/// across lode restarts too — even if the OS reuses this pid — so a stale
+/// `state.ready` can never false-match a fresh spawn. Degrades to a fixed key
+/// (pid + seq still disambiguate) only if the OS RNG is unavailable.
+fn random_boot_key() -> String {
+    let mut bytes = [0u8; 4];
+    if getrandom::getrandom(&mut bytes).is_err() {
+        return "00000000".to_owned();
+    }
+    format!("{:08x}", u32::from_le_bytes(bytes))
 }
 
 #[cfg(test)]
@@ -2124,6 +2157,49 @@ mod tests {
             Duration::from_secs(99),
             grace
         ));
+    }
+
+    #[test]
+    fn random_boot_key_is_8_lowercase_hex() {
+        let k = random_boot_key();
+        assert_eq!(k.len(), 8, "boot key should be 8 hex chars: {k:?}");
+        assert!(
+            k.bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "boot key must be lowercase hex: {k:?}"
+        );
+    }
+
+    #[test]
+    fn clear_stale_ready_drops_ready_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("lode-clearready-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+
+        // A prior run left `current` plus a now-stale readiness handshake.
+        let st = State {
+            current: Some("0.0.1".to_owned()),
+            ready: Some("12345-deadbeef-2".to_owned()),
+            ..State::default()
+        };
+        state::write(&path, &st).unwrap();
+
+        clear_stale_ready(&path).unwrap();
+
+        let back = state::read(&path).unwrap().unwrap();
+        assert_eq!(back.ready, None, "stale ready must be cleared");
+        assert_eq!(
+            back.current.as_deref(),
+            Some("0.0.1"),
+            "other fields must be preserved"
+        );
+
+        // Idempotent: a second pass on already-clear state succeeds as a no-op.
+        clear_stale_ready(&path).unwrap();
+        assert_eq!(state::read(&path).unwrap().unwrap().ready, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // --- C3: restart-policy exit decision ---
