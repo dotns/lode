@@ -81,6 +81,78 @@ pub(crate) fn install(
     Ok(())
 }
 
+/// Dev/testing: install a version from a **local** file, skipping the network, the
+/// sha256 integrity check and the signature check (the caller supplies trusted
+/// bytes). The staging + atomic activation are identical to a real [`install`], so
+/// the resulting `versions/<version>` is indistinguishable from a downloaded one —
+/// it just never consulted a manifest. `source`'s filename selects the packaging
+/// format (§3); `entry` overrides the launch/in-archive entry (otherwise the normal
+/// resolution applies). With `activate`, also flips `current` and records
+/// `current`/`last_good` in `state.json`. Backs `lode-cli seed`.
+pub(crate) fn seed_local(
+    cfg: &Config,
+    version: &str,
+    source: &Path,
+    entry: Option<&str>,
+    activate: bool,
+) -> Result<()> {
+    validate_id("version", version)?;
+    if let Some(entry) = entry {
+        validate_entry(entry)?;
+    }
+    if !source.is_file() {
+        return Err(Error::Install(format!(
+            "seed source {} is not a file",
+            source.display()
+        )));
+    }
+    // Synthetic asset: its filename drives the packaging format; `url` carries the
+    // source path so the raw/gz entry fallback (url basename) resolves; `sha256`/`sig`
+    // are unused on this path (no integrity/identity check).
+    let name = source.file_name().and_then(OsStr::to_str).ok_or_else(|| {
+        Error::Install(format!("seed source {} has no filename", source.display()))
+    })?;
+    let asset = Asset {
+        name: name.to_owned(),
+        url: source.to_string_lossy().into_owned(),
+        sha256: String::new(),
+        sig: None,
+        key_id: None,
+        entry: entry.map(ToOwned::to_owned),
+        size: None,
+        auth: false,
+    };
+
+    let versions_dir = cfg.global.data_dir.join("versions");
+    fs::create_dir_all(&versions_dir)?;
+    let staging = versions_dir.join(format!("{version}.tmp"));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)?;
+    if let Err(e) = stage(cfg, &asset, source, &staging, version) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    let final_dir = versions_dir.join(version);
+    if final_dir.exists() {
+        fs::remove_dir_all(&final_dir)
+            .map_err(|e| Error::Install(format!("replace versions/{version}: {e}")))?;
+    }
+    fs::rename(&staging, &final_dir)
+        .map_err(|e| Error::Install(format!("finalize versions/{version}: {e}")))?;
+
+    if activate {
+        switch_current(cfg, version)?;
+        let path = cfg.global.data_dir.join("state.json");
+        let mut st = crate::state::read(&path)?.unwrap_or_default();
+        st.current = Some(version.to_owned());
+        if st.last_good.is_none() {
+            st.last_good = Some(version.to_owned());
+        }
+        crate::state::write(&path, &st)?;
+    }
+    Ok(())
+}
+
 /// Extract the asset into `staging`, make the entry executable and write the
 /// marker. The packaging `format` is derived from the asset filename (§3). Kept
 /// separate so [`install`] can clean up `staging` on any error.
@@ -362,53 +434,42 @@ fn check_sig(version: &str, asset: &Asset, sha: &str, sig: &str, keys: &[String]
         .map_err(|e| Error::Verify(e.to_string()))
 }
 
-/// Manifest identity: the top-level ed25519 signature over the canonical
-/// manifest message ([`Manifest::signing_message`]), enforced per
-/// `trust.require_signature` and mirroring [`verify_identity`]'s posture:
-/// - `off` => skip (the per-artifact checks still bind each download).
-/// - `auto` => **fail-closed when ANY trusted key is configured**: a missing OR
-///   invalid manifest signature is rejected; skip with an UNVERIFIED warning only
-///   when no key is configured.
-/// - `enforce` => trusted keys AND a valid manifest signature are mandatory.
+/// Manifest identity (catalog signature) — **verify-if-present, never required**.
 ///
-/// Call this immediately after [`crate::manifest::fetch`], before resolving a
-/// target or downloading, so a tampered catalog (swapped `latest`, added/removed
-/// versions, rewritten urls) is rejected up front.
+/// The top-level ed25519 signature over [`Manifest::signing_message`] is an
+/// *optional* tamper-evidence layer: when a catalog carries one, a swapped `latest`,
+/// added/removed versions or rewritten urls are caught up front. It is deliberately
+/// **not** gated by `require_signature` — a catalog with no `sig` is accepted under
+/// every policy, because the real defences live elsewhere and are source-agnostic:
+/// each downloaded file is bound by the policy-gated per-artifact [`verify_identity`]
+/// check, and the channel-`latest` pointer is protected against rollback by the
+/// client-side downgrade floor ([`crate::manifest::resolve_target`]). This lets a
+/// GitHub release (tag authority, no catalog signature) and a native catalog that
+/// signs only its artifacts both work under `enforce`.
+///
+/// Behaviour:
+/// - `require_signature = off` => skip (all signature checks disabled).
+/// - no `sig` present => skip (catalog signing is optional).
+/// - `sig` present, trusted keys configured => verify; a bad signature is rejected.
+/// - `sig` present, no trusted keys => cannot verify; warn and accept.
+///
+/// Call this right after [`crate::manifest::fetch`], before resolving/downloading.
 pub(crate) fn verify_manifest_identity(cfg: &Config, manifest: &Manifest) -> Result<()> {
-    let keys = trusted_keys(cfg)?;
-    match cfg.trust.require_signature {
-        RequireSignature::Off => Ok(()),
-        RequireSignature::Auto => {
-            if keys.is_empty() {
-                tracing::warn!(
-                    manifest = manifest.name,
-                    "no trusted keys configured; manifest is UNVERIFIED (require_signature=auto)"
-                );
-                return Ok(());
-            }
-            let sig = manifest.sig.as_deref().ok_or_else(|| {
-                Error::Verify(
-                    "trusted keys are configured but the manifest has no signature \
-                     (require_signature=auto is fail-closed)"
-                        .to_owned(),
-                )
-            })?;
-            check_manifest_sig(manifest, sig, &keys)
-        }
-        RequireSignature::Enforce => {
-            if keys.is_empty() {
-                return Err(Error::Verify(
-                    "require_signature=enforce but no trusted keys are configured".to_owned(),
-                ));
-            }
-            let sig = manifest.sig.as_deref().ok_or_else(|| {
-                Error::Verify(
-                    "require_signature=enforce but the manifest has no signature".to_owned(),
-                )
-            })?;
-            check_manifest_sig(manifest, sig, &keys)
-        }
+    if cfg.trust.require_signature == RequireSignature::Off {
+        return Ok(());
     }
+    let Some(sig) = manifest.sig.as_deref() else {
+        return Ok(());
+    };
+    let keys = trusted_keys(cfg)?;
+    if keys.is_empty() {
+        tracing::warn!(
+            manifest = manifest.name,
+            "manifest carries a signature but no trusted keys are configured to verify it"
+        );
+        return Ok(());
+    }
+    check_manifest_sig(manifest, sig, &keys)
 }
 
 /// Bridge to [`crate::verify::verify_manifest_sig`] over the manifest's canonical message,
@@ -420,30 +481,28 @@ fn check_manifest_sig(manifest: &Manifest, sig: &str, keys: &[String]) -> Result
         .map_err(|e| Error::Verify(e.to_string()))
 }
 
-/// A one-line, secret-free summary of the manifest's effective trust posture for
-/// `status` to surface prominently. Mirrors [`verify_manifest_identity`] but
-/// reports rather than enforces, so the operator sees VERIFIED / UNVERIFIED /
-/// VERIFICATION FAILED consistent with `require_signature`.
+/// A one-line, secret-free summary of the catalog's effective trust posture for
+/// `status` to surface. The catalog signature is verify-if-present (never required,
+/// see [`verify_manifest_identity`]), so an *unsigned* catalog is a normal,
+/// non-failure state — per-artifact signatures (gated by `require_signature`) still
+/// bind every download, and the downgrade floor still guards `latest`.
 pub(crate) fn manifest_trust_posture(cfg: &Config, manifest: &Manifest) -> String {
+    if cfg.trust.require_signature == RequireSignature::Off {
+        return "off (integrity only; signature checks disabled)".to_owned();
+    }
     let keys = match trusted_keys(cfg) {
         Ok(keys) => keys,
         Err(e) => return format!("VERIFICATION FAILED: {e}"),
     };
-    match cfg.trust.require_signature {
-        RequireSignature::Off => "off (integrity only; signature checks disabled)".to_owned(),
-        RequireSignature::Auto if keys.is_empty() => {
-            "UNVERIFIED (no trusted keys configured)".to_owned()
+    match manifest.sig.as_deref() {
+        None => "unsigned catalog (per-artifact signatures enforced per policy)".to_owned(),
+        Some(_) if keys.is_empty() => {
+            "catalog signed but UNVERIFIED (no trusted keys configured)".to_owned()
         }
-        RequireSignature::Enforce if keys.is_empty() => {
-            "VERIFICATION FAILED: require_signature=enforce but no trusted keys configured"
-                .to_owned()
-        }
-        RequireSignature::Auto | RequireSignature::Enforce => {
-            match verify_manifest_identity(cfg, manifest) {
-                Ok(()) => "VERIFIED (manifest signature valid)".to_owned(),
-                Err(e) => format!("VERIFICATION FAILED: {e}"),
-            }
-        }
+        Some(_) => match verify_manifest_identity(cfg, manifest) {
+            Ok(()) => "VERIFIED (catalog signature valid)".to_owned(),
+            Err(e) => format!("VERIFICATION FAILED: {e}"),
+        },
     }
 }
 
@@ -866,6 +925,20 @@ fn cmp_desc(a: &str, b: &str) -> Ordering {
         (Err(_), Ok(_)) => Ordering::Greater,
         (Err(_), Err(_)) => b.cmp(a),
     }
+}
+
+/// The anti-downgrade floor: the highest version this client has committed to — the
+/// semver-max of `current` and `last_good` from `state.json`. Passed to
+/// [`crate::manifest::resolve_target`], which refuses to *follow `latest`* onto
+/// anything below it (rollback protection). `None` when neither is set (a clean
+/// first install has no floor, so bootstrap is never blocked). Reuses [`cmp_desc`]
+/// (semver-descending), so a non-semver id sorts after any semver one and the
+/// downstream guard — which only compares when both parse as semver — treats a
+/// non-semver floor as "no provable downgrade".
+pub(crate) fn version_floor(current: Option<&str>, last_good: Option<&str>) -> Option<String> {
+    let mut candidates: Vec<&str> = [current, last_good].into_iter().flatten().collect();
+    candidates.sort_by(|a, b| cmp_desc(a, b));
+    candidates.first().map(|s| (*s).to_owned())
 }
 
 #[cfg(test)]
@@ -1337,7 +1410,6 @@ mod tests {
             sig: None,
             channels,
             versions,
-            block_unsigned_latest: false,
         }
     }
 
@@ -1351,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_manifest_identity_happy_tampered_and_fail_closed() {
+    fn verify_manifest_identity_verifies_if_present_never_requires() {
         let dir = scratch("manifestsig");
         let signing = SigningKey::from_bytes(&[20u8; 32]);
         let id = crate::verify::key_id(&signing.verifying_key().to_bytes());
@@ -1364,13 +1436,13 @@ mod tests {
         let enforce = cfg_for(dir.clone(), RequireSignature::Enforce, trusted.clone());
         let auto = cfg_for(dir.clone(), RequireSignature::Auto, trusted.clone());
 
-        // Valid signature → ok under both enforce and auto.
+        // A *present* valid signature is verified → ok under both enforce and auto.
         assert!(verify_manifest_identity(&enforce, &m).is_ok());
         assert!(verify_manifest_identity(&auto, &m).is_ok());
         // …and the status posture reports VERIFIED.
         assert!(manifest_trust_posture(&enforce, &m).starts_with("VERIFIED"));
 
-        // Tampered catalog (channel latest swapped) → the signature no longer matches.
+        // A present-but-invalid signature (tampered catalog) → rejected (tamper-evidence).
         let mut tampered = m.clone();
         tampered.channels.insert(
             "stable".to_owned(),
@@ -1381,22 +1453,28 @@ mod tests {
         assert!(verify_manifest_identity(&enforce, &tampered).is_err());
         assert!(manifest_trust_posture(&enforce, &tampered).starts_with("VERIFICATION FAILED"));
 
-        // auto + keys + MISSING manifest sig → fail-closed (reject).
+        // A MISSING catalog signature is NEVER required — accepted under every policy
+        // (the per-artifact check, gated by require_signature, still binds downloads).
         let mut unsigned = m.clone();
         unsigned.sig = None;
-        assert!(verify_manifest_identity(&auto, &unsigned).is_err());
-        assert!(verify_manifest_identity(&enforce, &unsigned).is_err());
+        assert!(verify_manifest_identity(&auto, &unsigned).is_ok());
+        assert!(verify_manifest_identity(&enforce, &unsigned).is_ok());
+        // …and its posture is the benign "unsigned catalog" state, not a failure.
+        assert!(manifest_trust_posture(&enforce, &unsigned).starts_with("unsigned catalog"));
 
-        // off → skip even without a signature.
+        // off → skip even a present signature (all signature checks disabled).
         let off = cfg_for(dir.clone(), RequireSignature::Off, trusted);
-        assert!(verify_manifest_identity(&off, &unsigned).is_ok());
+        assert!(verify_manifest_identity(&off, &tampered).is_ok());
 
-        // auto + NO keys → skip (UNVERIFIED), even without a signature.
+        // Present sig but NO trusted keys → cannot verify → accept (warn); posture
+        // reports the catalog is signed but UNVERIFIED.
         let nokeys = cfg_for(dir.clone(), RequireSignature::Auto, Vec::new());
-        assert!(verify_manifest_identity(&nokeys, &unsigned).is_ok());
-        assert!(manifest_trust_posture(&nokeys, &unsigned).starts_with("UNVERIFIED"));
+        assert!(verify_manifest_identity(&nokeys, &m).is_ok());
+        assert!(manifest_trust_posture(&nokeys, &m).contains("UNVERIFIED"));
+        // An unsigned catalog with no keys is still just "unsigned catalog".
+        assert!(manifest_trust_posture(&nokeys, &unsigned).starts_with("unsigned catalog"));
 
-        // A trusted key that did not sign this manifest → reject.
+        // A present sig under a trusted key that did not sign this manifest → reject.
         let other_pub = B64.encode(
             SigningKey::from_bytes(&[99u8; 32])
                 .verifying_key()
@@ -1409,6 +1487,82 @@ mod tests {
         );
         assert!(verify_manifest_identity(&wrong, &m).is_err());
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn version_floor_picks_highest_committed() {
+        // The floor is the semver-max of current + last_good.
+        assert_eq!(
+            version_floor(Some("1.4.0"), Some("1.5.0")).as_deref(),
+            Some("1.5.0")
+        );
+        assert_eq!(
+            version_floor(Some("1.6.0"), Some("1.5.0")).as_deref(),
+            Some("1.6.0")
+        );
+        // Either side alone, or neither.
+        assert_eq!(version_floor(Some("2.0.0"), None).as_deref(), Some("2.0.0"));
+        assert_eq!(version_floor(None, Some("0.1.0")).as_deref(), Some("0.1.0"));
+        assert_eq!(version_floor(None, None), None);
+    }
+
+    #[test]
+    fn seed_local_installs_and_activates_without_verify() {
+        let dir = scratch("seed");
+        // enforce + NO keys: a normal install would refuse, but seed skips verify —
+        // proving the local path bypasses the integrity/identity checks by design.
+        let cfg = cfg_for(dir.clone(), RequireSignature::Enforce, Vec::new());
+        let src = dir.join("myapp.bin"); // ".bin" → raw format
+        let body = b"#!/bin/sh\necho hi\n";
+        fs::write(&src, body).unwrap();
+
+        seed_local(&cfg, "1.0.0", &src, Some("app"), true).unwrap();
+
+        // Installed: entry placed + executable, marker written.
+        let entry = dir.join("versions/1.0.0/app");
+        assert_eq!(fs::read(&entry).unwrap(), body);
+        #[cfg(unix)]
+        assert!(is_executable(&entry));
+        let marker = read_marker(&dir, "1.0.0");
+        assert_eq!(marker.entry, "app");
+        assert_eq!(marker.format, "raw");
+
+        // Activated: relative `current` symlink + state.json current/last_good.
+        #[cfg(unix)]
+        assert_eq!(
+            fs::read_link(dir.join("current")).unwrap(),
+            Path::new("versions/1.0.0")
+        );
+        let st: crate::state::State =
+            serde_json::from_slice(&fs::read(dir.join("state.json")).unwrap()).unwrap();
+        assert_eq!(st.current.as_deref(), Some("1.0.0"));
+        assert_eq!(st.last_good.as_deref(), Some("1.0.0"));
+
+        // The source file is left intact (copied, not consumed).
+        assert!(src.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn seed_local_without_activate_leaves_current_unset() {
+        let dir = scratch("seednoact");
+        let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        let src = dir.join("app.bin");
+        fs::write(&src, b"binary").unwrap();
+
+        // entry=None → derives from the source basename (url fallback).
+        seed_local(&cfg, "2.0.0", &src, None, false).unwrap();
+
+        assert!(dir.join("versions/2.0.0/app.bin").is_file());
+        assert!(
+            !dir.join("current").exists(),
+            "no activation → no current symlink"
+        );
+        assert!(
+            !dir.join("state.json").exists(),
+            "no activation → no state write"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -177,11 +177,12 @@ jobs:
 ```bash
 lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
     --key private.key --into manifest.json   # 按 name upsert 资产,设 channels.latest
-lode-cli manifest-sign --into manifest.json --key private.key   # 对目录签名
+lode-cli manifest-sign --into manifest.json --key private.key   # 可选:对目录做防篡改证据
 ```
 
 manifest 形状 + 逐资产字段表见 [source-adapters.zh-CN.md §6](source-adapters.zh-CN.md)。
-`channels.<c>.latest` 必须被签(`manifest-sign`)或由运维 `pin` 死版本。
+`manifest-sign` **可选**(present 才验的防篡改证据);`channels.<c>.latest` 的回滚由客户端
+禁降级 floor 拦截,`pin` 则彻底不再信任指针。
 
 ### 签名模型(两源通用)
 

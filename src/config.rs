@@ -321,6 +321,40 @@ pub(crate) fn resolve(cli: &Globals) -> Result<Config> {
     Ok(cfg)
 }
 
+/// Write a minimal **sourceless** `lode.toml` (no update source, `policy=off`) at
+/// `$DATA_DIR/lode.toml` when one is absent, so a `seed`-prepared data dir runs
+/// offline with bare `lode`. Never clobbers an existing config. Used by
+/// `lode-cli seed` before it resolves, so seeding "just works" on a fresh dir
+/// without tripping the source-requiring starter scaffold.
+pub(crate) fn ensure_sourceless_toml(cli: &Globals) -> Result<()> {
+    let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
+    let path = Path::new(data_dir).join("lode.toml");
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| Error::Config(format!("create {}: {e}", dir.display())))?;
+    }
+    let app = cli.app.as_deref().unwrap_or(DEFAULT_APP);
+    let body = format!(
+        "# Sourceless config for OFFLINE local testing (written by `lode-cli seed`).\n\
+         # No [update].manifest/github => lode never downloads; it runs whatever is\n\
+         # seeded under versions/. policy=off disables the background update check.\n\
+         [global]\n\
+         app = \"{app}\"\n\n\
+         [update]\n\
+         policy = \"off\"\n\n\
+         [command]\n\
+         run  = \"{{entry}}\"\n\
+         exec = \"{{entry}}\"\n"
+    );
+    std::fs::write(&path, body)
+        .map_err(|e| Error::Config(format!("write {}: {e}", path.display())))?;
+    tracing::info!(path = %path.display(), "seed: wrote sourceless lode.toml");
+    Ok(())
+}
+
 /// Locate and parse `lode.toml`. An explicit `--config`/`LODE_CONFIG` must exist;
 /// otherwise the default search (`$DATA_DIR/lode.toml`, then `./lode.toml`) is
 /// best-effort and a missing file yields the all-defaults config (design §15).

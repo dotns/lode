@@ -46,6 +46,24 @@ test("rejects a sha256-mismatched update artifact (enforce); stays on v0.0.1", a
   expect(lode.exited).toBe(false);
 });
 
+test("installs under enforce when the catalog is unsigned but the artifact is signed", async () => {
+  // The catalog signature is verify-if-present, never required: a manifest with no
+  // top-level `sig` (e.g. a GitHub release, or a publisher who signs only artifacts)
+  // must still bootstrap+run under enforce, because the per-artifact signature — which
+  // IS policy-gated — binds the download, and the downgrade floor guards `latest`.
+  h = await Harness.start({ signCatalog: false });
+  await h.publish("0.0.1", { mode: "service", latest: true });
+
+  const lode = h.runLode([...h.trustArgs("enforce"), "--policy", "off", "--readiness", "none"]);
+  await lode.waitForState((s) => s.status === "running" && s.current === "0.0.1", {
+    timeout: 20000,
+    label: "running v0.0.1 (unsigned catalog, signed artifact, enforce)",
+  });
+  await lode.waitForStdout(/\[app\] starting version=0\.0\.1/, { label: "v0.0.1 running" });
+  expect(lode.readState()?.current).toBe("0.0.1");
+  expect(lode.exited).toBe(false);
+});
+
 test("rejects an unsigned update artifact under enforce; stays on v0.0.1", async () => {
   h = await Harness.start();
   const lode = await bootstrapV1();

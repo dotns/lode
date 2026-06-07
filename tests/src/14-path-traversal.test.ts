@@ -97,10 +97,9 @@ test("lode-cli update refuses a traversal version; current + data dir untouched"
   expect(readdirSync(join(h.dataDir, "versions"))).toEqual(["0.0.1"]);
 
   // Point lode (same data dir) at a manifest whose channel latest is a traversal
-  // id, then resolve that id via an explicit `update --version`. The channel-latest
-  // path is separately gated by the §2 unsigned-downgrade guard (block_unsigned_latest),
-  // which would preempt the traversal check on this unsigned manifest; an explicit
-  // version bypasses that guard and exercises the path-traversal validator directly.
+  // id, then resolve that id via an explicit `update --version` — the most direct
+  // exercise of the path-traversal validator (resolve_target validates every id it
+  // returns, whether followed from `latest` or named explicitly).
   const { version, leak } = escapeId();
   const mal = startMaliciousServer(h.server.name, version);
   cleanups.push(() => mal.stop());
@@ -161,9 +160,9 @@ test("bare-lode bootstrap refuses a traversal channel-latest (no leak)", async (
       "off",
       "--readiness",
       "none",
-      // Disable the §2 unsigned-downgrade guard (separately unit-tested) so following
-      // the channel `latest` reaches the path-traversal validator instead of being
-      // preempted by block_unsigned_latest on this unsigned manifest.
+      // An unsigned catalog is fine (catalog signature is verify-if-present), so
+      // bootstrap follows the channel `latest` straight into the path-traversal
+      // validator. `off` keeps this invocation free of any key wiring.
       "--require-signature",
       "off",
     ],

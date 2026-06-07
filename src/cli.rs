@@ -244,6 +244,24 @@ pub(crate) enum ToolCommand {
     Restart,
     /// List locally installed versions.
     Versions,
+    /// Dev/testing: install a LOCAL executable (or archive) as a version — no
+    /// manifest, no download, no signature check — and activate it, so bare `lode`
+    /// runs it fully offline. Scaffolds a sourceless `lode.toml` if the data dir has
+    /// none. NOT for production installs (those go through `update`, which verifies).
+    Seed {
+        /// The local executable (or `.tar.gz`/`.zip`/`.gz`) to install as a version.
+        app_bin: String,
+        /// Version id to install as (keys `versions/<id>`; use semver so rollback /
+        /// the downgrade floor order correctly).
+        #[arg(long = "version", default_value = "0.0.0-dev")]
+        version: String,
+        /// Entry filename inside the version dir (default: derived from the file).
+        #[arg(long)]
+        entry: Option<String>,
+        /// Install into `versions/` but do not flip `current` / write `state.json`.
+        #[arg(long)]
+        no_activate: bool,
+    },
 
     /// Generate an ed25519 publisher keypair.
     Keygen {

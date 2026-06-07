@@ -45,10 +45,21 @@ lode.artifact.v1
 `platform`/`format`/`entry`/`url` —— 它们由文件名推导或属操作者本地(见下)。因为 `name`
 是文件名且被签,被篡改的目录无法把一份真签名挪到别的字节、别的资产或别的版本上。
 
-## 2. 目录级(manifest)签名
+## 2. 目录级(manifest)签名 —— 可选,present 才验
 
-native 清单可携带顶层 `key_id` + `sig`,对目录签名,在任何下载之前就防住对
-channel→version 指针与资产集合的篡改。规范消息:
+native 清单**可**携带顶层 `key_id` + `sig`。它是一层**可选**的防篡改证据,**永不强制**,
+也**不**受 `require_signature` 门控:
+
+- **存在** → 加载器验证它(在任何下载之前就抓出被换的 `latest`、增删的版本、被改写的
+  资产摘要);存在但无效 → 拒绝。
+- **缺失** → 任何 policy 下(含 `enforce`)都接受。
+
+真正强制信任的因此**不是**目录签名,而是两层始终生效、与源无关的机制:**per-artifact**
+签名(§1,由 `require_signature` 门控,绑定每个下载文件),以及**客户端禁降级 floor**
+(§2a,保护 channel `latest` 指针不被回滚)。这正是为什么 GitHub release(无目录签名,§5)
+与"只签资产的 native 目录"在 `enforce` 下都能正常工作。
+
+规范消息(当目录**确实**被签时):
 
 ```
 lode.manifest.v1
@@ -59,6 +70,17 @@ lode.manifest.v1
 
 `canonical` 按排序列出每个 `channel\t{name}\t{latest}`,以及每版每资产的
 `asset\t{name}\t{sha256}`。GitHub 没有目录签名 —— 它的新鲜度来自 tag 权威(§5)。
+
+### 2a. 客户端禁降级 floor(`latest` 回滚保护)
+
+由于目录签名是可选的,channel `latest` 指针的防御放在客户端而非目录里:当**跟随**
+`latest` 时(默认,或显式 `update --version latest`),加载器拒绝解析**低于 floor**的
+版本 —— floor 是客户端已经承诺过的最高版本(`state.json` 里 `max(current, last_good)`)。
+被篡改**或重放**的目录把 `latest` 指回更老的(哪怕是合法签名过的)版本,会在任何下载前被拒。
+
+只有**跟随指针**的解析受此守卫。刻意降级始终允许:显式 `update --version X`、配置
+`[update].pin`、或 `lode rollback`。比较按 semver 优先级;非 semver 的 `latest`/floor
+无法排序,证明不了降级,故放行。
 
 ## 3. 资产命名与 format
 
@@ -211,8 +233,8 @@ asset    = "myapp-linux-x64.tar.gz"
 | `size` | | 期望字节数(额外完整性校验) |
 | `auth` | | 默认 `true`;`false` = 不给该 URL 附 `[http].headers` |
 
-- **版本指针。** `channels.<c>.latest` 必须**被签**(§2 目录签名)**或**操作者 `pin` 死
-  版本 —— 否则可能被降级。
+- **版本指针。** `channels.<c>.latest` 的回滚由客户端禁降级 floor(§2a)在本地拦住 ——
+  不需要目录签名来保护它。签目录(§2)仍推荐作为下载前的防篡改证据;`pin` 则彻底不再信任指针。
 - native 可比 GitHub 多(`channels`、`notes`、detached `.sig`、`size`、
   `auth`);但全部仍在底层归约成 `(name, version, sha256) + sig`。
 
@@ -221,7 +243,7 @@ asset    = "myapp-linux-x64.tar.gz"
 ```bash
 lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
     --key private.key --into manifest.json     # 按 name upsert 资产,设 channels.latest
-lode-cli manifest-sign --into manifest.json --key private.key   # §2 目录签名
+lode-cli manifest-sign --into manifest.json --key private.key   # 可选 §2 目录防篡改证据
 ```
 
 把 `manifest.json` + 资产托管在任意 HTTPS URL。
@@ -238,7 +260,10 @@ policy   = "auto"                 # off | check | auto
 # entry  = "bin/myapp"            # 覆盖归档内 entry(§4);通常省略
 
 [trust]
-require_signature = "enforce"     # off | auto | enforce
+require_signature = "enforce"     # off | auto | enforce —— 门控 PER-ARTIFACT 签名
+                                  #   (§1)。off:仅完整性。auto:配了受信密钥后必需。
+                                  #   enforce:始终必需。目录签名(§2)是 present 才验,
+                                  #   不受此门控。
 trusted_keys = ["<key_id>:<base64-公钥>"]
 ```
 

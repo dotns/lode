@@ -202,9 +202,10 @@ lode.manifest.v1
 ### 受信公钥 / 强度
 
 - `LODE_TRUSTED_KEYS` = 逗号分隔 `key_id:base64(32字节原始 ed25519 公钥)`;或 `LODE_TRUSTED_KEYS_FILE`(每行 `key_id base64`)。支持多把(轮换)。`key_id` = `sha256(公钥32字节)` 的前 16 位十六进制。
-- `LODE_REQUIRE_SIGNATURE` = `off`(仅 sha256) | `auto`(默认) | `enforce`(生产推荐)。
-  - **`auto` 一旦配置了任一受信公钥即变为 fail-closed**:此时 manifest 签名与 artifact 签名都成为必需 —— 缺签名*或*验签失败都拒绝。仅当**未**配置任何受信公钥时,`auto` 才跳过验签,并把来源记为 **UNVERIFIED**。
-  - **`enforce`** 始终要求受信公钥,且 manifest 签名与 artifact 签名都必须有效。
+- `LODE_REQUIRE_SIGNATURE` = `off`(仅 sha256) | `auto`(默认) | `enforce`(生产推荐)。**它只门控 per-artifact 签名。** 目录(manifest 级)签名是 *present 才验* —— 目录携带时才验,永不强制,因此与此设置无关(见下方*目录签名*)。
+  - **`auto` 一旦配置了任一受信公钥即变为 fail-closed**:此时 *artifact* 签名成为必需 —— 缺签名*或*验签失败都拒绝。仅当**未**配置任何受信公钥时,`auto` 才跳过 artifact 验签,并把来源记为 **UNVERIFIED**。
+  - **`enforce`** 始终要求受信公钥,且 *artifact* 签名必须有效。
+  - **目录签名(present 才验)。** 清单可选的顶层 `sig` 在存在时被验证(present 但无效则拒绝),但**永不强制** —— 未签名的目录在 `enforce` 下也能正常安装。channel `latest` 指针的回滚改由客户端**禁降级 floor** 拦截:跟随 `latest` 永远不会解析出比 `max(current, last_good)` 更老的版本;显式 `--version`/`pin`/`rollback` 属刻意选择,豁免。
 
 ### CLI(发布者)
 
@@ -414,7 +415,7 @@ headers = [
 
 远程 manifest 由发布方提供,**格式为 JSON**(UTF-8),由 lode 从 `[update].manifest` 拉取,**不存本地**。**完整最大化示例见 [`docs/manifest.example.json`](./manifest.example.json)**。结构约定:
 
-- 顶层:`schema`(必填,`"lode/v1"`)、`name`(必填,须与 `lode.toml` 的 `app` 一致)、`key_id`(可选,默认签名公钥 id)、`sig`(可选,catalog 的 ed25519 签名,§6)。
+- 顶层:`schema`(必填,`"lode/v1"`)、`name`(必填,须与 `lode.toml` 的 `app` 一致)、`key_id`(可选,默认签名公钥 id)、`sig`(可选,catalog 的 ed25519 签名,§6 —— *present 才验*:存在时验证,永不强制)。
 - `channels`(必填):对象,键为通道名,值含 `latest`(版本 id)。**可多个通道**,lode 按 `channel` 跟随其一。
 - `versions`(必填):对象,键为版本 id(被通道 `latest` 引用),值含 `notes`(可选)+ `assets` 数组(≥1)。
 - 每个资产以**文件名**(`name`)为键;operator 用 `[update].asset` 选其一:

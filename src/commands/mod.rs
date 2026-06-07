@@ -3,6 +3,7 @@
 
 pub(crate) mod restart;
 pub(crate) mod rollback;
+pub(crate) mod seed;
 pub(crate) mod status;
 pub(crate) mod update;
 pub(crate) mod versions;
