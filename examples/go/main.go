@@ -54,7 +54,7 @@ func env(key, def string) string {
 func log(format string, a ...any) { fmt.Printf("[demo-go] "+format+"\n", a...) }
 
 func main() {
-	// `lode version` passthrough when the operator sets exec = "{entry}".
+	// `lode version` passthrough when the operator sets exec = "./demo-go-linux-x64".
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":

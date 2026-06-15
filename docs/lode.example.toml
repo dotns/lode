@@ -18,7 +18,6 @@ manifest = "https://releases.example.com/myapp/manifest.json"   # native: lode/v
 #   (github: the release's own assets are the catalog — no manifest.json asset needed)
 
 asset          = "myapp-linux-x86_64.tar.gz"   # the asset filename to install on THIS host (the selection key) ← edit this
-# entry        = "bin/myapp"                    # override the in-archive entry path (advisory; usually omit)
 channel        = "stable"  # native: channel key ; github: stable=/releases/latest, else newest prerelease
 policy         = "check"   # off | check | auto
 check_interval = 300       # seconds; 0 = check once at startup
@@ -26,11 +25,13 @@ keep_versions  = 3         # old versions kept for rollback (rest GC'd)
 # pin          = "1.4.2"   # force a version/tag (disables auto-update)
 
 # --- fetch: headers for a private source (${ENV} expanded; per-artifact auth=false to skip) ---
+# NOTE: each ${VAR} must be set in lode's environment at fetch time — an unset
+# var is a hard error. Uncomment only for a private source that needs auth.
 [http]
-headers = [
-  "Authorization: Bearer ${RELEASE_TOKEN}",
-  "X-Api-Key: ${API_KEY}",
-]
+# headers = [
+#   "Authorization: Bearer ${RELEASE_TOKEN}",
+#   "X-Api-Key: ${API_KEY}",
+# ]
 # Credentials (the headers above) are attached to an artifact download ONLY when its
 # host is same-origin with the source (the `manifest`/`github_api` host; for github,
 # also github.com + the release-asset hosts) — so a tampered manifest can't redirect
@@ -49,15 +50,26 @@ require_signature = "auto"   # off | auto | enforce
 trusted_keys = ["9787ab11e55b4cbc:nyQSShSI8fAtHZNiJWDemBbcaX6V9OvmXtovkITm4fc="]
 # trusted_keys_file = "/run/secrets/lode_keys"
 
-# --- run: how to launch.  run = bare `lode` (entry auto-appended); exec = `lode <args>` base ---
+# --- run: how to launch.  run = the LITERAL command for bare `lode`; exec = the base
+#     command for `lode <args>` passthrough. Both are whitespace-split and run with
+#     cwd = `workdir` (default: the running version dir), so relative paths like
+#     "./myapp" or "bun run app.js" resolve inside the installed version. `{dir}`
+#     expands to the running version dir; no other template exists.
+#     A manifest asset may publish its own `run`/`exec`, which OVERRIDE these —
+#     the override is bound into the asset signature, so it cannot be tampered.
+#     lode auto-chmod +x's the run/exec first token when it names a file in the
+#     version dir (e.g. run = "./myapp"). If neither this section nor the manifest
+#     supplies a command, launch fails with a clear "no run command" error.
 [command]
-run     = "bun run"   # bare `lode`   -> bun run <entry>
-exec    = "bun"       # `lode <args>` -> bun <args>   (so `lode run db:init` == `bun run db:init`)
+run     = "bun run app.js"   # bare `lode`   -> bun run app.js   (cwd = version dir)
+exec    = "bun"              # `lode <args>` -> bun <args>   (so `lode run db:init` == `bun run db:init`)
 # workdir = "{dir}"   # optional; omit for the version dir (default). Set an absolute path to run elsewhere (e.g. so the app finds its .env)
-# self-contained binary instead:  run = "{entry} serve"   exec = "{entry}"
+# self-contained binary instead:  run = "./myapp serve"   exec = "./myapp"
 
 # --- run: optional runtime; downloaded to $DATA_DIR/runtime if absent from PATH,
-#     then cached there and reused on later boots (a runtime on PATH wins over the cache) ---
+#     then cached there and reused on later boots (a runtime on PATH wins over the cache).
+#     NOTE: runtime downloads are TLS-protected but NOT hash- or signature-verified —
+#     pin `version` and serve from a host you control; see SECURITY.md ---
 [runtime]
 runtime  = "bun"
 download = "https://example.com/bun-linux-x64.zip"   # raw/.gz/.zip/.tar.gz; the binary is hoisted to runtime/<name> even from a nested archive
@@ -78,15 +90,17 @@ download = "https://example.com/bun-linux-x64.zip"   # raw/.gz/.zip/.tar.gz; the
 
 # --- manage: supervise the service (bare `lode` only) ---
 [supervise]
-restart             = "off"          # off (default) = mirror the child (lode exits with its code); on-failure | always = relaunch on crash/exit
-                                     # update / rollback / explicit restart relaunch regardless of this policy
+restart             = "on-failure"   # on-failure (default, keep-alive) = retry on failure then PAUSE (stay alive, never crash-loop the container); a clean exit(0) exits lode
+                                     # always = also retry a clean exit; off = mirror the child (lode exits with its code, for systemd-style supervision)
+                                     # update / rollback / explicit restart relaunch regardless of this policy; recover a paused app by editing lode.toml / bumping restart_nonce / setting a new target
 readiness           = "none"         # none = alive for health_grace ; state = wait for app to write state.ready
 ready_timeout       = 30             # (readiness=state) seconds to wait for ready before failing
+# prepare_timeout   = 60             # (readiness=state) max seconds to wait for the app's prepare ack before forcing the staged cut-over; 0 = no timeout (app-paced, default)
 health_grace        = 15             # (readiness=none) seconds a new version must survive; also the single-strike rollback window
 stop_timeout        = 10             # graceful-stop seconds before SIGKILL (set >= app cleanup, < container grace)
 restart_backoff     = 500            # ms, exponential base (only used when restart != off)
 restart_backoff_max = 30000          # ms cap (only used when restart != off)
-restart_max         = 0              # 0 = unlimited consecutive restarts (only used when restart != off)
+restart_max         = 3              # retries before lode pauses (keep-alive); 0 = retry forever (only used when restart != off)
 restart_mode        = "stop-start"   # stop-start | reuseport-overlap | socket-activation
 # listen            = "0.0.0.0:3000" # required for socket-activation
 

@@ -7,7 +7,7 @@ data_dir = "/srv/lode"    # MUST be a persistent volume (runtime cache + version
 
 [update]
 github = "owner/demo-bun"           # GitHub Releases … (or: manifest = "https://…/manifest.json")
-asset  = "app.js"                   # the bundled single file (format = raw, entry = app.js)
+asset  = "app.js"                   # the bundled single file (format = raw; lands as app.js in the version dir)
 policy = "auto"
 
 [trust]
@@ -15,7 +15,7 @@ require_signature = "enforce"
 trusted_keys = ["<key_id>:<base64-pubkey>"]
 
 [command]
-run  = "bun run"   # bare `lode` → bun run <entry>
+run  = "bun run app.js"   # bare `lode` → bun run app.js (cwd = version dir)
 exec = "bun"       # `lode <args>` → bun <args>
 
 # lode downloads bun if absent from PATH, caches it at $DATA_DIR/runtime/bun, and

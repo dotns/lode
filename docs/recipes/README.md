@@ -6,9 +6,9 @@ is just a new release artifact + a `lode.toml` — no `docker build`.
 
 | Runtime | Recipe | Launch |
 |---|---|---|
-| Bun  | [`bun.lode.toml`](bun.lode.toml)  | `bun run <entry>` |
-| Node | [`node.lode.toml`](node.lode.toml) | `node <entry>` |
-| Deno | [`deno.lode.toml`](deno.lode.toml) | `deno run -A <entry>` |
+| Bun  | [`bun.lode.toml`](bun.lode.toml)  | `bun run app.js` |
+| Node | [`node.lode.toml`](node.lode.toml) | `node app.mjs` |
+| Deno | [`deno.lode.toml`](deno.lode.toml) | `deno run -A main.ts` |
 
 ## The idea: download the runtime once, cache it
 
@@ -93,9 +93,9 @@ So make the artifact self-sufficient:
 
 - **Bundle to a single file** (recommended): `bun build app.ts --outfile app.js`,
   `esbuild --bundle`, or `ncc`. Ship that one file (`asset = "app.js"`); its `format`
-  is `raw` and the entry defaults to that file.
+  is `raw`; set `[command].run = "<runtime> app.js"` to launch it.
 - **Or ship a tarball** with `node_modules` vendored: `asset = "myapp-1.0.0.tar.gz"`,
-  and set `entry = "dist/server.js"` (or place the entry at the archive root as `{app}`).
+  and set `[command].run = "node dist/server.js"` to point at the in-archive file.
 - **Deno** can usually skip bundling — it resolves TS and `npm:` / URL imports at run
   time (`deno vendor` or the cache for reproducibility).
 

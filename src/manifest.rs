@@ -46,10 +46,14 @@ impl Manifest {
     /// both working from the parsed struct, produce identical bytes regardless of
     /// the JSON's key order or whitespace. Each line is a tab-separated record:
     /// `channel\t{name}\t{latest}`, `version\t{id}`, and per asset
-    /// `asset\t{name}\t{sha256}` (`name` = the asset filename). The per-asset
-    /// `sig`/`key_id` and the runtime-only `url`/`entry`/`size` are deliberately
-    /// excluded (each asset's own signature is verified separately); this binds the
-    /// catalog shape, the channel pointers and every asset's identity + digest.
+    /// `asset\t{name}\t{sha256}\t{run}\t{exec}` (`name` = the asset filename;
+    /// `run`/`exec` are the asset's optional launch overrides, empty when absent —
+    /// they steer what the loader executes, so a present catalog signature must
+    /// cover them; [`parse`] rejects control characters in them, keeping the
+    /// tab-separated framing unambiguous). The per-asset `sig`/`key_id` and the
+    /// runtime-only `url`/`size` are deliberately excluded (each asset's own
+    /// signature is verified separately); this binds the catalog shape, the
+    /// channel pointers and every asset's identity + digest + launch overrides.
     fn canonical_catalog(&self) -> String {
         use std::fmt::Write as _;
         let mut out = String::new();
@@ -59,7 +63,14 @@ impl Manifest {
         for (id, entry) in &self.versions {
             let _ = writeln!(out, "version\t{id}");
             for a in &entry.assets {
-                let _ = writeln!(out, "asset\t{}\t{}", a.name, a.sha256);
+                let _ = writeln!(
+                    out,
+                    "asset\t{}\t{}\t{}\t{}",
+                    a.name,
+                    a.sha256,
+                    a.run.as_deref().unwrap_or(""),
+                    a.exec.as_deref().unwrap_or("")
+                );
             }
         }
         out
@@ -114,9 +125,15 @@ pub(crate) struct Asset {
     #[serde(default)]
     #[allow(dead_code)] // advisory per-asset key override; tried via the trusted-key set
     pub(crate) key_id: Option<String>,
-    /// Advisory in-archive entry path (§4; runtime, never signed).
+    /// Optional bare-run launch command published with the asset; when present it
+    /// OVERRIDES the operator's `[command].run`. Signed (bound into both the §1
+    /// artifact message and the catalog signature).
     #[serde(default)]
-    pub(crate) entry: Option<String>,
+    pub(crate) run: Option<String>,
+    /// Optional `lode <args>` passthrough base published with the asset; when
+    /// present it OVERRIDES the operator's `[command].exec`. Signed like `run`.
+    #[serde(default)]
+    pub(crate) exec: Option<String>,
     /// Expected byte size (an extra guard, checked at download).
     #[serde(default)]
     pub(crate) size: Option<u64>,
@@ -202,11 +219,16 @@ pub(crate) fn allowed_hosts(cfg: &Config) -> Vec<String> {
 /// client-side downgrade floor), not here.
 fn fetch_native(cfg: &Config, url: &str) -> Result<Manifest> {
     let headers = crate::http::expand_headers(&cfg.http.headers)?;
-    let bytes = crate::http::get_bytes(url, &headers, cfg.http.allow_insecure)?;
+    // The credential same-origin set (manifest host + `[http].credential_hosts`)
+    // also gates which redirect hops may carry `[http].headers` (see
+    // [`crate::http::send`]'s redirect policy).
+    let hosts = allowed_hosts(cfg);
+    let attach = |host: &str| crate::download::host_in(host, &hosts);
+    let bytes = crate::http::get_bytes(url, &headers, cfg.http.allow_insecure, &attach)?;
     let mut manifest = parse(&bytes)?;
     // §6: when a signature is required and the selected asset has no inline `sig`,
     // fall back to its `<url>.sig` sidecar.
-    resolve_native_sidecars(cfg, &mut manifest, &allowed_hosts(cfg))?;
+    resolve_native_sidecars(cfg, &mut manifest, &hosts)?;
     Ok(manifest)
 }
 
@@ -293,7 +315,8 @@ fn fetch_sidecar(cfg: &Config, asset: &Asset, allowed_hosts: &[String]) -> Optio
     } else {
         Vec::new()
     };
-    match crate::http::get_bytes(&url, &headers, cfg.http.allow_insecure) {
+    let attach = |host: &str| crate::download::host_in(host, allowed_hosts);
+    match crate::http::get_bytes(&url, &headers, cfg.http.allow_insecure, &attach) {
         Ok(body) => Some(sidecar_signature(&body)),
         Err(e) => {
             tracing::debug!(error = %e, "native .sig sidecar fetch failed; asset left unsigned");
@@ -366,10 +389,15 @@ fn get_json<T: serde::de::DeserializeOwned>(
     headers: &[(String, String)],
     allow_insecure: bool,
 ) -> Result<T> {
+    // GitHub-API JSON: the token follows redirects only to the EXACT initial
+    // (API) host; release-asset downloads carry their own allowlist
+    // ([`allowed_hosts`] via [`crate::download::fetch_artifact`]).
+    let attach = crate::http::same_host_as(url);
     Ok(serde_json::from_slice(&crate::http::get_bytes(
         url,
         headers,
         allow_insecure,
+        &attach,
     )?)?)
 }
 
@@ -448,8 +476,9 @@ fn map_release(
 /// Map one GitHub release asset onto an internal [`Asset`]: filename → `name`;
 /// `browser_download_url` → `url`; `digest` (minus the `sha256:` prefix) → `sha256`;
 /// `label` (the only arbitrary-string slot the API returns) → `sig`; `size` carried
-/// through. GitHub has no advisory `entry` slot, and credentials may ride the asset
-/// host (gated by `allowed_hosts`), so `entry` is `None` and `auth` is on.
+/// through. GitHub has no slot for the `run`/`exec` launch overrides, so they are
+/// `None` (the operator's `[command]` decides the launch); credentials may ride the
+/// asset host (gated by `allowed_hosts`), so `auth` is on.
 fn gh_asset_to_asset(a: GhAsset) -> Asset {
     let sha256 = a
         .digest
@@ -462,7 +491,8 @@ fn gh_asset_to_asset(a: GhAsset) -> Asset {
         sha256,
         sig: a.label,
         key_id: None,
-        entry: None,
+        run: None,
+        exec: None,
         size: a.size,
         auth: true,
     }
@@ -521,7 +551,39 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest> {
     if manifest.versions.is_empty() {
         return Err(Error::Manifest("manifest declares no versions".to_owned()));
     }
+    // Launch overrides flow from the network into signed messages and argv; guard
+    // them once, at the parse boundary, so every downstream consumer sees clean
+    // values (the GitHub adapter never sets them).
+    for ver in manifest.versions.values() {
+        for asset in &ver.assets {
+            if let Some(run) = asset.run.as_deref() {
+                validate_command_override("run", run)?;
+            }
+            if let Some(exec) = asset.exec.as_deref() {
+                validate_command_override("exec", exec)?;
+            }
+        }
+    }
     Ok(manifest)
+}
+
+/// Validate an asset's optional `run`/`exec` launch override: when present it must
+/// be non-blank and free of control characters. A newline or tab would let one
+/// signed field masquerade as another in the `\n`-/`\t`-framed canonical messages
+/// ([`crate::verify::artifact_message`] / [`Manifest::canonical_catalog`]), so they
+/// are rejected before the value can reach a signature check or an argv.
+pub(crate) fn validate_command_override(kind: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Err(Error::Manifest(format!(
+            "asset {kind} must not be blank when present (omit the field instead)"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(Error::Manifest(format!(
+            "asset {kind} {value:?}: contains a control character"
+        )));
+    }
+    Ok(())
 }
 
 /// Resolve a target spec to a concrete version id present in `manifest.versions`.
@@ -561,7 +623,7 @@ pub(crate) fn resolve_target(
             }
         }
     };
-    // The resolved id keys `versions/<id>` and `downloads/<id>.part`; reject any
+    // The resolved id keys `versions/<id>` and `downloads/<id>/`; reject any
     // traversal before it touches a path (covers a malicious native `versions`
     // key advertised as the channel latest, a pin, or an explicit request).
     validate_id("version", &want)?;
@@ -645,13 +707,43 @@ mod tests {
         assert_eq!(m.name, "myapp");
         assert_eq!(m.channels["stable"].latest, "1.5.0");
         assert!(m.versions.contains_key("1.5.0"));
-        // `auth` defaults to true; the darwin-arm64 1.5.0 asset omits it.
+        // The linux 1.5.0 asset demonstrates the optional launch overrides.
+        let linux = m.versions["1.5.0"]
+            .assets
+            .iter()
+            .find(|a| a.name == "myapp-linux-x86_64.tar.gz")
+            .unwrap();
+        assert_eq!(linux.run.as_deref(), Some("./bin/myapp serve"));
+        assert_eq!(linux.exec.as_deref(), Some("./bin/myapp"));
+        // `auth` defaults to true; the darwin-arm64 1.5.0 asset omits it (and
+        // publishes no run/exec — the operator's [command] decides the launch).
         let darwin = m.versions["1.5.0"]
             .assets
             .iter()
             .find(|a| a.name == "myapp-darwin-arm64.tar.gz")
             .unwrap();
         assert!(darwin.auth);
+        assert!(darwin.run.is_none());
+        assert!(darwin.exec.is_none());
+    }
+
+    #[test]
+    fn parse_rejects_malformed_launch_overrides() {
+        let mk = |run: &str| {
+            format!(
+                r#"{{"schema":"lode/v1","name":"x",
+                   "channels":{{"stable":{{"latest":"1.0.0"}}}},
+                   "versions":{{"1.0.0":{{"assets":[
+                     {{"name":"a","url":"","sha256":"00","run":{run}}}]}}}}}}"#
+            )
+        };
+        // A control character (newline/tab) could forge canonical-message fields.
+        assert!(parse(mk("\"./app\\nevil\"").as_bytes()).is_err());
+        assert!(parse(mk("\"./app\\tevil\"").as_bytes()).is_err());
+        // Blank-when-present is a publisher mistake — reject, don't guess.
+        assert!(parse(mk("\"  \"").as_bytes()).is_err());
+        // A normal command parses.
+        assert!(parse(mk("\"./app serve\"").as_bytes()).is_ok());
     }
 
     #[test]
@@ -682,7 +774,7 @@ mod tests {
         assert!(msg.starts_with("lode.manifest.v1\nmyapp\n9787ab11e55b4cbc\n"));
         // The top-level `sig` is NOT part of the signed body.
         assert!(!msg.contains("<optional"));
-        // Assets are bound by filename + digest (no platform/format/url/entry).
+        // Assets are bound by filename + digest + run/exec (no platform/format/url).
         assert!(msg.contains("asset\tmyapp-linux-x86_64.tar.gz\t"));
 
         // Tampering with a channel pointer changes the bytes (so the sig fails).
@@ -699,6 +791,17 @@ mod tests {
         let mut digest_swap = m.clone();
         digest_swap.versions.get_mut("1.5.0").unwrap().assets[0].sha256 = "00".to_owned();
         assert_ne!(m.signing_message(), digest_swap.signing_message());
+
+        // The launch overrides are bound: tampering an asset's `run` (or `exec`)
+        // changes the bytes, so a present catalog signature covers them.
+        let mut run_swap = m.clone();
+        run_swap.versions.get_mut("1.5.0").unwrap().assets[0].run = Some("./evil".to_owned());
+        assert_ne!(m.signing_message(), run_swap.signing_message());
+        let mut exec_swap = m.clone();
+        exec_swap.versions.get_mut("1.5.0").unwrap().assets[0].exec = Some("./evil".to_owned());
+        assert_ne!(m.signing_message(), exec_swap.signing_message());
+        // …and run/exec occupy distinct signed fields (no swap confusion).
+        assert_ne!(run_swap.signing_message(), exec_swap.signing_message());
 
         // The declared key_id is bound into the message (catalog identical).
         let mut rekeyed = m.clone();
@@ -946,7 +1049,9 @@ mod tests {
             Some("Izn/bTO7W4gOFBlpPswTE6Zjmyfqkt==")
         );
         assert_eq!(signed.size, Some(1234));
-        assert!(signed.entry.is_none()); // GitHub has no advisory entry slot
+        // GitHub has no slot for launch overrides — the operator's [command] decides.
+        assert!(signed.run.is_none());
+        assert!(signed.exec.is_none());
         assert!(signed.auth);
         // The format is derived from the filename, never stored.
         assert_eq!(format_from_name(&signed.name), "tar.gz");

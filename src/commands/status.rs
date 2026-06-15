@@ -24,7 +24,6 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
     writeln!(out, "  source:     {}", update_source(cfg))?;
     writeln!(out, "  github_api: {}", cfg.update.github_api)?;
     writeln!(out, "  asset:      {}", opt(cfg.update.asset.as_deref()))?;
-    writeln!(out, "  entry:      {}", opt(cfg.update.entry.as_deref()))?;
     writeln!(out, "  channel:    {}", cfg.update.channel)?;
     writeln!(out, "  policy:     {:?}", cfg.update.policy)?;
     writeln!(out, "  interval:   {}s", cfg.update.check_interval)?;
@@ -48,8 +47,8 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
     )?;
 
     writeln!(out, "[command]")?;
-    writeln!(out, "  run:        {}", cfg.command.run)?;
-    writeln!(out, "  exec:       {}", cfg.command.exec)?;
+    writeln!(out, "  run:        {}", opt(cfg.command.run.as_deref()))?;
+    writeln!(out, "  exec:       {}", opt(cfg.command.exec.as_deref()))?;
     writeln!(out, "  workdir:    {}", cfg.command.workdir)?;
 
     writeln!(out, "[runtime]")?;

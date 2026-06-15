@@ -69,7 +69,7 @@ fn main() {
 
     // `web-rust version` (or --version/-v) just prints the version and exits 0 —
     // handy for standalone testing and `lode version` passthrough when the
-    // operator sets exec = "{entry}".
+    // operator sets exec = "./web-rust".
     if let Some(arg) = env::args().nth(1) {
         if arg == "version" || arg == "--version" || arg == "-v" {
             println!("{version}");

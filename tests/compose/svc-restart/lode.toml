@@ -1,12 +1,16 @@
-# svc-restart — demonstrates the OPT-IN crash-restart policy (the mirror-default's
-# counterpart). With `restart = "always"` lode relaunches the child on any exit,
-# bounded by `restart_max`; once the cap of consecutive restarts is hit lode gives
-# up (status=error) and exits with the child's code. Its app is a crashing native
-# binary (the web-rust BUILD_BAD=1 build), so lode restarts it restart_max times
-# then exits — proving the bound. Docker `restart: "no"` keeps it exited so the
-# test can inspect the terminal state.
+# svc-restart — demonstrates the keep-alive crash-restart policy. With
+# `restart = "always"` lode relaunches the child on any exit, bounded by
+# `restart_max`; once the cap of consecutive restarts is hit lode PAUSES
+# (status=error) and STAYS ALIVE — it never exits on app failure, so the container
+# does not crash-loop. Its app is a crashing native binary (the web-rust BUILD_BAD=1
+# build), so lode restarts it restart_max times then pauses — proving the bound and
+# the keep-alive. A paused app recovers on an edited lode.toml / bumped
+# restart_nonce / new target.
 #
 # policy = "off": this service never updates; it only exercises restart bounding.
+#
+# The fileserver IP below is the standalone default — the e2e test rewrites it
+# to its per-run derived address before `docker cp`ing this file in.
 
 [global]
 app      = "crash"
@@ -28,8 +32,8 @@ require_signature = "enforce"
 # trusted_keys injected via env LODE_TRUSTED_KEYS
 
 [command]
-run     = "{entry}"
-exec    = "{entry}"
+run     = "./crashbin"
+exec    = "./crashbin"
 workdir = "{dir}"
 
 [supervise]

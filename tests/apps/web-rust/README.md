@@ -30,7 +30,7 @@ curl -s localhost:8080/version   # -> 0.0.0-dev
 curl -s localhost:8080/healthz   # -> ok
 # Ctrl-C (SIGINT) -> "cleanup done, exiting 0", exits 0
 
-# print version and exit (also `lode version` passthrough when exec = "{entry}")
+# print version and exit (also `lode version` passthrough when exec = "./web-rust")
 ./target/release/web-rust version
 
 # exercise the readiness write (writes ./state.json field "ready")
@@ -75,8 +75,8 @@ BUILD_VERSION=0.0.3 BUILD_BAD=1   cargo build --release && cp target/release/web
 
 ```toml
 [command]
-run     = "{entry}"   # bare `lode`   -> run the binary as the long-running server
-exec    = "{entry}"   # `lode <args>` -> binary <args>  (e.g. `lode version`)
+run     = "./web-rust"   # bare `lode`   -> run the binary as the long-running server (cwd = version dir)
+exec    = "./web-rust"   # `lode <args>` -> binary <args>  (e.g. `lode version`)
 # workdir = "{dir}"   # optional; omit for the version dir (default)
 ```
 

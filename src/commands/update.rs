@@ -1,17 +1,20 @@
 //! `lode update` — fetch the manifest, resolve a target, then download, verify
 //! and install it (design §5/§13).
 //!
-//! If a supervised instance is running (a live `state.pid`), the new version is
-//! installed and requested as a hot-update by writing `state.target` — the
-//! running lode polls `state.json` and applies it (§7). Otherwise this command
-//! activates the version directly: flip the `current` symlink and record it in
-//! `state.json`. Either way old versions are pruned per `keep_versions`.
+//! If a supervised instance is running — a live holder of the single-instance
+//! `lode.pid` lock, or a live `state.pid` — the new version is installed and
+//! requested as a hot-update by writing `state.target`: the running lode polls
+//! `state.json` and applies it (§7), and a paused or crash-backoff supervisor
+//! (whose `state.pid` is cleared or dead, P2-15) picks it up as a recovery
+//! target. Otherwise this command activates the version directly: flip the
+//! `current` symlink and record it in `state.json`. Either way old versions are
+//! pruned per `keep_versions`.
 
 use std::io::Write;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::{download, install, manifest, state};
+use crate::{download, install, lock, manifest, state};
 
 /// Run `update`, installing `version` (or the channel latest when `None`).
 pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
@@ -68,39 +71,52 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
         writeln!(out, "  notes: {notes}")?;
     }
 
-    // Re-read state (a running supervisor may have written it since `prior`) before
-    // the read-modify-write, so we never clobber a concurrent update.
-    let mut st = state::read(&state_path)?.unwrap_or_default();
-    st.channel = Some(cfg.update.channel.clone());
-
-    if running_instance(&st) {
-        // Hand off to the running supervisor via the app-owned request channel.
-        st.available = Some(target.clone());
-        st.target = Some(target.clone());
-        state::write(&state_path, &st)?;
+    // Liveness (P2-15): `state.pid` alone misses a paused supervisor (`pid` is
+    // cleared) and a crash-backoff one (its recorded pid is dead), yet both stay
+    // alive holding the single-instance lock and still poll `state.json`. Probe
+    // the lock too, so they receive the update as a recovery `target` request
+    // instead of having `current` flipped under them. The RMWs below re-read
+    // under the shared `state.json.lock` flock (P2-14), so a concurrent
+    // supervisor/app write is never clobbered.
+    let holder = lock::live_holder(&cfg.global.data_dir);
+    let st = state::read(&state_path)?.unwrap_or_default();
+    let st = if supervisor_running(&st, holder) {
+        // Hand off to the running supervisor via the app-owned request channel
+        // (a paused supervisor honours `target` as a recovery trigger, §8).
+        let st = state::locked_update(&state_path, |st| {
+            st.channel = Some(cfg.update.channel.clone());
+            st.available = Some(target.clone());
+            st.target = Some(target.clone());
+        })?;
         writeln!(
             out,
             "  a service is running — requested hot-update to {target}"
         )?;
+        st
     } else {
         install::switch_current(cfg, &target)?;
-        st.current = Some(target.clone());
-        if st.last_good.is_none() {
-            st.last_good = Some(target.clone());
-        }
-        st.available = None;
-        state::write(&state_path, &st)?;
+        let st = state::locked_update(&state_path, |st| {
+            st.channel = Some(cfg.update.channel.clone());
+            st.current = Some(target.clone());
+            if st.last_good.is_none() {
+                st.last_good = Some(target.clone());
+            }
+            st.available = None;
+        })?;
         writeln!(out, "  activated {target} (current)")?;
-    }
+        st
+    };
 
     install::prune(cfg, st.current.as_deref(), st.last_good.as_deref())?;
     Ok(())
 }
 
-/// Is a supervised instance currently running? True when `state.pid` names a live
-/// process (a no-signal `kill` succeeds, design §13).
-fn running_instance(st: &state::State) -> bool {
-    st.pid.is_some_and(process_alive)
+/// Is a supervising lode currently running? True when a live process holds the
+/// single-instance `lode.pid` lock — which catches a paused (`pid: None`) or
+/// crash-backoff (dead `pid`) supervisor (P2-15) — or, belt-and-braces, when
+/// `state.pid` itself names a live process (a no-signal `kill` succeeds, §13).
+fn supervisor_running(st: &state::State, lock_holder: Option<u32>) -> bool {
+    lock_holder.is_some() || st.pid.is_some_and(process_alive)
 }
 
 /// Liveness probe via signal 0 (`kill(pid, None)`): `Ok` if the process exists.
@@ -126,8 +142,34 @@ mod tests {
     }
 
     #[test]
-    fn running_instance_false_without_pid() {
-        let st = state::State::default();
-        assert!(!running_instance(&st));
+    fn supervisor_running_false_without_pid_or_lock_holder() {
+        assert!(!supervisor_running(&state::State::default(), None));
+        // A dead recorded pid alone is not "running" either.
+        let st = state::State {
+            pid: Some(2_000_000_000),
+            ..state::State::default()
+        };
+        assert!(!supervisor_running(&st, None));
+    }
+
+    #[test]
+    fn supervisor_running_via_lock_holder_despite_missing_or_dead_pid() {
+        // Paused supervisor: `pid` cleared in state.json, but the lock is held.
+        assert!(supervisor_running(&state::State::default(), Some(4242)));
+        // Crash-backoff supervisor: a dead pid recorded, lock still held.
+        let st = state::State {
+            pid: Some(2_000_000_000),
+            ..state::State::default()
+        };
+        assert!(supervisor_running(&st, Some(4242)));
+    }
+
+    #[test]
+    fn supervisor_running_via_live_state_pid_alone() {
+        let st = state::State {
+            pid: Some(std::process::id()),
+            ..state::State::default()
+        };
+        assert!(supervisor_running(&st, None));
     }
 }

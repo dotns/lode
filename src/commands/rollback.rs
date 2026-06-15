@@ -25,26 +25,32 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
 }
 
 /// Read `state.json` (defaulting when absent), choose the rollback target and
-/// atomically write it back. Returns the chosen version.
+/// atomically write it back — under the shared `state.json.lock` flock, so a
+/// concurrent supervisor or app RMW can never lose (or be lost to) the write
+/// (P2-14). Returns the chosen version.
 ///
-/// The target is `version` when given, else the recorded `last_good`; an
-/// [`Error::State`] is returned when neither is available.
+/// The target is `version` when given, else the recorded `last_good` — picked
+/// inside the locked edit so the fallback is read under the same lock as the
+/// write; an [`Error::State`] is returned when neither is available (the
+/// unchanged state rewritten in that case is a harmless no-op).
 fn set_target(data_dir: &Path, version: Option<&str>) -> Result<String> {
     let path = data_dir.join("state.json");
-    let mut state = state::read(&path)?.unwrap_or_default();
-
-    let target = match version {
-        Some(v) => v.to_owned(),
-        None => state.last_good.clone().ok_or_else(|| {
-            Error::State(
-                "rollback: no --version given and no last_good recorded in state.json".to_owned(),
-            )
-        })?,
-    };
-
-    state.target = Some(target.clone());
-    state::write(&path, &state)?;
-    Ok(target)
+    let mut chosen: Option<String> = None;
+    state::locked_update(&path, |st| {
+        let target = match version {
+            Some(v) => Some(v.to_owned()),
+            None => st.last_good.clone(),
+        };
+        if let Some(target) = &target {
+            st.target = Some(target.clone());
+        }
+        chosen = target;
+    })?;
+    chosen.ok_or_else(|| {
+        Error::State(
+            "rollback: no --version given and no last_good recorded in state.json".to_owned(),
+        )
+    })
 }
 
 #[cfg(test)]

@@ -1,7 +1,8 @@
 // Scenario 10 — restart=always with a persistently-crashing app: lode restarts it
-// with exponential backoff up to restart_max, then GIVES UP and exits (status
-// error). We assert the launch count is bounded by restart_max+1 and that the
-// inter-restart spacing grows (backoff).
+// with exponential backoff up to restart_max, then PAUSES (keep-alive) — it stays
+// alive (PID 1 must not crash-loop the container), status=error. We assert the
+// launch count is bounded by restart_max+1, the inter-restart spacing grows
+// (backoff), and lode does NOT exit.
 
 import { afterEach, expect, test } from "bun:test";
 
@@ -13,7 +14,7 @@ afterEach(async () => {
   await h?.dispose();
 });
 
-test("restart=always: bounded restarts (max) with growing backoff, then give up", async () => {
+test("restart=always: bounded restarts (max) with growing backoff, then pause (stay alive)", async () => {
   h = await Harness.start();
   await h.publish("0.0.1", { mode: "exit", exitCode: 1, latest: true });
 
@@ -35,12 +36,15 @@ test("restart=always: bounded restarts (max) with growing backoff, then give up"
     "60",
   ]);
 
-  const exit = await lode.waitExit(20000);
-  // Gave up with the child's code (1) after exhausting the restart budget.
-  expect(exit.code).toBe(1);
+  // After exhausting the retry budget lode PAUSES (does not exit).
+  const paused = await lode.waitForState(
+    (s) => s.status === "error" && (s.last_error ?? "").includes("paused"),
+    { timeout: 20000, label: "paused after bounded retries" },
+  );
+  expect(paused.last_error ?? "").toMatch(/paused/i);
 
   const starts = lode.matchTimes(/\[app\] starting version=0\.0\.1/);
-  // initial launch + restart_max restarts.
+  // initial launch + restart_max retries, then it stops retrying (pause).
   expect(starts.length).toBe(restartMax + 1);
 
   // Backoff grows between restarts (~200, ~400, ~800 ms).
@@ -50,7 +54,6 @@ test("restart=always: bounded restarts (max) with growing backoff, then give up"
   expect(gaps[1]).toBeGreaterThan(gaps[0]);
   expect(gaps[2]).toBeGreaterThan(gaps[1]);
 
-  const st = lode.readState();
-  expect(st?.status).toBe("error");
-  expect(st?.last_error ?? "").toMatch(/restart limit/i);
+  // PID 1 stays alive (no container crash-loop).
+  expect(lode.exited).toBe(false);
 });

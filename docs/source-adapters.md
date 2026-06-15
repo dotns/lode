@@ -23,6 +23,8 @@ lode.artifact.v1
 {name}
 {version}
 {sha256}
+{run}
+{exec}
 ```
 
 | field | meaning | source |
@@ -30,6 +32,8 @@ lode.artifact.v1
 | `name` | the **asset filename** (e.g. `myapp-linux-x64.tar.gz`) | the selection key; what the signature's identity binds |
 | `version` | the release version | github: `tag_name` minus a leading `v`; native: the `versions` map key |
 | `sha256` | lowercase hex of the **raw downloaded file** (pre-unpack) | github: asset `digest`; native: the asset's `sha256` |
+| `run` | manifest-published bare-run launch override (empty string when absent) | the asset's `run` field, or `""` |
+| `exec` | manifest-published passthrough launch override (empty string when absent) | the asset's `exec` field, or `""` |
 
 `name` is the **asset filename, not the application name**. It is the only field
 that binds *which* artifact a signature authorises, so it prevents replaying one
@@ -49,11 +53,11 @@ of which need to be signed separately.
 
 ### What the signature binds — and does not
 
-Binds: which asset (`name`), which release (`version`), which bytes (`sha256`).
-Does **not** bind `platform`, `format`, `entry`, or `url` — these are derived from
+Binds: which asset (`name`), which release (`version`), which bytes (`sha256`), and which launch commands (`run`/`exec`).
+Does **not** bind `platform`, `format`, or `url` — these are derived from
 the filename or are operator-local (below). Because `name` is the filename and is
 signed, a tampered catalog cannot move a genuine signature onto different bytes,
-a different asset, or a different version.
+a different asset, a different version, or inject malicious launch commands.
 
 ## 2. Catalog (manifest-level) signature — optional, verify-if-present
 
@@ -118,19 +122,9 @@ can't be ordered, so a downgrade can't be proven and is allowed.
   The extension is authoritative — name assets so the suffix reflects the real
   packaging.
 
-## 4. `entry` resolution (never signed)
+## 4. Launch overrides (`run`/`exec`) and format inference
 
-`entry` is the in-archive path lode executes. It is a **runtime** concern and
-appears in **no** signed message. Resolution order:
-
-```
-manifest advisory entry  >  lode.toml [update].entry  >  convention ({app} at archive root)
-```
-
-The security boundary is the **signed archive contents** (`sha256`): `entry` only
-ever selects among already-authenticated files, and the resolved path is validated
-against directory traversal. The manifest's advisory `entry` is a convenience hint
-from the publisher (who knows the layout) and is not authoritative.
+The `entry` concept is gone. **`format`** is inferred at runtime from the asset filename's extension (§3) and is never stored or signed. A manifest asset may carry optional **`run`** and **`exec`** string fields that override the operator's `[command].run`/`exec` launch commands. These fields are signature-bound in both the per-artifact signed message (§1) and the catalog signature (§2), so a tampered catalog cannot inject malicious launch commands under `require_signature = auto` (with keys) or `enforce`.
 
 ## 5. Source adapter — GitHub Releases
 
@@ -150,7 +144,6 @@ asset  = "myapp-linux-x64.tar.gz"
 
 - **Version pointer = tag authority.** `channel = stable` → `/releases/latest`;
   any other channel → newest non-draft prerelease; `pin` → `/releases/tags/{tag}`.
-- No advisory `entry` slot → `entry` comes from lode.toml / convention.
 - `browser_download_url` 302-redirects to a CDN host; this is transparent —
   verification uses the recorded fields, never the redirect target.
 
@@ -241,7 +234,7 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
         { "name": "myapp-linux-x64.tar.gz",
           "url": "https://.../myapp-linux-x64.tar.gz",
           "sha256": "…", "sig": "…",
-          "entry": "bin/myapp", "size": 5242880 },
+          "run": "./myapp", "exec": "./myapp", "size": 5242880 },
         { "name": "myapp-darwin-arm64.tar.gz",
           "url": "https://.../myapp-darwin-arm64.tar.gz",
           "sha256": "…", "sig": "…" }
@@ -257,8 +250,9 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
 | `name` | ✓ | selection key; matched against `[update].asset` |
 | `url` | ✓ | absolute download URL |
 | `sha256` | ✓ | lowercase hex of the raw file |
-| `sig` | enforce / auto+keys | base64 ed25519 over the §1 message; inline, or supply a `.sig` sidecar alongside the asset |
-| `entry` | | advisory in-archive path (§4) |
+| `sig` | enforce / auto+keys | base64 ed25519 over the §1 message (including `run`/`exec`); inline, or supply a `.sig` sidecar alongside the asset |
+| `run` | | optional literal launch command override (signature-bound; overrides `[command].run`; see §4) |
+| `exec` | | optional CLI-passthrough command override (signature-bound; overrides `[command].exec`; see §4) |
 | `size` | | expected byte count (extra integrity check) |
 | `auth` | | default `true`; `false` = don't attach `[http].headers` to this URL |
 
@@ -273,8 +267,9 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
 **Publishing:**
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
-    --key private.key --into manifest.json     # upserts the asset by name, sets channels.latest
+lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+    --run ./myapp --exec ./myapp \
+    --key private.key --into manifest.json     # upserts the asset by name, sets channels.latest; --run/--exec are optional
 lode-cli manifest-sign --into manifest.json --key private.key   # optional §2 catalog tamper-evidence
 ```
 
@@ -289,7 +284,6 @@ asset    = "myapp-linux-x64.tar.gz"   # the asset filename for THIS host (the se
 channel  = "stable"
 policy   = "auto"                 # off | check | auto
 # pin    = "1.4.2"                # lock a version (disables auto-update)
-# entry  = "bin/myapp"            # override the in-archive entry (§4); usually omitted
 
 [trust]
 require_signature = "enforce"     # off | auto | enforce — gates the PER-ARTIFACT
@@ -304,9 +298,9 @@ trusted_keys = ["<key_id>:<base64-pubkey>"]
 
 | module | responsibility |
 |---|---|
-| `verify.rs` | the §1 artifact message (`lode.artifact.v1`) and §2 catalog message (`lode.manifest.v1`); `verify_artifact_sig` over `(name, version, sha256)` |
+| `verify.rs` | the §1 artifact message (`lode.artifact.v1`) and §2 catalog message (`lode.manifest.v1`); `verify_artifact_sig` over `(name, version, sha256, run, exec)` |
 | `manifest.rs` | internal `Manifest` with per-version `assets[]` keyed by `name`; select the asset by `name`; derive `format` from the extension; both adapters (`fetch_github`, `fetch_native`) produce the identical internal model |
-| `config.rs` | `[update].asset`, `[update].entry` override; `manifest`/`github` stay mutually exclusive |
+| `config.rs` | `[update].asset`; `manifest`/`github` stay mutually exclusive |
 | `download.rs` | fetch by `url`; attach `[http].headers` only same-origin; cross-check the GitHub `digest` and re-hash the downloaded file against the signed `sha256` |
 | `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256)` signature and the GitHub `label` string; native `manifest` assembly + `manifest-sign` over the §2 catalog form |
 

@@ -1,6 +1,6 @@
 [package]
 name = "lode"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 rust-version = "1.96.0"
 license = "MIT"
@@ -78,7 +78,7 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # supervisor deps are gated to cfg(unix) and lode targets Linux/macOS only.
 [target.'cfg(unix)'.dependencies]
 signal-hook = "0.3"
-nix = { version = "0.30", default-features = false, features = ["signal", "process"] }
+nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs"] }
 rlimit = "0.10"
 
 [profile.release]

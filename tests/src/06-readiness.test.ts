@@ -55,7 +55,7 @@ test("readiness=state: lode waits for the ready handshake before committing", as
   expect(waiting?.current).toBe("0.0.2");
   expect(waiting?.last_good).toBe("0.0.1");
 
-  // Drop the gate => app writes state.ready=LODE_INSTANCE => lode commits.
+  // Drop the gate => app writes state.ready=$LODE_INSTANCE-0 (serving) => lode commits.
   h.openReadinessGate();
 
   const committed = await lode.waitForState((s) => s.status === "running" && s.current === "0.0.2", {

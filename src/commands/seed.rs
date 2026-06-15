@@ -13,14 +13,8 @@ use crate::{install, manifest};
 
 /// Seed `app_bin` as `version` into the configured data dir (activating it unless
 /// `activate` is false), then print where it landed and how to run it.
-pub(crate) fn run(
-    cfg: &Config,
-    app_bin: &str,
-    version: &str,
-    entry: Option<&str>,
-    activate: bool,
-) -> Result<()> {
-    install::seed_local(cfg, version, Path::new(app_bin), entry, activate)?;
+pub(crate) fn run(cfg: &Config, app_bin: &str, version: &str, activate: bool) -> Result<()> {
+    install::seed_local(cfg, version, Path::new(app_bin), activate)?;
 
     let mut out = std::io::stdout().lock();
     writeln!(

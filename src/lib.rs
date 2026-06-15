@@ -71,14 +71,16 @@ fn invoked_as_tool() -> bool {
 /// `<args>` to the app via exec passthrough (replacing this process).
 fn run_loader() -> Result<ExitCode> {
     let cli = LoaderCli::parse();
-    logging::init(&cli.globals.log_level);
+    init_logging(&cli.globals);
     install_panic_hook();
 
-    let cfg = config::resolve(&cli.globals)?;
     if cli.args.is_empty() {
-        Ok(supervisor::serve(&cfg)?)
+        // The supervised service re-resolves config on a `lode.toml`-change reload,
+        // so it owns config loading (across reloads); pass the parsed globals.
+        Ok(supervisor::serve(&cli.globals)?)
     } else {
         // `exec` replaces this process on success, so the `Ok` arm is uninhabited.
+        let cfg = config::resolve(&cli.globals)?;
         match supervisor::exec_passthrough(&cfg, &cli.args)? {}
     }
 }
@@ -88,7 +90,7 @@ fn run_loader() -> Result<ExitCode> {
 /// self-contained and need no config.
 fn run_tool() -> Result<ExitCode> {
     let cli = ToolCli::parse();
-    logging::init(&cli.globals.log_level);
+    init_logging(&cli.globals);
     install_panic_hook();
 
     match cli.command {
@@ -97,20 +99,39 @@ fn run_tool() -> Result<ExitCode> {
         ToolCommand::Sign {
             artifact,
             version,
+            run,
+            exec,
             key,
             key_env,
-        } => authoring::sign(&artifact, &version, key.as_deref(), key_env.as_deref())?,
+        } => authoring::sign(
+            &artifact,
+            &version,
+            run.as_deref(),
+            exec.as_deref(),
+            key.as_deref(),
+            key_env.as_deref(),
+        )?,
         ToolCommand::Verify {
             artifact,
             version,
+            run,
+            exec,
             pubkey,
             sig,
-        } => authoring::verify(&artifact, &version, &pubkey, &sig)?,
+        } => authoring::verify(
+            &artifact,
+            &version,
+            run.as_deref(),
+            exec.as_deref(),
+            &pubkey,
+            &sig,
+        )?,
         ToolCommand::Manifest {
             artifact,
             version,
             url,
-            entry,
+            run,
+            exec,
             size,
             channel,
             key,
@@ -120,7 +141,8 @@ fn run_tool() -> Result<ExitCode> {
             &artifact,
             &version,
             &url,
-            entry.as_deref(),
+            run.as_deref(),
+            exec.as_deref(),
             size,
             &channel,
             &key,
@@ -142,22 +164,35 @@ fn run_tool() -> Result<ExitCode> {
         ToolCommand::Seed {
             app_bin,
             version,
-            entry,
             no_activate,
         } => {
             // Scaffold a sourceless config if the data dir has none, so seeding a
-            // fresh dir doesn't trip the source-requiring starter scaffold.
-            config::ensure_sourceless_toml(&cli.globals)?;
+            // fresh dir doesn't trip the source-requiring starter scaffold; the
+            // seeded file's name derives the scaffolded [command] launch command.
+            config::ensure_sourceless_toml(&cli.globals, Path::new(&app_bin))?;
             commands::seed::run(
                 &config::resolve(&cli.globals)?,
                 &app_bin,
                 &version,
-                entry.as_deref(),
                 !no_activate,
             )?;
         }
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Initialise tracing with precedence CLI/env > `lode.toml` > "info". The
+/// subscriber must be up before `config::resolve` (so resolve errors are
+/// logged), so the TOML value comes from a lenient pre-resolve peek.
+fn init_logging(globals: &cli::Globals) {
+    let peeked = config::peek_log_level(globals);
+    logging::init(
+        globals
+            .log_level
+            .as_deref()
+            .or(peeked.as_deref())
+            .unwrap_or("info"),
+    );
 }
 
 /// Install the process-wide rustls crypto provider (aws-lc-rs, pma-rust Lock 2).

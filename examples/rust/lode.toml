@@ -16,8 +16,8 @@ require_signature = "enforce"
 trusted_keys = ["<key_id>:<base64-pubkey>"]
 
 [command]
-run  = "{entry}"   # bare `lode` → run the binary as the long-running server
-exec = "{entry}"   # `lode <args>` → binary <args>  (e.g. `lode version`)
+run  = "./demo-rust-linux-x64"   # bare `lode` → run the binary as the long-running server (cwd = version dir)
+exec = "./demo-rust-linux-x64"   # `lode <args>` → binary <args>  (e.g. `lode version`)
 
 [supervise]
 readiness     = "state"

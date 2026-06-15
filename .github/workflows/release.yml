@@ -23,6 +23,10 @@ on:
       tag:
         description: "Existing release tag to (re)build and upload assets for (e.g. v0.1.0)"
         required: true
+      allow_unsigned:
+        description: "Allow uploading UNSIGNED assets when LODE_SIGNING_KEY is not set (release-published runs always fail loud)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,7 +48,7 @@ jobs:
             os: ubuntu-24.04-arm
             subpkg: linux-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ env.RELEASE_TAG }}
 
@@ -54,7 +58,7 @@ jobs:
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
 
@@ -73,7 +77,7 @@ jobs:
           tar -czf "dist/lode-${{ matrix.subpkg }}.tar.gz" "lode" "lode-cli"
           rm "lode" "lode-cli"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: asset-${{ matrix.subpkg }}
           path: dist/*.tar.gz
@@ -94,14 +98,14 @@ jobs:
             os: macos-26
             subpkg: darwin-arm64
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           key: ${{ matrix.target }}
 
@@ -120,7 +124,7 @@ jobs:
           tar -czf "dist/lode-${{ matrix.subpkg }}.tar.gz" "lode" "lode-cli"
           rm "lode" "lode-cli"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: asset-${{ matrix.subpkg }}
           path: dist/*.tar.gz
@@ -135,7 +139,7 @@ jobs:
       contents: write
     steps:
       - name: Download all platform assets
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: asset-*
           path: artifacts
@@ -144,17 +148,30 @@ jobs:
       - name: List assets
         run: ls -la artifacts/
 
+      - name: Generate SHA256SUMS
+        run: |
+          set -eu
+          cd artifacts
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
       - name: Upload assets to the release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
           TAG: ${{ env.RELEASE_TAG }}
           # A secret cannot be referenced in `if:`, so map it to an env var and
-          # branch on the string at runtime. Unset by default -> signing is a
-          # strict no-op and uploads are identical to an unsigned release.
+          # branch on the string at runtime. Unset -> the job FAILS unless the
+          # run was dispatched with allow_unsigned=true (release-published runs
+          # have no inputs, so they always fail loud when the key is missing).
           LODE_SIGNING_KEY: ${{ secrets.LODE_SIGNING_KEY }}
+          ALLOW_UNSIGNED: ${{ inputs.allow_unsigned }}
         run: |
           set -eu
+          if [ -z "${LODE_SIGNING_KEY:-}" ] && [ "${ALLOW_UNSIGNED:-}" != "true" ]; then
+            echo "::error::LODE_SIGNING_KEY is not set — refusing to upload unsigned release assets. Set the secret, or re-run via workflow_dispatch with allow_unsigned=true to opt out explicitly." >&2
+            exit 1
+          fi
           if [ -n "${LODE_SIGNING_KEY:-}" ]; then
             # Signing requested: make the `lode-cli` publisher toolkit available.
             # This job runs on ubuntu-latest (linux x64); extract the matching
@@ -179,6 +196,8 @@ jobs:
               gh release upload "$TAG" "$f#$sig" --clobber
             else
               gh release upload "$TAG" "$f" --clobber
-              echo "::warning::LODE_SIGNING_KEY not set — $(basename "$f") uploaded UNSIGNED"
+              echo "::warning::LODE_SIGNING_KEY not set — $(basename "$f") uploaded UNSIGNED (allow_unsigned=true)"
             fi
           done
+          # Checksums over every tarball uploaded above, for offline verification.
+          gh release upload "$TAG" artifacts/SHA256SUMS --clobber

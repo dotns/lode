@@ -23,12 +23,14 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
 }
 
 /// Read `state.json` (defaulting when absent), increment `restart_nonce` and
-/// atomically write it back. Returns the new nonce.
+/// atomically write it back — under the shared `state.json.lock` flock, so a
+/// concurrent supervisor or app RMW can never lose the bump (P2-14). Returns
+/// the new nonce.
 fn bump_nonce(data_dir: &Path) -> Result<u64> {
     let path = data_dir.join("state.json");
-    let mut state = state::read(&path)?.unwrap_or_default();
-    state.restart_nonce = state.restart_nonce.saturating_add(1);
-    state::write(&path, &state)?;
+    let state = state::locked_update(&path, |st| {
+        st.restart_nonce = st.restart_nonce.saturating_add(1);
+    })?;
     Ok(state.restart_nonce)
 }
 

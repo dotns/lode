@@ -1,10 +1,11 @@
 // Publisher signing wired to the real `lode-cli` binary: `lode-cli keygen`
 // generates an ed25519 keypair, `lode-cli sign` produces the sha256 + ed25519
-// signature over the §1 canonical message (v3 — binds the asset filename `name`
-// = the artifact basename, the version AND the sha256; NOT platform/format/url/
-// entry). (lode is a multi-call binary; signing lives under the `lode-cli`
-// name — see LODE_CLI_BIN.) The trusted-key string (`key_id:base64`) is fed back
-// into lode via --trusted-keys so install-time verification can succeed.
+// signature over the §1 canonical message (binds the asset filename `name` =
+// the artifact basename, the version, the sha256 AND the optional run/exec
+// launch overrides; NOT platform/format/url). (lode is a multi-call binary;
+// signing lives under the `lode-cli` name — see LODE_CLI_BIN.) The trusted-key
+// string (`key_id:base64`) is fed back into lode via --trusted-keys so
+// install-time verification can succeed.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,12 +46,16 @@ export class Signer {
   }
 
   /** Sign one artifact, returning its sha256 + base64 signature. The signature message
-   * binds the asset filename (= `basename(artifactPath)`) + version + sha256; lode
-   * reconstructs it from the manifest asset `name`, so that name must equal this
-   * artifact's basename (and the filename the test serves / selects via
-   * `[update].asset`). */
-  async sign(artifactPath: string, version: string): Promise<Signature> {
-    const r = await run([LODE_CLI_BIN, "sign", artifactPath, "--version", version, "--key", this.privPath]);
+   * binds the asset filename (= `basename(artifactPath)`) + version + sha256 + the
+   * optional run/exec launch overrides; lode reconstructs it from the manifest asset
+   * `name`/`run`/`exec`, so the name must equal this artifact's basename (and the
+   * filename the test serves / selects via `[update].asset`) and any run/exec passed
+   * here must be published verbatim in the manifest asset. */
+  async sign(artifactPath: string, version: string, opts: { run?: string; exec?: string } = {}): Promise<Signature> {
+    const cmd = [LODE_CLI_BIN, "sign", artifactPath, "--version", version, "--key", this.privPath];
+    if (opts.run) cmd.push("--run", opts.run);
+    if (opts.exec) cmd.push("--exec", opts.exec);
+    const r = await run(cmd);
     if (r.exitCode !== 0) throw new Error(`lode sign failed (${r.exitCode}): ${r.stderr}\n${r.stdout}`);
     const sha = r.stdout.match(/sha256:\s*([0-9a-fA-F]{64})/)?.[1];
     const sig = r.stdout.match(/sig:\s*([A-Za-z0-9+/=]+)/)?.[1];

@@ -3,10 +3,13 @@
 # distroless/static has no real `bun`, so the [runtime] download is the static
 # `lodetest` stub (served by the local fileserver, no signature required for
 # runtimes). lode downloads it to /data/runtime/bun, prepends it to PATH, and runs
-# `bun <entry>` (= `lodetest app.ts`). The stub honours the same web-bun app
+# `bun app.ts` (= `lodetest app.ts`). The stub honours the same web-bun app
 # contract: /version, readiness, graceful stop, bad-mode, and update-by-app-exit.
 #
 # The trusted key for the (signed) app artifacts is injected via LODE_TRUSTED_KEYS.
+#
+# The fileserver IP below is the standalone default — the e2e test rewrites it
+# to its per-run derived address before `docker cp`ing this file in.
 
 [global]
 app      = "web-bun"
@@ -29,7 +32,7 @@ require_signature = "enforce"
 # trusted_keys injected via env LODE_TRUSTED_KEYS
 
 [command]
-run     = "bun"       # bare `lode` -> `bun <entry>` (the long-running server)
+run     = "bun app.ts"   # bare `lode` -> `bun app.ts` (the long-running server; cwd = version dir)
 exec    = "bun"
 workdir = "{dir}"
 

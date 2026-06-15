@@ -27,10 +27,11 @@ policy  = "auto"          # off | check | auto
 require_signature = "enforce"                 # off | auto | enforce
 trusted_keys = ["<key_id>:<base64-pubkey>"]   # from `lode-cli keygen`
 
-# How to launch. `bun run <entry>` for bare `lode`; `bun <args>` for `lode <args>`
-# (so `lode run db:migrate` == `bun run db:migrate`).
+# How to launch (literal commands; cwd = the version dir, where the artifact
+# lands under its asset filename). `bun run app.js` for bare `lode`; `bun <args>`
+# for `lode <args>` (so `lode run db:migrate` == `bun run db:migrate`).
 [command]
-run     = "bun run"
+run     = "bun run app.js"
 exec    = "bun"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 

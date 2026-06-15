@@ -36,27 +36,26 @@ asset    = "myapp-linux-x64.tar.gz"   # 本机要的资产文件名(选择 key)
 channel  = "stable"         # github:stable=/releases/latest,否则最新 prerelease ; 原生:通道名
 policy   = "auto"           # off | check | auto
 # pin    = "1.4.2"          # 锁定版本(关闭自动更新)
-# entry  = "bin/myapp"      # 覆盖归档内 entry;通常省略(默认 {app} 在根)
 
 [trust]
 require_signature = "enforce"                       # off | auto | enforce
 trusted_keys = ["<key_id>:<base64-公钥>"]           # 来自 `lode-cli keygen`
 
 [command]
-run     = "{entry}"         # 裸跑 `lode` → 启动应用({entry} = 安装后的路径)
-exec    = "{entry}"         # `lode <args>` → 直通基准
+run     = "./myapp"         # 启动应用的字面命令(cwd=版本目录;manifest 资产可覆盖)
+exec    = "./myapp"         # `lode <args>` 透传的字面基准命令
 # workdir = "{dir}"         # 可选;省略即版本目录(默认)。需固定部署目录(如读 .env)可写绝对路径
 
 [supervise]
 readiness    = "state"      # none | state(仅当应用自报就绪后才提交该版本)
 health_grace = 15           # 新版本须存活满的秒数才算 good(否则回滚)
 stop_timeout = 10           # SIGKILL 前的优雅停止窗口
-restart      = "off"        # off(镜像子进程)| on-failure | always
+restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| always | off(镜像子进程)
 ```
 
 常见形态:
 
-- **自带二进制:** `run = "{entry} serve"`、`exec = "{entry}"`。
+- **自带二进制:** `run = "./myapp serve"`、`exec = "./myapp"`(或省略 `[command]`,改为在 manifest 资产里发布 `run`/`exec`)。
 - **脚本 + 运行时:** `run = "bun run"`、`exec = "bun"`,再加 `[runtime]` 段,PATH 上没有 `bun` 时下载它——下载后缓存复用,可用 `version` 锁版本;注意运行时下载**不做签名校验**。
 - **私有源:** 加 `[http].headers = ["Authorization: Bearer ${TOKEN}"]` —— 随 manifest 与产物请求发送,展开 `${ENV}`。
 
@@ -95,6 +94,7 @@ restart      = "off"        # off(镜像子进程)| on-failure | always
   process.on("SIGTERM", async () => { await drain(); process.exit(0) })
   ```
 - **就绪(当 `readiness = "state"`):** 真正能服务后,原子写 `state.ready = LODE_INSTANCE`(临时文件 + rename,保留 lode 的字段)。在此之前 lode 不提交该版本(零停机模式下也不停旧实例);超过 `ready_timeout` 未就绪 → 回滚。
+  - **相位"准备"握手(选用制):** 用 `state.ready = "{LODE_INSTANCE}-0"`(而非裸 token)报就绪即选用。更新时 lode 写 `state.ready = "{LODE_INSTANCE}-1"` 提示你准备;排空/落盘后写 `"{LODE_INSTANCE}-2"` 应答,切换才开始。切换默认由 app 自定节奏(`prepare_timeout = 0`);非 0 的 `[supervise].prepare_timeout`(秒)在你始终不应答时强制切换。机制详见[架构文档](architecture.zh-CN.md) §8。
 - **健康:** 启动失败要 `exit(非0)`。新版本若在 `health_grace` 内退出,回滚到上一个 good(单次触发)。
 - **自报版本**(如 `GET /version`),与 `LODE_ACTIVE_VERSION` 一致。
 - **请求更新/重启(可选):** 原子改写 `state.json` —— 设 `target`(版本或 `"latest"`)或递增 `restart_nonce`。lode 轮询文件 mtime(~1s)并执行;文件本身即通知。
@@ -107,7 +107,7 @@ restart      = "off"        # off(镜像子进程)| on-failure | always
 
 lode 解析 **channel → version → asset**,校验后安装/运行。每台主机装哪个资产由**文件名**
 (`[update].asset`)决定,每个资产都带一个对规范消息
-`lode.artifact.v1\n{name}\n{version}\n{sha256}`(UTF-8、`\n` 分隔、无结尾换行)的 ed25519
+`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`(UTF-8、`\n` 分隔、无结尾换行;`run`/`exec` 缺省为空字符串)的 ed25519
 签名。`name` 是资产文件名。完整规范(含原生 manifest 形状与字段表)见
 [source-adapters.zh-CN.md](source-adapters.zh-CN.md)。
 
@@ -175,8 +175,9 @@ jobs:
 托管一份 `lode/v1` manifest,其每版 `assets[]` 按 `name`,外加资产托管在任意 HTTPS URL:
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
-    --key private.key --into manifest.json   # 按 name upsert 资产,设 channels.latest
+lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+    --run ./myapp --exec ./myapp \
+    --key private.key --into manifest.json   # 按 name upsert 资产,设 channels.latest;--run/--exec 可选
 lode-cli manifest-sign --into manifest.json --key private.key   # 可选:对目录做防篡改证据
 ```
 
@@ -186,9 +187,7 @@ manifest 形状 + 逐资产字段表见 [source-adapters.zh-CN.md §6](source-ad
 
 ### 签名模型(两源通用)
 
-- artifact 签名只绑定 **`name`(文件名)/ `version` / `sha256`**。`format` 从文件名后缀推导
-  (`.tar.gz`/`.tgz` → tar.gz、`.gz` → gz、`.zip` → zip、否则 raw)。`entry` 是 **advisory**、
-  **永不签名**(优先级:manifest 提示 > `lode.toml [update].entry` > `{app}` 在归档根)。
+- artifact 签名绑定 **`name`(文件名)/ `version` / `sha256` / `run` / `exec`**。`format` 从文件名后缀推导(`.tar.gz`/`.tgz` → tar.gz、`.gz` → gz、`.zip` → zip、否则 raw)。`run`/`exec` 在存在时绑入签名(缺省为空字符串)——在 `require_signature=auto`(有密钥)或 `enforce` 下,被篡改的目录无法注入恶意启动命令。
 - `require_signature = enforce` 下,每个安装的资产都必须带有效签名(github:`label`;native:
   `sig` 字段或 `.sig` sidecar)。`auto` 一旦配置了任一受信公钥即 fail-closed;无公钥时安装为
   **UNVERIFIED** 并告警。

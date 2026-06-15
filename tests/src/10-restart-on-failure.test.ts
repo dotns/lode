@@ -1,6 +1,6 @@
 // Scenario 11 — restart=on-failure: a clean exit(0) makes lode exit too (no
-// restart), while a crash triggers bounded-backoff restarts (giving up at
-// restart_max).
+// restart), while a crash triggers bounded-backoff restarts, then PAUSES
+// (keep-alive: lode stays alive at restart_max rather than exiting).
 
 import { afterEach, expect, test } from "bun:test";
 
@@ -24,7 +24,7 @@ test("restart=on-failure: app exit(0) => lode exits 0, no relaunch", async () =>
   expect(lode.readState()?.status).toBe("stopped");
 });
 
-test("restart=on-failure: app crash => lode restarts (bounded by restart_max)", async () => {
+test("restart=on-failure: app crash => bounded restarts then pause (stay alive)", async () => {
   h = await Harness.start();
   await h.publish("0.0.1", { mode: "exit", exitCode: 5, latest: true });
 
@@ -45,11 +45,13 @@ test("restart=on-failure: app crash => lode restarts (bounded by restart_max)", 
     "60",
   ]);
 
-  const exit = await lode.waitExit(20000);
-  expect(exit.code).toBe(5);
-  // initial launch + restart_max restarts => it DID restart on failure.
+  // After the bounded retries lode PAUSES — it must NOT exit (PID 1 stays alive).
+  const paused = await lode.waitForState(
+    (s) => s.status === "error" && (s.last_error ?? "").includes("paused"),
+    { timeout: 20000, label: "paused after bounded retries" },
+  );
+  expect(paused.last_error ?? "").toMatch(/paused/i);
+  // initial launch + restart_max retries => it DID restart on failure, then paused.
   expect(lode.countMatches(/\[app\] starting version=0\.0\.1/)).toBe(restartMax + 1);
-  const st = lode.readState();
-  expect(st?.status).toBe("error");
-  expect(st?.last_error ?? "").toMatch(/restart limit/i);
+  expect(lode.exited).toBe(false);
 });

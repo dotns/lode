@@ -21,8 +21,10 @@ const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
 /// Identity of a single release asset, used to build the signed message. `name`
-/// is the **asset filename** — the only field binding *which* artifact a signature
-/// authorises (§1). `format`/`entry`/`url` are derived from the filename or are
+/// is the **asset filename** — the field binding *which* artifact a signature
+/// authorises (§1). The optional `run`/`exec` launch overrides a manifest may
+/// publish are bound too (they decide what the loader executes, so a signature
+/// must cover them); `format`/`url` are derived from the filename or are
 /// operator-local, so they are deliberately not part of this struct.
 pub(crate) struct Artifact<'a> {
     /// The asset filename (selection key + signed identity).
@@ -30,6 +32,10 @@ pub(crate) struct Artifact<'a> {
     pub(crate) version: &'a str,
     /// On-disk path to hash (authoring only); not part of the signed message.
     pub(crate) path: &'a str,
+    /// Manifest-published bare-run launch override (signed; empty when absent).
+    pub(crate) run: Option<&'a str>,
+    /// Manifest-published passthrough launch override (signed; empty when absent).
+    pub(crate) exec: Option<&'a str>,
 }
 
 /// Lowercase hex encoding.
@@ -49,14 +55,21 @@ pub(crate) fn key_id(public: &[u8; 32]) -> String {
 }
 
 /// Canonical ed25519 message binding an asset's identity (`name` = the asset
-/// filename, plus `version`) to its content digest. Exact bytes (UTF-8, `\n`
-/// separated, no trailing newline) — must match the loader. `format`/`entry`/`url`
-/// are *not* bound: the filename's extension fixes the format and `entry`/`url` are
-/// runtime concerns (§1/§3/§4).
+/// filename, plus `version`) to its content digest and its optional `run`/`exec`
+/// launch overrides (empty fields when absent — they steer what the loader
+/// executes, so a tampered override must fail verification). Exact bytes (UTF-8,
+/// `\n` separated, no trailing newline) — must match the loader. `format`/`url`
+/// are *not* bound: the filename's extension fixes the format and `url` is a
+/// runtime concern (§1/§3). `run`/`exec` may not contain control characters
+/// (rejected at manifest parse), so the field framing is unambiguous.
 pub(crate) fn artifact_message(a: &Artifact<'_>, sha256_hex: &str) -> Vec<u8> {
     format!(
-        "lode.artifact.v1\n{}\n{}\n{}",
-        a.name, a.version, sha256_hex
+        "lode.artifact.v1\n{}\n{}\n{}\n{}\n{}",
+        a.name,
+        a.version,
+        sha256_hex,
+        a.run.unwrap_or(""),
+        a.exec.unwrap_or("")
     )
     .into_bytes()
 }
@@ -89,8 +102,10 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 /// Verify an asset's ed25519 signature against a set of trusted keys, using the
-/// exact §1 canonical message (`lode.artifact.v1\n{name}\n{version}\n{sha256}`,
-/// where `name` is the asset filename). Each entry in `trusted_keys` is
+/// exact §1 canonical message
+/// (`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`, where `name`
+/// is the asset filename and `run`/`exec` are the asset's optional launch
+/// overrides, empty when absent). Each entry in `trusted_keys` is
 /// `key_id:base64` (CLI/TOML form) or `key_id base64` (file form); the base64
 /// public component is extracted from either. Succeeds as soon as any trusted
 /// key validates the signature; errors if none do. The integrity (sha256) check
@@ -99,6 +114,8 @@ pub(crate) fn verify_artifact_sig(
     name: &str,
     version: &str,
     sha256_hex: &str,
+    run: Option<&str>,
+    exec: Option<&str>,
     sig_b64: &str,
     trusted_keys: &[String],
 ) -> Result<()> {
@@ -109,6 +126,8 @@ pub(crate) fn verify_artifact_sig(
         name,
         version,
         path: "",
+        run,
+        exec,
     };
     let message = artifact_message(&artifact, sha256_hex);
     for key in trusted_keys {
@@ -220,6 +239,8 @@ mod tests {
             name: "app-linux-x86_64.tar.gz",
             version: "1.0.0",
             path: "",
+            run: None,
+            exec: None,
         };
         let msg = artifact_message(&artifact, "abc123");
         let sig_b64 = B64.encode(signing.sign(&msg).to_bytes());
@@ -229,6 +250,53 @@ mod tests {
         // Tampered message must fail.
         let bad = artifact_message(&artifact, "deadbeef");
         assert!(!verify_signature(&public_b64, &bad, &sig_b64).unwrap());
+
+        // The run/exec launch overrides are bound: adding either changes the bytes.
+        let with_run = artifact_message(
+            &Artifact {
+                run: Some("./app serve"),
+                ..artifact
+            },
+            "abc123",
+        );
+        assert!(!verify_signature(&public_b64, &with_run, &sig_b64).unwrap());
+    }
+
+    #[test]
+    fn artifact_message_binds_run_and_exec_unambiguously() {
+        let base = Artifact {
+            name: "app.tar.gz",
+            version: "1.0.0",
+            path: "",
+            run: None,
+            exec: None,
+        };
+        // Absent overrides serialize as empty fields (stable framing).
+        assert_eq!(
+            artifact_message(&base, "abc"),
+            b"lode.artifact.v1\napp.tar.gz\n1.0.0\nabc\n\n".to_vec()
+        );
+        // run vs exec occupy distinct fields: the same string in the other slot
+        // yields different bytes (no swap confusion).
+        let run_only = artifact_message(
+            &Artifact {
+                run: Some("./app"),
+                ..base
+            },
+            "abc",
+        );
+        let exec_only = artifact_message(
+            &Artifact {
+                exec: Some("./app"),
+                ..base
+            },
+            "abc",
+        );
+        assert_ne!(run_only, exec_only);
+        assert_eq!(
+            run_only,
+            b"lode.artifact.v1\napp.tar.gz\n1.0.0\nabc\n./app\n".to_vec()
+        );
     }
 
     #[test]
@@ -262,12 +330,15 @@ mod tests {
             name,
             version: "1.5.0",
             path: "",
+            run: None,
+            exec: None,
         };
         let sig = B64.encode(signing.sign(&artifact_message(&artifact, sha)).to_bytes());
 
-        // Fixed identity (name + version); vary only the digest + key set.
-        let check =
-            |sha: &str, keys: &[String]| verify_artifact_sig(name, "1.5.0", sha, &sig, keys);
+        // Fixed identity (name + version, no overrides); vary digest + key set.
+        let check = |sha: &str, keys: &[String]| {
+            verify_artifact_sig(name, "1.5.0", sha, None, None, &sig, keys)
+        };
 
         // CLI/TOML form `key_id:base64` and bare base64 both validate.
         let keys_colon = vec![format!("{id}:{public_b64}")];
@@ -284,10 +355,28 @@ mod tests {
         // A signature is bound to the asset filename: the same bytes under a
         // different asset name must fail.
         assert!(
-            verify_artifact_sig("other-asset.tar.gz", "1.5.0", sha, &sig, &keys_colon).is_err()
+            verify_artifact_sig(
+                "other-asset.tar.gz",
+                "1.5.0",
+                sha,
+                None,
+                None,
+                &sig,
+                &keys_colon
+            )
+            .is_err()
         );
         // …and under a different version.
-        assert!(verify_artifact_sig(name, "9.9.9", sha, &sig, &keys_colon).is_err());
+        assert!(verify_artifact_sig(name, "9.9.9", sha, None, None, &sig, &keys_colon).is_err());
+        // …and with an injected run/exec override the signer never saw.
+        assert!(
+            verify_artifact_sig(name, "1.5.0", sha, Some("./evil"), None, &sig, &keys_colon)
+                .is_err()
+        );
+        assert!(
+            verify_artifact_sig(name, "1.5.0", sha, None, Some("./evil"), &sig, &keys_colon)
+                .is_err()
+        );
 
         // No trusted keys → error (cannot establish identity).
         assert!(check(sha, &[]).is_err());

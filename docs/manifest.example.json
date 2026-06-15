@@ -19,14 +19,14 @@
           "size": 5242880,
           "sig": "Izn/bTO7W4gOFBlpPswTE6ZjmyfqktRinRISNW4P8+B+InbQ6xyclGguJrv6aitYO4hBKSP7e7zz34Mb+mYYCw==",
           "key_id": "9787ab11e55b4cbc",
-          "entry": "bin/myapp",
+          "run": "./bin/myapp serve",
+          "exec": "./bin/myapp",
           "auth": true
         },
         {
           "name": "myapp-darwin-arm64.tar.gz",
           "url": "https://releases.example.com/myapp/1.5.0/myapp-darwin-arm64.tar.gz",
-          "sha256": "b1c2d3e4f5060718293a4b5c6d7e8f90112233445566778899aabbccddeeff00",
-          "entry": "bin/myapp"
+          "sha256": "b1c2d3e4f5060718293a4b5c6d7e8f90112233445566778899aabbccddeeff00"
         }
       ]
     },
@@ -36,8 +36,7 @@
         {
           "name": "myapp-linux-x86_64.gz",
           "url": "https://releases.example.com/myapp/1.6.0-beta.2/myapp-linux-x86_64.gz",
-          "sha256": "d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff0011223344",
-          "entry": "myapp"
+          "sha256": "d4e5f60718293a4b5c6d7e8f90112233445566778899aabbccddeeff0011223344"
         }
       ]
     }

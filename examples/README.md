@@ -41,7 +41,7 @@ And on the lifecycle side:
 - **Graceful stop** — on `SIGTERM`/`SIGINT` it drains and `exit(0)` within
   `supervise.stop_timeout`, or lode `SIGKILL`s it.
 - **`version` subcommand** — `<app> version` prints the version and exits (so
-  `lode version` passthrough works when `exec = "{entry}"`).
+  `lode version` passthrough works when `exec = "./<binary>"`).
 
 `state.json` is the app ↔ lode comms file: **lode writes status, the app writes
 requests** (`ready` / `target` / `restart_nonce`); the examples patch it

@@ -1,8 +1,8 @@
 # docker-compose stack for lode's end-to-end integration test
 # (tests/src/integration/compose.test.ts). Everything is LOCAL and deterministic:
-# images are built by the test (lode:e2e from the repo Dockerfile; lode-fileserver:e2e
-# from tests/compose/fileserver), and the manifest/artifact "registry" is a local
-# fileserver — no real network, no GitHub.
+# images are built by the test (lode from the repo Dockerfile; lode-fileserver
+# from tests/compose/fileserver, both tagged per run), and the manifest/artifact
+# "registry" is a local fileserver — no real network, no GitHub.
 #
 # File exchange and probing go through `docker cp` / `docker exec`, NOT host
 # bind-mounts or published ports, so the test works both on a normal docker host
@@ -15,30 +15,34 @@
 #   * probe:    `docker exec fileserver /lodetest get http://<svc-ip>:8080/version`
 #               (container-to-container, by IP — the fileserver has the client).
 #
-# The lode containers reach the fileserver over a FIXED IP (10.123.231.2), so the
-# static (distroless) binaries never need DNS/NSS. ${TRUSTED_KEY} (the per-run
-# publisher key_id:base64) is supplied via the `docker compose` process env.
+# The lode containers reach the fileserver over a FIXED (per-run) IP, so the
+# static (distroless) binaries never need DNS/NSS. All shared identifiers —
+# network name, subnet, fileserver IP, image tags — are interpolated from the
+# `docker compose` process env (LODE_E2E_*), derived by the test from a hash of
+# the worktree path so concurrent runs against the shared daemon cannot collide.
+# The :-defaults keep the file usable standalone. ${TRUSTED_KEY} (the per-run
+# publisher key_id:base64) is supplied the same way.
 
 networks:
   default:
-    name: lode_e2e_net
+    name: ${LODE_E2E_NET:-lode_e2e_net}
     ipam:
       config:
-        - subnet: 10.123.231.0/24
+        - subnet: ${LODE_E2E_SUBNET:-10.123.231.0/24}
 
 services:
   # Writable manifest/artifact server. /www is populated (and new versions are
   # published) by `docker cp`; lodetest serves it fresh on each request. Fixed IP.
   fileserver:
-    image: lode-fileserver:e2e
+    image: ${LODE_E2E_FS_IMAGE:-lode-fileserver:e2e}
     networks:
       default:
-        ipv4_address: 10.123.231.2
+        ipv4_address: ${LODE_E2E_SERVER_IP:-10.123.231.2}
     restart: "no"
 
   # Native (no-runtime) Rust app: v0.0.1 -> auto v0.0.2, crashing v0.0.3 rollback.
   svc-rust:
-    image: lode:e2e
+    image: ${LODE_E2E_IMAGE:-lode:e2e}
     depends_on: [fileserver]
     environment:
       LODE_CONFIG: /etc/lode.toml
@@ -52,7 +56,7 @@ services:
   # Script app under the stub `bun` [runtime]: same update/rollback, plus
   # update-by-app-exit (the app writes state.target then exits -> new version).
   svc-bun:
-    image: lode:e2e
+    image: ${LODE_E2E_IMAGE:-lode:e2e}
     depends_on: [fileserver]
     environment:
       LODE_CONFIG: /etc/lode.toml
@@ -64,7 +68,7 @@ services:
   # lode bounds the restarts then exits (status=error); docker `restart: "no"`
   # leaves it exited so the test can read the terminal state.
   svc-restart:
-    image: lode:e2e
+    image: ${LODE_E2E_IMAGE:-lode:e2e}
     depends_on: [fileserver]
     environment:
       LODE_CONFIG: /etc/lode.toml

@@ -21,7 +21,7 @@ data_dir = "/srv/lode"    # MUST be a persistent volume so the runtime cache sur
 [update]
 github = "owner/myapp"
 # manifest = "https://releases.example.com/myapp/manifest.json"
-asset   = "main.ts"       # a single entry .ts/.js. Tarball instead: asset = "myapp-1.0.0.tar.gz"
+asset   = "main.ts"       # a single .ts/.js file. Tarball instead: asset = "myapp-1.0.0.tar.gz"
 channel = "stable"
 policy  = "auto"
 # pin   = "1.4.2"
@@ -30,10 +30,11 @@ policy  = "auto"
 require_signature = "enforce"
 trusted_keys = ["<key_id>:<base64-pubkey>"]
 
-# `deno run -A <entry>` for bare `lode`; `deno <args>` for `lode <args>`.
-# Prefer least-privilege flags over -A, e.g. "deno run --allow-net --allow-env".
+# `deno run -A main.ts` for bare `lode` (cwd = the version dir, where the file
+# lands under its asset name); `deno <args>` for `lode <args>`. Prefer
+# least-privilege flags over -A, e.g. "deno run --allow-net --allow-env main.ts".
 [command]
-run     = "deno run -A"
+run     = "deno run -A main.ts"
 exec    = "deno"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 

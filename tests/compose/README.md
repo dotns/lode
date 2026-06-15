@@ -10,17 +10,25 @@ the test is docker-gated and self-skips when docker is absent).
 
 | service | image | role |
 |---|---|---|
-| `fileserver` | `lode-fileserver:e2e` (built from `fileserver/Dockerfile` + the static `lodetest`) | writable lode/v1 manifest + artifact server, fixed IP `10.123.231.2` |
-| `svc-rust` | `lode:e2e` (repo `Dockerfile`) | native binary app (`tests/apps/web-rust`), no `[runtime]`; `policy=auto`, `readiness=state` |
-| `svc-bun` | `lode:e2e` | script app (`tests/apps/web-bun`) under a stubbed `bun` `[runtime]` (the static `lodetest`) |
-| `svc-restart` | `lode:e2e` | crashing app with `restart="always"` + `restart_max=3` → bounded restarts then exit |
+| `fileserver` | `lode-fileserver:e2e-<suffix>` (built from `fileserver/Dockerfile` + the static `lodetest`) | writable lode/v1 manifest + artifact server, fixed per-run IP |
+| `svc-rust` | `lode:e2e-<suffix>` (repo `Dockerfile`) | native binary app (`tests/apps/web-rust`), no `[runtime]`; `policy=auto`, `readiness=state` |
+| `svc-bun` | `lode:e2e-<suffix>` | script app (`tests/apps/web-bun`) under a stubbed `bun` `[runtime]` (the static `lodetest`) |
+| `svc-restart` | `lode:e2e-<suffix>` | crashing app with `restart="always"` + `restart_max=3` → bounded restarts then exit |
 
 Per-service config lives in `svc-*/lode.toml`. The publisher's trusted key is
 generated per test run (`lode keygen`) and injected via `LODE_TRUSTED_KEYS`.
 
+**Concurrency isolation:** every daemon-global identifier — compose project,
+network name, subnet, fileserver IP, image tags — is derived by the test from a
+hash of the worktree path (`<suffix>`), so concurrent checkouts can run the suite
+against the same docker daemon without tearing down each other's stacks. The
+values reach `docker-compose.yml` via `LODE_E2E_*` env interpolation (whose
+`:-` defaults keep the file usable standalone), and the default fileserver IP in
+`svc-*/lode.toml` is rewritten to the per-run address before `docker cp`.
+
 ## What the test proves
 
-1. `docker build -t lode:e2e .` produces a working **distroless static** image.
+1. `docker build` of the repo `Dockerfile` produces a working **distroless static** image.
 2. Both apps install + serve **v0.0.1**, then **auto-update v0.0.1 → v0.0.2**.
 3. A **crashing v0.0.3** is **single-strike rolled back to v0.0.2** (both apps).
 4. **Update-by-app-exit**: `svc-bun`'s app writes `state.target` then `exit(0)`, and

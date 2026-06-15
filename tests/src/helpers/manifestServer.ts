@@ -3,20 +3,22 @@
 // just a file write — no caching, no restart. Binds 127.0.0.1:0 (ephemeral port),
 // so the suite never touches the real network.
 
-import { copyFileSync, existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join, normalize, sep } from "node:path";
 
 import { LODE_CLI_BIN, mkTmp, rmTmp } from "./util.ts";
 
 // One per-version asset, keyed by its filename (`name`) — the source-agnostic
-// selection key (§3) and the identity the §1 signature binds.
+// selection key (§3) and the identity the §1 signature binds (together with the
+// optional run/exec launch overrides, which override the host's [command]).
 interface Asset {
   name: string;
   url: string;
   sha256: string;
   sig?: string;
   key_id?: string;
-  entry?: string;
+  run?: string;
+  exec?: string;
   size?: number;
 }
 
@@ -35,8 +37,11 @@ export interface PublishOpts {
   sha256: string;
   sig?: string;
   keyId?: string;
-  /** Advisory in-archive entry (§4); defaults to `name`. */
-  entry?: string;
+  /** Manifest-published launch override for bare `lode` (must match what the
+   *  signature was computed over — it is a signed field). */
+  run?: string;
+  /** Manifest-published launch override for `lode <args>` passthrough (signed). */
+  exec?: string;
   /** Point channels.stable.latest at this version (default true). */
   latest?: boolean;
 }
@@ -97,7 +102,6 @@ export class ManifestServer {
    *  `name`, the selection key) and update manifest.json. */
   publish(version: string, opts: PublishOpts): void {
     const name = opts.name ?? "app.sh";
-    const entry = opts.entry ?? name;
     const dir = join(this.#www, "artifacts", version);
     mkdirSync(dir, { recursive: true });
     // Serve the asset under its `name` so the published filename == the selection
@@ -108,10 +112,11 @@ export class ManifestServer {
       name,
       url: `${this.url}/artifacts/${version}/${name}`,
       sha256: opts.sha256,
-      entry,
     };
     if (opts.sig) asset.sig = opts.sig;
     if (opts.keyId) asset.key_id = opts.keyId;
+    if (opts.run) asset.run = opts.run;
+    if (opts.exec) asset.exec = opts.exec;
 
     this.#manifest.versions[version] = {
       // min_lode must be satisfied by the loader under test (0.0.1).
@@ -123,6 +128,13 @@ export class ManifestServer {
       this.#manifest.channels.stable = { latest: version };
     }
     this.#writeManifest();
+  }
+
+  /** Remove a version's served artifact bytes while leaving manifest.json intact, so
+   *  any re-download 404s. Simulates a release asset going away — used to prove the
+   *  loader relaunches from its local download cache without re-fetching. */
+  dropArtifact(version: string, name = "app.sh"): void {
+    rmSync(join(this.#www, "artifacts", version, name), { force: true });
   }
 
   #writeManifest(): void {

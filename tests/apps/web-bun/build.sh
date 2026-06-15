@@ -11,11 +11,12 @@
 #   build.sh 0.0.3 dist/0.0.3/app.ts --bad      # crashing v0.0.3 (rollback)
 #
 # The asset filename (`app.ts`) is the selection key (`[update].asset`); `format`
-# is `raw` (derived from the extension) and the advisory `entry` defaults to it.
+# is `raw` (derived from the extension) and the file lands under that filename in
+# the version dir.
 # Runs under lode via `[runtime] bun` (lode downloads bun if absent).
 #
 # Optional: pass --bundle to emit a single self-contained .js via `bun build`
-# (artifact `entry = app.js`); run it with run = "bun run app.js".
+# (the artifact lands as app.js); run it with run = "bun run app.js".
 set -eu
 
 ver="${1:?usage: build.sh <version> [outfile] [--bad] [--bundle]}"

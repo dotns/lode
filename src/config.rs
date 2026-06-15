@@ -24,12 +24,12 @@ const DEFAULT_APP: &str = "app";
 /// `LODE_DATA_DIR` (config is then searched at `$DATA_DIR/lode.toml`).
 const DEFAULT_DATA_DIR: &str = "/srv/lode";
 
-/// Starter `lode.toml` scaffolded on first run when none exists (also what
-/// `lode-cli init` writes). Kept in sync with the documented example.
-pub(crate) const STARTER_TOML: &str = include_str!("../docs/lode.example.toml");
+/// Minimal starter `lode.toml` scaffolded on first run when none exists (also
+/// what `lode-cli init` writes). Deliberately small — the complete documented
+/// reference lives in `docs/lode.example.toml` (which a test also parses).
+pub(crate) const STARTER_TOML: &str = include_str!("../docs/lode.starter.toml");
 const DEFAULT_GITHUB_API: &str = "https://api.github.com";
 const DEFAULT_CHANNEL: &str = "stable";
-const DEFAULT_ENTRY_PLACEHOLDER: &str = "{entry}";
 const DEFAULT_WORKDIR_PLACEHOLDER: &str = "{dir}";
 
 // --- typed enums (shared by the CLI and TOML layers) -----------------------
@@ -69,18 +69,20 @@ pub(crate) enum Readiness {
 }
 
 /// Crash-restart policy (`supervise.restart`), design §8. Gates the bounded
-/// backoff machinery; the default `off` makes lode mirror the child's lifecycle.
-/// Update / rollback / explicit-restart relaunches happen regardless of policy.
+/// backoff machinery and the keep-alive *pause*; on `off` lode mirrors the child's
+/// lifecycle. Update / rollback / explicit-restart relaunches happen regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum RestartPolicy {
-    /// Never restart on the child's own exit — lode exits with the child's code
-    /// (default). The orchestrator owns whole-process restart.
+    /// Mirror the child: lode exits with the child's code, never restarting. The
+    /// orchestrator owns whole-process restart.
     Off,
-    /// Restart only when the child fails (non-zero exit or killed by a signal);
-    /// a clean `exit(0)` makes lode exit too.
+    /// Restart on failure (non-zero exit or killed by a signal); a clean `exit(0)`
+    /// makes lode exit too. After `restart_max` failed retries lode PAUSES (stays
+    /// alive — does not exit) until a recovery trigger. The default.
     OnFailure,
-    /// Restart on any child exit (clean or failed).
+    /// Like `on-failure` but restart on *any* child exit, including a clean
+    /// `exit(0)`; pauses after `restart_max` retries.
     Always,
 }
 
@@ -112,6 +114,11 @@ pub(crate) struct Config {
     /// `[env]` — extra environment variables injected into the child (on top of
     /// the inherited host env; lode's own `LODE_*` introspection vars still win).
     pub(crate) env: BTreeMap<String, String>,
+    /// The `lode.toml` path this config was read from (`None` when running
+    /// file-less). The supervisor watches its mtime to recover a *paused* app after
+    /// the operator edits it (design §8); a running app is never disturbed.
+    #[allow(clippy::struct_field_names)] // mirrors the on-disk `lode.toml` concept
+    pub(crate) config_path: Option<PathBuf>,
 }
 
 /// `[global]` — identity and storage.
@@ -133,8 +140,6 @@ pub(crate) struct Update {
     /// The asset filename to install on this host — the source-agnostic selection
     /// key (source-adapters §3/§7). Required to resolve a download.
     pub(crate) asset: Option<String>,
-    /// Override the in-archive entry path (source-adapters §4); usually omitted.
-    pub(crate) entry: Option<String>,
     pub(crate) channel: String,
     pub(crate) policy: Policy,
     pub(crate) check_interval: u64,
@@ -163,11 +168,15 @@ pub(crate) struct Trust {
     pub(crate) trusted_keys_file: Option<String>,
 }
 
-/// `[command]` — how to launch the app.
+/// `[command]` — how to launch the app. `run`/`exec` are LITERAL commands
+/// (whitespace-split; only `{dir}` expands, to the running version dir) and are
+/// optional here: a manifest asset may publish signed `run`/`exec` overrides that
+/// take precedence, and launch resolution errors only when *neither* side supplies
+/// the command actually needed (see `supervisor::effective_command`).
 #[derive(Debug, Clone)]
 pub(crate) struct Command {
-    pub(crate) run: String,
-    pub(crate) exec: String,
+    pub(crate) run: Option<String>,
+    pub(crate) exec: Option<String>,
     pub(crate) workdir: String,
 }
 
@@ -193,16 +202,20 @@ pub(crate) struct Runtime {
 /// `[supervise]` — restart policy / health / rollback / stop / restart mode.
 #[derive(Debug, Clone)]
 pub(crate) struct Supervise {
-    /// Crash-restart policy. `off` (default) mirrors the child; `on-failure` /
-    /// `always` enable the bounded backoff below.
+    /// Crash-restart policy. `on-failure` (default) retries then pauses (keep-alive);
+    /// `off` mirrors the child; `always` also retries a clean exit.
     pub(crate) restart: RestartPolicy,
-    /// Backoff base/cap and consecutive-restart cap — only used when
-    /// [`restart`](Self::restart) is not `off`.
+    /// Backoff base/cap and the retry cap before pausing — only used when
+    /// [`restart`](Self::restart) is not `off`. `restart_max=0` retries forever.
     pub(crate) restart_backoff: u64,
     pub(crate) restart_backoff_max: u64,
     pub(crate) restart_max: u32,
     pub(crate) readiness: Readiness,
     pub(crate) ready_timeout: u64,
+    /// (`readiness=state`) Seconds to wait for the app to ack a staged-update
+    /// prepare prompt before forcing the cut-over; `0` (default) disables the
+    /// timeout — the app paces the cut-over (design §8).
+    pub(crate) prepare_timeout: u64,
     pub(crate) health_grace: u64,
     pub(crate) stop_timeout: u64,
     pub(crate) restart_mode: RestartMode,
@@ -217,8 +230,15 @@ pub(crate) struct Signals {
 }
 
 // --- raw TOML layer (everything optional) ----------------------------------
+//
+// Every struct is `deny_unknown_fields`: a typo'd key in `lode.toml` is a hard
+// parse error naming the key, not a silent no-op. This matters most for the
+// keep-alive pause-recovery flow, where the operator fixes the file while the
+// app is paused — a silently ignored key would leave it paused with no hint.
+// (`[env]` stays open: it is a BTreeMap of user-defined variables.)
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlConfig {
     #[serde(default)]
     global: TomlGlobal,
@@ -241,6 +261,7 @@ struct TomlConfig {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlGlobal {
     app: Option<String>,
     data_dir: Option<String>,
@@ -248,12 +269,12 @@ struct TomlGlobal {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlUpdate {
     manifest: Option<String>,
     github: Option<String>,
     github_api: Option<String>,
     asset: Option<String>,
-    entry: Option<String>,
     channel: Option<String>,
     policy: Option<Policy>,
     check_interval: Option<u64>,
@@ -262,6 +283,7 @@ struct TomlUpdate {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlHttp {
     headers: Option<Vec<String>>,
     credential_hosts: Option<Vec<String>>,
@@ -269,6 +291,7 @@ struct TomlHttp {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlTrust {
     require_signature: Option<RequireSignature>,
     trusted_keys: Option<Vec<String>>,
@@ -276,6 +299,7 @@ struct TomlTrust {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlCommand {
     run: Option<String>,
     exec: Option<String>,
@@ -283,6 +307,7 @@ struct TomlCommand {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlRuntime {
     runtime: Option<String>,
     download: Option<String>,
@@ -291,6 +316,7 @@ struct TomlRuntime {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlSupervise {
     restart: Option<RestartPolicy>,
     restart_backoff: Option<u64>,
@@ -298,6 +324,7 @@ struct TomlSupervise {
     restart_max: Option<u32>,
     readiness: Option<Readiness>,
     ready_timeout: Option<u64>,
+    prepare_timeout: Option<u64>,
     health_grace: Option<u64>,
     stop_timeout: Option<u64>,
     restart_mode: Option<RestartMode>,
@@ -305,6 +332,7 @@ struct TomlSupervise {
 }
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TomlSignals {
     forward: Option<Vec<String>>,
     restart: Option<String>,
@@ -315,8 +343,9 @@ struct TomlSignals {
 /// Resolve the effective configuration from CLI/env (`cli`), `lode.toml` and the
 /// design defaults, then validate it.
 pub(crate) fn resolve(cli: &Globals) -> Result<Config> {
-    let toml = load_toml(cli)?;
-    let cfg = merge(cli, &toml);
+    let (toml, config_path) = load_toml(cli)?;
+    let mut cfg = merge(cli, &toml);
+    cfg.config_path = config_path;
     validate(&cfg)?;
     Ok(cfg)
 }
@@ -325,8 +354,9 @@ pub(crate) fn resolve(cli: &Globals) -> Result<Config> {
 /// `$DATA_DIR/lode.toml` when one is absent, so a `seed`-prepared data dir runs
 /// offline with bare `lode`. Never clobbers an existing config. Used by
 /// `lode-cli seed` before it resolves, so seeding "just works" on a fresh dir
-/// without tripping the source-requiring starter scaffold.
-pub(crate) fn ensure_sourceless_toml(cli: &Globals) -> Result<()> {
+/// without tripping the source-requiring starter scaffold. `seed_source` is the
+/// file being seeded — its name derives the scaffolded `[command]` launch command.
+pub(crate) fn ensure_sourceless_toml(cli: &Globals, seed_source: &Path) -> Result<()> {
     let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
     let path = Path::new(data_dir).join("lode.toml");
     if path.exists() {
@@ -337,6 +367,7 @@ pub(crate) fn ensure_sourceless_toml(cli: &Globals) -> Result<()> {
             .map_err(|e| Error::Config(format!("create {}: {e}", dir.display())))?;
     }
     let app = cli.app.as_deref().unwrap_or(DEFAULT_APP);
+    let command = seed_run_command(seed_source, app);
     let body = format!(
         "# Sourceless config for OFFLINE local testing (written by `lode-cli seed`).\n\
          # No [update].manifest/github => lode never downloads; it runs whatever is\n\
@@ -345,9 +376,11 @@ pub(crate) fn ensure_sourceless_toml(cli: &Globals) -> Result<()> {
          app = \"{app}\"\n\n\
          [update]\n\
          policy = \"off\"\n\n\
+         # Literal launch commands (cwd = the version dir); edit if the seeded\n\
+         # artifact needs a runtime (e.g. run = \"bun run app.ts\").\n\
          [command]\n\
-         run  = \"{{entry}}\"\n\
-         exec = \"{{entry}}\"\n"
+         run  = \"{command}\"\n\
+         exec = \"{command}\"\n"
     );
     std::fs::write(&path, body)
         .map_err(|e| Error::Config(format!("write {}: {e}", path.display())))?;
@@ -355,32 +388,69 @@ pub(crate) fn ensure_sourceless_toml(cli: &Globals) -> Result<()> {
     Ok(())
 }
 
-/// Locate and parse `lode.toml`. An explicit `--config`/`LODE_CONFIG` must exist;
-/// otherwise the default search (`$DATA_DIR/lode.toml`, then `./lode.toml`) is
-/// best-effort and a missing file yields the all-defaults config (design §15).
-fn load_toml(cli: &Globals) -> Result<TomlConfig> {
+/// Best-effort launch command for a seeded artifact, mirroring where
+/// `install::seed_local` lands the file: a raw file keeps its filename, a `.gz`
+/// drops the suffix, and an archive's binary is conventionally `./{app}` at the
+/// extraction root (the scaffold comment tells the operator to edit otherwise).
+fn seed_run_command(seed_source: &Path, app: &str) -> String {
+    let name = seed_source
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(app);
+    match crate::manifest::format_from_name(name) {
+        "raw" => format!("./{name}"),
+        "gz" => format!("./{}", name.strip_suffix(".gz").unwrap_or(name)),
+        _ => format!("./{app}"),
+    }
+}
+
+/// Locate `lode.toml` without reading it: an explicit `--config`/`LODE_CONFIG`
+/// always wins (even if the file is missing — the read will report it);
+/// otherwise search `$DATA_DIR/lode.toml`, then `./lode.toml`. Shared by
+/// [`load_toml`] and [`peek_log_level`] so both see the same file.
+fn find_config_path(cli: &Globals) -> Option<PathBuf> {
     if let Some(path) = cli.config.as_ref() {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| Error::Config(format!("read config {path}: {e}")))?;
-        return Ok(toml::from_str(&text)?);
+        return Some(PathBuf::from(path));
     }
     let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
     let in_data = Path::new(data_dir).join("lode.toml");
-    let default_path = if in_data.is_file() {
-        in_data
-    } else if Path::new("lode.toml").is_file() {
-        PathBuf::from("lode.toml")
-    } else {
+    if in_data.is_file() {
+        return Some(in_data);
+    }
+    let local = PathBuf::from("lode.toml");
+    if local.is_file() { Some(local) } else { None }
+}
+
+/// Cheap pre-logging peek at `[global].log_level`, so `logging::init` (which
+/// must run before [`resolve`]) can honour the TOML value. Lenient by design:
+/// a missing, unreadable or malformed file yields `None` — the subsequent full
+/// resolve reports the real error with logging already up.
+pub(crate) fn peek_log_level(cli: &Globals) -> Option<String> {
+    let path = find_config_path(cli)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let parsed: TomlConfig = toml::from_str(&text).ok()?;
+    parsed.global.log_level
+}
+
+/// Locate and parse `lode.toml`. An explicit `--config`/`LODE_CONFIG` must exist;
+/// otherwise the default search (`$DATA_DIR/lode.toml`, then `./lode.toml`) is
+/// best-effort and a missing file yields the all-defaults config (design §15).
+fn load_toml(cli: &Globals) -> Result<(TomlConfig, Option<PathBuf>)> {
+    let Some(path) = find_config_path(cli) else {
         // No lode.toml anywhere. A source given via env/CLI lets us run file-less;
         // otherwise scaffold a starter at `$DATA_DIR/lode.toml` and guide the
         // operator to fill it in (design §15).
         if cli.manifest.is_some() || cli.github.is_some() {
-            return Ok(TomlConfig::default());
+            return Ok((TomlConfig::default(), None));
         }
-        return Err(scaffold_starter_config(&in_data));
+        let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
+        return Err(scaffold_starter_config(
+            &Path::new(data_dir).join("lode.toml"),
+        ));
     };
-    let text = std::fs::read_to_string(&default_path)?;
-    Ok(toml::from_str(&text)?)
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| Error::Config(format!("read config {}: {e}", path.display())))?;
+    Ok((toml::from_str(&text)?, Some(path)))
 }
 
 /// First-run convenience: write a starter `lode.toml` at `path` (best-effort,
@@ -423,19 +493,11 @@ fn merge(cli: &Globals, t: &TomlConfig) -> Config {
         // entry at deploy time, set it directly in the process env (it wins as a
         // host env var; see `child_env`).
         env: t.env.clone(),
+        config_path: None, // filled in by `resolve` after merge
     }
 }
 
 fn merge_global(cli: &Globals, t: &TomlGlobal) -> Global {
-    // `--log-level` keeps its clap default of "info"; fall back to the TOML value
-    // only when the CLI/env slot is still at that default.
-    let log_level = if cli.log_level == DEFAULT_LOG_LEVEL {
-        t.log_level
-            .clone()
-            .unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_owned())
-    } else {
-        cli.log_level.clone()
-    };
     Global {
         app: cli
             .app
@@ -447,7 +509,11 @@ fn merge_global(cli: &Globals, t: &TomlGlobal) -> Global {
             .clone()
             .or_else(|| t.data_dir.clone())
             .map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from),
-        log_level,
+        log_level: cli
+            .log_level
+            .clone()
+            .or_else(|| t.log_level.clone())
+            .unwrap_or_else(|| DEFAULT_LOG_LEVEL.to_owned()),
     }
 }
 
@@ -461,7 +527,6 @@ fn merge_update(cli: &Globals, t: &TomlUpdate) -> Update {
             .or_else(|| t.github_api.clone())
             .unwrap_or_else(|| DEFAULT_GITHUB_API.to_owned()),
         asset: cli.asset.clone().or_else(|| t.asset.clone()),
-        entry: cli.entry.clone().or_else(|| t.entry.clone()),
         channel: cli
             .channel
             .clone()
@@ -514,17 +579,12 @@ fn merge_trust(cli: &Globals, t: &TomlTrust) -> Trust {
 }
 
 fn merge_command(cli: &Globals, t: &TomlCommand) -> Command {
+    // `run`/`exec` have NO default: an unset command stays `None`, and launch
+    // resolution decides (a manifest asset may supply the override; otherwise it
+    // is a clear "no run command" error at launch, not at config parse).
     Command {
-        run: cli
-            .run
-            .clone()
-            .or_else(|| t.run.clone())
-            .unwrap_or_else(|| DEFAULT_ENTRY_PLACEHOLDER.to_owned()),
-        exec: cli
-            .exec
-            .clone()
-            .or_else(|| t.exec.clone())
-            .unwrap_or_else(|| DEFAULT_ENTRY_PLACEHOLDER.to_owned()),
+        run: cli.run.clone().or_else(|| t.run.clone()),
+        exec: cli.exec.clone().or_else(|| t.exec.clone()),
         workdir: cli
             .workdir
             .clone()
@@ -547,15 +607,25 @@ fn merge_runtime(cli: &Globals, t: &TomlRuntime) -> Runtime {
 
 fn merge_supervise(cli: &Globals, t: &TomlSupervise) -> Supervise {
     Supervise {
-        restart: cli.restart.or(t.restart).unwrap_or(RestartPolicy::Off),
+        // Default keep-alive (design §8): a failing app is retried, then the
+        // supervisor PAUSES (stays alive — never crash-loops the container) rather
+        // than exiting. `off` opts back into mirror-the-child (lode exits with it).
+        restart: cli
+            .restart
+            .or(t.restart)
+            .unwrap_or(RestartPolicy::OnFailure),
         restart_backoff: cli.restart_backoff.or(t.restart_backoff).unwrap_or(500),
         restart_backoff_max: cli
             .restart_backoff_max
             .or(t.restart_backoff_max)
             .unwrap_or(30_000),
-        restart_max: cli.restart_max.or(t.restart_max).unwrap_or(0),
+        // Retry this many times after a failure, then pause (0 = retry forever).
+        restart_max: cli.restart_max.or(t.restart_max).unwrap_or(3),
         readiness: cli.readiness.or(t.readiness).unwrap_or(Readiness::None),
         ready_timeout: cli.ready_timeout.or(t.ready_timeout).unwrap_or(30),
+        // TOML-only (no CLI flag): an advanced staged-update knob. 0 = disabled,
+        // the app paces the cut-over (the documented default behaviour).
+        prepare_timeout: t.prepare_timeout.unwrap_or(0),
         health_grace: cli.health_grace.or(t.health_grace).unwrap_or(15),
         stop_timeout: cli.stop_timeout.or(t.stop_timeout).unwrap_or(10),
         restart_mode: cli
@@ -586,9 +656,28 @@ fn split_csv(list: &str) -> Vec<String> {
         .collect()
 }
 
-/// Semantic validation: source XOR, and numeric ranges. (Enum values are already
-/// checked by clap/serde at parse time.)
+/// Semantic validation: non-empty key fields, source XOR, and numeric ranges.
+/// (Enum values are already checked by clap/serde at parse time.)
 fn validate(cfg: &Config) -> Result<()> {
+    if cfg.global.app.trim().is_empty() {
+        return Err(Error::Config(
+            "global.app must not be empty (the app name namespaces the data dir and lock)"
+                .to_owned(),
+        ));
+    }
+    if cfg.update.channel.trim().is_empty() {
+        return Err(Error::Config(
+            "update.channel must not be empty (e.g. \"stable\")".to_owned(),
+        ));
+    }
+    if let Some(asset) = &cfg.update.asset
+        && asset.trim().is_empty()
+    {
+        return Err(Error::Config(
+            "update.asset must not be empty (set the asset filename to install, or omit it)"
+                .to_owned(),
+        ));
+    }
     match (&cfg.update.manifest, &cfg.update.github) {
         (Some(_), Some(_)) => {
             return Err(Error::Config(
@@ -614,11 +703,11 @@ fn validate(cfg: &Config) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// `Globals` with no flags set (the all-`None` / default-`log_level` baseline),
-    /// so [`merge`] sees an empty CLI/env layer.
+    /// `Globals` with no flags set (the all-`None` baseline), so [`merge`] sees
+    /// an empty CLI/env layer.
     fn blank_cli() -> Globals {
         Globals {
-            log_level: DEFAULT_LOG_LEVEL.to_owned(),
+            log_level: None,
             config: None,
             app: None,
             data_dir: None,
@@ -626,7 +715,6 @@ mod tests {
             github: None,
             github_api: None,
             asset: None,
-            entry: None,
             channel: None,
             policy: None,
             interval: None,
@@ -672,12 +760,19 @@ mod tests {
         assert_eq!(cfg.update.channel, "stable");
         assert_eq!(cfg.update.github_api, "https://api.github.com");
         assert_eq!(cfg.trust.require_signature, RequireSignature::Auto);
-        assert_eq!(cfg.command.run, "{entry}");
+        // No default launch command: unset stays None (resolved at launch, where a
+        // manifest asset override may supply it).
+        assert_eq!(cfg.command.run, None);
+        assert_eq!(cfg.command.exec, None);
         assert_eq!(cfg.command.workdir, "{dir}");
         assert_eq!(cfg.supervise.readiness, Readiness::None);
-        assert_eq!(cfg.supervise.restart, RestartPolicy::Off);
+        // Keep-alive by default: retry a failing app, then pause (don't exit).
+        assert_eq!(cfg.supervise.restart, RestartPolicy::OnFailure);
+        assert_eq!(cfg.supervise.restart_max, 3);
         assert_eq!(cfg.supervise.restart_mode, RestartMode::StopStart);
         assert_eq!(cfg.supervise.restart_backoff, 500);
+        // prepare_timeout defaults to 0 = disabled (app-paced cut-over, §8).
+        assert_eq!(cfg.supervise.prepare_timeout, 0);
         assert!(cfg.http.headers.is_empty());
         assert!(cfg.http.credential_hosts.is_empty());
         assert!(!cfg.http.allow_insecure); // secure by default
@@ -761,7 +856,7 @@ mod tests {
             Some("https://example.com/m.json")
         );
         assert_eq!(cfg.trust.trusted_keys, vec!["id:key".to_owned()]);
-        assert_eq!(cfg.command.run, "bun run");
+        assert_eq!(cfg.command.run.as_deref(), Some("bun run"));
         assert!(validate(&cfg).is_ok());
     }
 
@@ -809,15 +904,157 @@ mod tests {
 
     #[test]
     fn parses_example_toml() {
-        // The shipped example must round-trip through the parser + merge cleanly.
+        // The shipped full reference must round-trip through the parser + merge.
         let text = include_str!("../docs/lode.example.toml");
         let parsed: TomlConfig = toml::from_str(text).unwrap();
         let cfg = merge(&blank_cli(), &parsed);
         assert_eq!(cfg.global.app, "myapp");
         assert_eq!(cfg.update.policy, Policy::Check);
-        assert_eq!(cfg.command.exec, "bun");
+        assert_eq!(cfg.command.run.as_deref(), Some("bun run app.js"));
+        assert_eq!(cfg.command.exec.as_deref(), Some("bun"));
         assert_eq!(cfg.supervise.restart_mode, RestartMode::StopStart);
         assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parses_starter_toml() {
+        // The minimal scaffolded starter must parse + validate against the structs.
+        let parsed: TomlConfig = toml::from_str(STARTER_TOML).unwrap();
+        let cfg = merge(&blank_cli(), &parsed);
+        assert_eq!(cfg.global.app, "myapp");
+        assert_eq!(cfg.command.run.as_deref(), Some("./myapp"));
+        assert_eq!(cfg.command.exec.as_deref(), Some("./myapp"));
+        assert!(cfg.update.manifest.is_some());
+        assert_eq!(
+            cfg.update.asset.as_deref(),
+            Some("myapp-linux-x86_64.tar.gz")
+        );
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn parses_toml_without_command_section() {
+        // A lode.toml with no [command] at all is valid: a manifest asset may
+        // supply the launch command, so the gap is resolved at launch time.
+        let parsed: TomlConfig =
+            toml::from_str("[update]\nmanifest = \"https://x/m.json\"\n").unwrap();
+        let cfg = merge(&blank_cli(), &parsed);
+        assert_eq!(cfg.command.run, None);
+        assert_eq!(cfg.command.exec, None);
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn seed_run_command_mirrors_landing_rules() {
+        // raw keeps the filename; .gz drops the suffix; archives fall back to the
+        // `./{app}` convention (operator edits the scaffold otherwise).
+        assert_eq!(
+            seed_run_command(Path::new("/x/myapp.bin"), "app"),
+            "./myapp.bin"
+        );
+        assert_eq!(seed_run_command(Path::new("/x/tool.gz"), "app"), "./tool");
+        assert_eq!(
+            seed_run_command(Path::new("/x/rel.tar.gz"), "myapp"),
+            "./myapp"
+        );
+        assert_eq!(
+            seed_run_command(Path::new("/x/rel.zip"), "myapp"),
+            "./myapp"
+        );
+    }
+
+    #[test]
+    fn unknown_toml_key_rejected_and_named() {
+        // A typo'd key must be a hard parse error naming the key (operators fix
+        // lode.toml while the app is paused — a silent no-op would strand them).
+        let err = toml::from_str::<TomlConfig>("[update]\nchanel = \"stable\"\n").unwrap_err();
+        let rendered = crate::error::Error::from(err).to_string();
+        assert!(rendered.contains("chanel"), "got: {rendered}");
+
+        // ...in every section, including the top level.
+        assert!(toml::from_str::<TomlConfig>("[globall]\napp = \"x\"\n").is_err());
+        assert!(toml::from_str::<TomlConfig>("[supervise]\nrestart_maxx = 3\n").is_err());
+
+        // `[env]` stays open: arbitrary user-defined variable names are the point.
+        let parsed: TomlConfig = toml::from_str("[env]\nMY_CUSTOM_VAR = \"1\"\n").unwrap();
+        assert_eq!(
+            parsed.env.get("MY_CUSTOM_VAR").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn cli_log_level_overrides_toml() {
+        let t = TomlConfig {
+            global: TomlGlobal {
+                log_level: Some("debug".to_owned()),
+                ..TomlGlobal::default()
+            },
+            ..TomlConfig::default()
+        };
+        // TOML supplies the level when the CLI/env slot is unset…
+        assert_eq!(merge(&blank_cli(), &t).global.log_level, "debug");
+        // …and an explicit CLI/env value wins over it.
+        let mut cli = blank_cli();
+        cli.log_level = Some("warn".to_owned());
+        assert_eq!(merge(&cli, &t).global.log_level, "warn");
+    }
+
+    #[test]
+    fn peek_log_level_reads_toml_leniently() {
+        let dir = std::env::temp_dir().join(format!("lode-peek-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lode.toml");
+        let cli_for = |p: &Path| {
+            let mut cli = blank_cli();
+            cli.config = Some(p.to_string_lossy().into_owned());
+            cli
+        };
+
+        // A config file with a level → Some(level).
+        std::fs::write(&path, "[global]\nlog_level = \"debug\"\n").unwrap();
+        assert_eq!(peek_log_level(&cli_for(&path)).as_deref(), Some("debug"));
+
+        // Present but without the key → None.
+        std::fs::write(&path, "[global]\napp = \"x\"\n").unwrap();
+        assert_eq!(peek_log_level(&cli_for(&path)), None);
+
+        // Malformed → None (full resolve reports the error later, logging up).
+        std::fs::write(&path, "[global\nlog_level = ").unwrap();
+        assert_eq!(peek_log_level(&cli_for(&path)), None);
+
+        // Absent → None.
+        assert_eq!(peek_log_level(&cli_for(&dir.join("missing.toml"))), None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn empty_key_fields_rejected() {
+        // app
+        let mut cli = blank_cli();
+        cli.app = Some(String::new());
+        let err = validate(&merge(&cli, &TomlConfig::default())).unwrap_err();
+        assert!(err.to_string().contains("global.app"), "got: {err}");
+
+        // channel
+        let mut cli = blank_cli();
+        cli.channel = Some("  ".to_owned());
+        let err = validate(&merge(&cli, &TomlConfig::default())).unwrap_err();
+        assert!(err.to_string().contains("update.channel"), "got: {err}");
+
+        // asset (only when set — None stays fine)
+        let mut cli = blank_cli();
+        cli.asset = Some(String::new());
+        let err = validate(&merge(&cli, &TomlConfig::default())).unwrap_err();
+        assert!(err.to_string().contains("update.asset"), "got: {err}");
+
+        // run/exec are deliberately NOT validated here: an empty/unset command is
+        // resolved (or clearly rejected) at launch, where the manifest override is
+        // known — see supervisor::effective_command.
+        let mut cli = blank_cli();
+        cli.run = Some(String::new());
+        assert!(validate(&merge(&cli, &TomlConfig::default())).is_ok());
     }
 
     #[test]

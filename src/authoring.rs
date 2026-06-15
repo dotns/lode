@@ -33,8 +33,8 @@ pub(crate) fn keygen(out: Option<&str>) -> Result<()> {
     let public_b64 = B64.encode(public);
 
     if let Some(prefix) = out {
-        fs::write(format!("{prefix}.key"), &private_b64)
-            .with_context(|| format!("write {prefix}.key"))?;
+        let key_path = format!("{prefix}.key");
+        write_private(&key_path, &private_b64).with_context(|| format!("write {key_path}"))?;
         fs::write(format!("{prefix}.pub"), format!("{id} {public_b64}\n"))
             .with_context(|| format!("write {prefix}.pub"))?;
     }
@@ -48,6 +48,27 @@ pub(crate) fn keygen(out: Option<&str>) -> Result<()> {
         "private:     {private_b64}   # keep secret — never commit"
     )?;
     Ok(())
+}
+
+/// Write a PRIVATE key file owner-only (0600). `mode` on `OpenOptions` only
+/// applies when the file is created, so permissions are also tightened after the
+/// write — re-running keygen over an existing world-readable key fixes it up.
+#[cfg(unix)]
+fn write_private(path: &str, contents: &str) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn write_private(path: &str, contents: &str) -> io::Result<()> {
+    fs::write(path, contents)
 }
 
 /// The filename component of a path — the asset `name` that the §1 signature binds.
@@ -85,7 +106,7 @@ fn resolve_sign_key(key: Option<&str>, key_env: Option<&str>) -> Result<[u8; 32]
 }
 
 /// Sign an asset with `seed`: return `(sha256, sig_b64, key_id)` over the §1
-/// canonical message.
+/// canonical message (which binds the optional `run`/`exec` launch overrides).
 fn sign_artifact(a: &Artifact<'_>, seed: &[u8; 32]) -> Result<(String, String, String)> {
     let signing = SigningKey::from_bytes(seed);
     let id = key_id(&signing.verifying_key().to_bytes());
@@ -97,20 +118,27 @@ fn sign_artifact(a: &Artifact<'_>, seed: &[u8; 32]) -> Result<(String, String, S
 
 /// `sign` — compute sha256 + signature for an asset and print them. The signing key
 /// comes from exactly one of `--key` (file) or `--key-env` (env var, for CI). The
-/// signature (§1) binds only the asset filename, the version and the digest, so it
-/// is exactly the string a publisher uploads as the GitHub asset `label`.
+/// signature (§1) binds the asset filename, the version, the digest and the
+/// optional `--run`/`--exec` launch overrides (which must then be published
+/// verbatim in the manifest asset); it is exactly the string a publisher uploads
+/// as the GitHub asset `label`.
 pub(crate) fn sign(
     artifact: &str,
     version: &str,
+    run: Option<&str>,
+    exec: Option<&str>,
     key: Option<&str>,
     key_env: Option<&str>,
 ) -> Result<()> {
+    validate_overrides(run, exec)?;
     let seed = resolve_sign_key(key, key_env)?;
     let name = basename(artifact);
     let a = Artifact {
         name,
         version,
         path: artifact,
+        run,
+        exec,
     };
     let (sha256, sig_b64, id) = sign_artifact(&a, &seed)?;
     let mut stdout = io::stdout().lock();
@@ -120,13 +148,38 @@ pub(crate) fn sign(
     Ok(())
 }
 
-/// `verify` — recompute sha256 and check the signature locally.
-pub(crate) fn verify(artifact: &str, version: &str, public_b64: &str, sig_b64: &str) -> Result<()> {
+/// Reject malformed `--run`/`--exec` overrides up front, with the same rule the
+/// loader applies at manifest parse — so a publisher cannot sign a value the
+/// loader will refuse to load.
+fn validate_overrides(run: Option<&str>, exec: Option<&str>) -> Result<()> {
+    if let Some(run) = run {
+        crate::manifest::validate_command_override("run", run)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    if let Some(exec) = exec {
+        crate::manifest::validate_command_override("exec", exec)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    }
+    Ok(())
+}
+
+/// `verify` — recompute sha256 and check the signature locally. `run`/`exec` must
+/// match the published overrides (they are part of the signed message).
+pub(crate) fn verify(
+    artifact: &str,
+    version: &str,
+    run: Option<&str>,
+    exec: Option<&str>,
+    public_b64: &str,
+    sig_b64: &str,
+) -> Result<()> {
     let name = basename(artifact);
     let a = Artifact {
         name,
         version,
         path: artifact,
+        run,
+        exec,
     };
     let sha256 = sha256_hex_file(Path::new(a.path))?;
     let message = artifact_message(&a, &sha256);
@@ -143,9 +196,10 @@ pub(crate) fn verify(artifact: &str, version: &str, public_b64: &str, sig_b64: &
 
 /// `manifest` — sign an asset and emit (or create-or-merge) a `lode/v1` manifest
 /// entry. The asset is keyed by its filename (`name` = basename of `artifact`);
-/// `url`/`entry`/`size` are runtime fields and are NOT part of the signature.
-/// Without `into` the single-asset manifest is printed to stdout; with `into` the
-/// asset is upserted (by `name`) into `versions[version].assets` and
+/// the optional `run`/`exec` launch overrides ARE part of the signature (they
+/// steer what the loader executes), while `url`/`size` are runtime fields and are
+/// NOT. Without `into` the single-asset manifest is printed to stdout; with `into`
+/// the asset is upserted (by `name`) into `versions[version].assets` and
 /// `channels[channel].latest` is set to `version`. `app` is the manifest top-level
 /// `name` (from `--app`/`LODE_APP_NAME`); it is preserved when merging.
 #[allow(clippy::too_many_arguments)]
@@ -154,32 +208,39 @@ pub(crate) fn manifest(
     artifact: &str,
     version: &str,
     url: &str,
-    entry: Option<&str>,
+    run: Option<&str>,
+    exec: Option<&str>,
     size: Option<u64>,
     channel: &str,
     key_path: &str,
     into: Option<&str>,
 ) -> Result<()> {
+    validate_overrides(run, exec)?;
     let name = basename(artifact);
     let a = Artifact {
         name,
         version,
         path: artifact,
+        run,
+        exec,
     };
     let seed = seed_from_file(key_path)?;
     let (sha256, sig_b64, id) = sign_artifact(&a, &seed)?;
 
-    // The asset object: name/sha256/sig/key_id are the signed identity + digest;
-    // url/entry/size are runtime fields (never signed). Format is derived from the
-    // filename at install time, so it is not stored.
+    // The asset object: name/sha256/sig/key_id/run/exec are the signed identity +
+    // digest + launch overrides; url/size are runtime fields (never signed).
+    // Format is derived from the filename at install time, so it is not stored.
     let mut asset = Map::new();
     asset.insert("name".to_owned(), json!(name));
     asset.insert("url".to_owned(), json!(url));
     asset.insert("sha256".to_owned(), json!(sha256));
     asset.insert("sig".to_owned(), json!(sig_b64));
     asset.insert("key_id".to_owned(), json!(id));
-    if let Some(e) = entry {
-        asset.insert("entry".to_owned(), json!(e));
+    if let Some(r) = run {
+        asset.insert("run".to_owned(), json!(r));
+    }
+    if let Some(x) = exec {
+        asset.insert("exec".to_owned(), json!(x));
     }
     if let Some(s) = size {
         asset.insert("size".to_owned(), json!(s));
@@ -292,8 +353,9 @@ pub(crate) fn manifest_sign(into: &str, key_path: &str) -> Result<()> {
     Ok(())
 }
 
-/// `init` — write a starter `lode.toml` (the documented example config). Shares
-/// the same template lode scaffolds on first run ([`crate::config::STARTER_TOML`]).
+/// `init` — write the minimal starter `lode.toml` (the full documented reference
+/// lives in `docs/lode.example.toml`). Shares the same template lode scaffolds on
+/// first run ([`crate::config::STARTER_TOML`]).
 pub(crate) fn init(path: Option<&str>) -> Result<()> {
     let template = crate::config::STARTER_TOML;
     match path {
@@ -343,5 +405,31 @@ mod tests {
     fn key_env_unset_errors() {
         assert!(seed_from_env("LODE_TEST_UNSET_SIGNING_KEY_VAR_XYZ").is_err());
         assert!(resolve_sign_key(None, Some("LODE_TEST_UNSET_SIGNING_KEY_VAR_XYZ")).is_err());
+    }
+
+    /// `keygen --out` writes the PRIVATE key owner-only (0600) — both on first
+    /// creation and when re-run over an existing world-readable key file.
+    #[cfg(unix)]
+    #[test]
+    fn keygen_private_key_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = std::env::temp_dir().join(format!("lode-keygen-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let prefix = dir.join("id");
+        let prefix = prefix.to_str().unwrap();
+        let key_path = dir.join("id.key");
+
+        keygen(Some(prefix)).unwrap();
+        let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // Re-running over a pre-existing 0644 key tightens it back to 0600.
+        fs::set_permissions(&key_path, fs::Permissions::from_mode(0o644)).unwrap();
+        keygen(Some(prefix)).unwrap();
+        let mode = fs::metadata(&key_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

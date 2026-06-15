@@ -38,7 +38,7 @@ fn log(msg: &str) {
 }
 
 fn main() {
-    // `lode version` passthrough (exec = "{entry}").
+    // `lode version` passthrough (exec = "./demo-rust-linux-x64").
     if let Some(arg) = env::args().nth(1) {
         if arg == "version" || arg == "--version" || arg == "-v" {
             println!("{}", version());

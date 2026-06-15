@@ -45,7 +45,7 @@ app = "myapp"
 manifest = "https://releases.example.com/myapp/manifest.json"   # 或:github = "owner/repo"
 policy   = "auto"                                               # off | check | auto
 [command]
-run = "{entry}"                                                 # 如何启动应用
+run = "./myapp"                                                # 如何启动应用(字面命令,cwd = 版本目录)
 [trust]
 require_signature = "enforce"
 ```
@@ -82,13 +82,15 @@ zzci/ubase         ────► │  lode  (静态 Rust 二进制)           
 
 ## 一个二进制,两种身份
 
-lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何子命令** —— 每个参数都属于应用,
-加载器绝不遮蔽应用 CLI。以 **`lode-cli`**(随之发布的软链接)调用则是运维 / 发布工具箱。
+lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何子命令** —— 参数会转发给应用。
+注意:lode 先解析自己的旗标(`--version`、`--help` 及 `LODE_*` 全局选项),应用的前导参数若与之
+同名会被 lode 吃掉;用 `lode -- <args…>` 可将旗标形式的参数原样直通。以 **`lode-cli`**(随之发布
+的软链接)调用则是运维 / 发布工具箱。
 
 | 调用 | 作用 |
 |---|---|
 | `lode` | 启动并监督应用(`[command].run`);按策略自动更新 |
-| `lode <args…>` | 直通:执行 `[command].exec` + `<args>`(如 `lode run db:init`) |
+| `lode <args…>` / `lode -- <args…>` | 直通:执行 `[command].exec` + `<args>`(如 `lode run db:init`);参数与 lode 旗标同名时用 `--` |
 | `lode-cli status` / `update` / `rollback` / `restart` / `versions` | 管理运行中的实例(经 `state.json`) |
 | `lode-cli keygen` / `sign` / `verify` / `manifest` / `init` | 发布方 / 运维工具 |
 
@@ -102,8 +104,8 @@ lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何
 
 - **更新** `[update].policy = off | check | auto`;来源是 `manifest`(原生 `lode/v1` JSON)**或** `github = "owner/repo"`(Releases)。
 - **回滚** —— 新版本若在 `health_grace` 内退出,回滚到上一个已知良好版本(单次触发)。
-- **重启** `[supervise].restart = off | on-failure | always` —— `off`(默认)镜像子进程;lode 主动发起的更新/回滚/重启总会重新拉起。
-- **信任** —— `sha256` + `ed25519`;设 `[trust].trusted_keys` + `require_signature = off | auto | enforce`。签名是发布方的事 —— 见[集成 §3](docs/integration.zh-CN.md)。
+- **重启** `[supervise].restart = off | on-failure | always` —— `on-failure`(默认,keep-alive)对失败的应用重试 `restart_max` 次后**暂停**(lode 保持存活,容器绝不陷入崩溃循环);`off` 退回镜像子进程的旧行为;lode 主动发起的更新/回滚/重启总会重新拉起。
+- **信任** —— `sha256` + `ed25519`;设 `[trust].trusted_keys` + `require_signature = off | auto | enforce`。注意:校验默认为 `auto`(仅在配置了受信密钥时才强制)—— 生产环境请设 `require_signature = "enforce"`。签名是发布方的事 —— 见[集成 §3](docs/integration.zh-CN.md)。
 - **私有源** —— `[http].headers`(支持 `${ENV}` 展开)随每次拉取发送。
 
 ## 从源码构建

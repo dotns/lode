@@ -11,12 +11,13 @@
 # must survive the signal-interrupted `wait`); `set -u` catches unset-var typos.
 set -u
 
-# --- baked by the builder (keep these five lines simple: `NAME="value"`) ---
+# --- baked by the builder (keep these six lines simple: `NAME="value"`) ---
 BUILD_VERSION="0.0.0-dev"
 BUILD_MODE="service"      # service | exit | update-on-exit
 BUILD_EXIT_CODE="0"       # process exit code for BUILD_MODE=exit
 BUILD_TARGET=""           # version to request for BUILD_MODE=update-on-exit
-BUILD_GATE="0"            # service + readiness=state: defer ready until $LODE_DATA_DIR/ready_ok exists
+BUILD_GATE="0"            # service + readiness=state: defer serving ready (-0) until $LODE_DATA_DIR/ready_ok exists
+BUILD_PREPARE_GATE="0"    # service + readiness=state: defer the prepare ack (-2) until $LODE_DATA_DIR/prepare_ok exists
 
 # When run under lode, LODE_ACTIVE_VERSION (injected) wins, so the self-reported
 # version always matches what lode installed.
@@ -71,12 +72,21 @@ set_state_field() {
   mv -f "$_t" "$_s"
 }
 
-# Readiness handshake (app -> lode): only when supervise.readiness=state. Once we
-# can serve, write state.ready = our spawn's LODE_INSTANCE so lode marks us good.
-announce_ready() {
+# Staged-update + readiness handshake (app -> lode), only when readiness=state. The
+# value is "$LODE_INSTANCE-$phase": "-0" = serving, "-2" = prepared/cut-over-now
+# (lode prompts a staged update with "-1"). LODE_INSTANCE is this spawn's unique id.
+write_ready() {
   [ "${LODE_READINESS:-none}" = "state" ] || return 0
-  set_state_field ready "${LODE_INSTANCE:-}"
-  log "ready: wrote state.ready=${LODE_INSTANCE:-}"
+  set_state_field ready "${LODE_INSTANCE:-}-$1"
+  log "ready: wrote state.ready=${LODE_INSTANCE:-}-$1"
+}
+
+# Extract the current state.ready value (empty if absent); used to spot lode's "-1"
+# staged-update prompt. Pure sed — "ready" appears only as this one field.
+read_ready() {
+  _s="${LODE_DATA_DIR:-}/state.json"
+  [ -f "$_s" ] || return 0
+  sed -n 's/.*"ready"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_s" | head -n1
 }
 
 # --- non-service modes (exit immediately) ---------------------------------
@@ -97,22 +107,39 @@ esac
 log "starting version=$VERSION pid=$$ instance=${LODE_INSTANCE:-none} data_dir=${LODE_DATA_DIR:-unset}"
 
 if [ "$BUILD_GATE" = "1" ]; then
-  # Announce readiness only once the test drops the gate file — this lets the e2e
-  # observe lode WAITING for the readiness handshake before it commits the update.
+  # Announce serving readiness (-0) only once the test drops the gate file — this
+  # lets the e2e observe lode WAITING for the readiness handshake post-cut-over.
   while [ "$running" -eq 1 ]; do
     if [ -f "${LODE_DATA_DIR:-}/ready_ok" ]; then
-      announce_ready
+      write_ready 0
       break
     fi
     sleep 0.2 &
     wait "$!" 2>/dev/null || true
   done
 else
-  announce_ready
+  write_ready 0
 fi
 
-# Supervise loop: background `sleep` + `wait` so the SIGTERM trap fires sub-second.
+# Supervise loop (background `sleep` + `wait` so the SIGTERM trap fires sub-second).
+# Under readiness=state we also answer lode's staged-update prompt: when state.ready
+# becomes "$LODE_INSTANCE-1", prepare then ack with "-2" so lode cuts over. With a
+# prepare gate, defer the ack until the test drops prepare_ok — letting the e2e
+# observe lode WAITING (no cut-over) while we "prepare".
+acked_prepare=0
 while [ "$running" -eq 1 ]; do
-  sleep 1 &
+  if [ "${LODE_READINESS:-none}" = "state" ] && [ "$acked_prepare" -eq 0 ] &&
+    [ "$(read_ready)" = "${LODE_INSTANCE:-}-1" ]; then
+    log "prepare: lode prompted a staged update — preparing for cut-over"
+    if [ "$BUILD_PREPARE_GATE" = "1" ]; then
+      while [ "$running" -eq 1 ] && [ ! -f "${LODE_DATA_DIR:-}/prepare_ok" ]; do
+        sleep 0.2 &
+        wait "$!" 2>/dev/null || true
+      done
+    fi
+    write_ready 2
+    acked_prepare=1
+  fi
+  sleep 0.5 &
   wait "$!" 2>/dev/null || true
 done

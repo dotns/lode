@@ -1,11 +1,17 @@
-//! Streaming artifact download: body → `$DATA_DIR/downloads/<ver>.part`, with the
-//! sha256 taken over the downloaded file (pre-unpack, design §4/§6).
+//! Streaming artifact download with a persistent per-version cache: the body is
+//! streamed to `$DATA_DIR/downloads/<ver>/<asset>.part` (bounded memory) and, once
+//! fully written, promoted to `$DATA_DIR/downloads/<ver>/<asset>`. The sha256 is
+//! taken over the downloaded file (pre-unpack, design §4/§6) via the shared
+//! [`crate::verify::sha256_hex_file`] — reusing the audited hashing path rather than
+//! re-implementing it.
 //!
-//! The bytes are streamed to disk (bounded memory) and then digested via the
-//! shared [`crate::verify::sha256_hex_file`] — reusing the audited hashing path
-//! rather than re-implementing it. The caller verifies the digest + signature and
-//! unpacks (see [`crate::install`]); on failure the `.part` file is left for the
-//! startup GC ([`crate::install::gc`]) to reap.
+//! Download is decoupled from launch. A verified artifact is *kept* after extraction,
+//! so a fetch happens only when the cache is absent or fails its integrity check (see
+//! [`reusable_cache`]) and a later launch can re-extract it without re-downloading.
+//! The caller verifies the digest + signature and unpacks (see [`crate::install`]);
+//! the cached artifact is reclaimed only by version pruning
+//! ([`crate::install::prune`]), while an interrupted `.part` is left for the startup
+//! GC ([`crate::install::gc`]) to reap.
 
 use std::fs;
 use std::io::{self, Read};
@@ -21,29 +27,49 @@ use crate::manifest::Asset;
 /// endless or oversized response can't fill the disk (design §16, `DoS` guard).
 const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
-/// Download `asset` (for `version`) to `$DATA_DIR/downloads/<version>.part`,
-/// returning the temp path and the lowercase-hex sha256 of the downloaded file.
+/// Ensure `asset` (for `version`) is present and verified at
+/// `$DATA_DIR/downloads/<version>/<asset>`, returning that path and the lowercase-hex
+/// sha256 of the file.
 ///
-/// `[http].headers` (often a bearer token) are attached only when the asset opts in
-/// (`auth`, the default) **and** its host is in `allowed_hosts` — the source
-/// same-origin set plus `[http].credential_hosts` (computed by the caller, see
+/// A previously-downloaded artifact whose digest still matches `asset.sha256` is
+/// reused without touching the network ([`reusable_cache`]) — only an absent or
+/// corrupt cache triggers a fetch, so download is decoupled from launch.
+///
+/// On a fetch, `[http].headers` (often a bearer token) are attached only when the
+/// asset opts in (`auth`, the default) **and** its host is in `allowed_hosts` — the
+/// source same-origin set plus `[http].credential_hosts` (computed by the caller, see
 /// [`crate::manifest::allowed_hosts`]). A manifest that points an asset at any other
-/// host gets no credentials (they are dropped, with a warning), so a hostile
-/// manifest can't redirect the token to an attacker. An optional `size` is enforced
-/// (the temp file is removed on a mismatch). Integrity (`sha256 == asset.sha256`)
-/// is the caller's check.
+/// host gets no credentials (they are dropped, with a warning), so a hostile manifest
+/// can't redirect the token to an attacker. An optional `size` is enforced (the
+/// `.part` is removed on a mismatch). The body is streamed to a `.part` sibling and,
+/// once fully written, atomically renamed into place. The integrity
+/// (`sha256 == asset.sha256`) + signature gate stays the caller's check
+/// ([`crate::install`]).
 pub(crate) fn fetch_artifact(
     cfg: &Config,
     asset: &Asset,
     version: &str,
     allowed_hosts: &[String],
 ) -> Result<(PathBuf, String)> {
-    // `version` keys `downloads/<version>.part`; reject traversal before the join
-    // (the runtime path passes "runtime", a valid id).
+    // `version` keys `downloads/<version>/` and `asset.name` the file within it;
+    // reject traversal in either before they reach a path join (the runtime path
+    // passes "runtime"/the runtime name, both valid ids).
     validate_id("version", version)?;
-    let downloads = cfg.global.data_dir.join("downloads");
-    fs::create_dir_all(&downloads)?;
-    let temp = downloads.join(format!("{version}.part"));
+    validate_id("asset", &asset.name)?;
+    let cache_dir = cfg.global.data_dir.join("downloads").join(version);
+    let cache_path = cache_dir.join(&asset.name);
+
+    if let Some(hit) = reusable_cache(&cache_path, &asset.sha256) {
+        tracing::info!(
+            version,
+            artifact = %cache_path.display(),
+            "reusing cached download; skipping fetch"
+        );
+        return Ok(hit);
+    }
+
+    fs::create_dir_all(&cache_dir)?;
+    let temp = cache_dir.join(format!("{}.part", asset.name));
 
     let headers = if asset.auth && !cfg.http.headers.is_empty() {
         if host_allowed(&asset.url, allowed_hosts) {
@@ -62,7 +88,11 @@ pub(crate) fn fetch_artifact(
         Vec::new()
     };
 
-    let reader = crate::http::get_reader(&asset.url, &headers, cfg.http.allow_insecure)?;
+    // The same gate re-applies on every redirect hop: a host that 302s the
+    // download outside the allowlist strips the credentials for that hop (see
+    // [`crate::http::send`]'s redirect policy).
+    let attach = |host: &str| host_in(host, allowed_hosts);
+    let reader = crate::http::get_reader(&asset.url, &headers, cfg.http.allow_insecure, &attach)?;
     let written = write_stream(reader, &temp, MAX_DOWNLOAD_BYTES)?;
 
     if let Some(expected) = asset.size
@@ -76,7 +106,36 @@ pub(crate) fn fetch_artifact(
 
     let sha256 = crate::verify::sha256_hex_file(&temp)
         .map_err(|e| Error::Download(format!("hash {}: {e}", temp.display())))?;
-    Ok((temp, sha256))
+    // Promote the fully-written, size-checked `.part` into the cache under its real
+    // name. The retained file lets a later launch re-extract without re-downloading;
+    // the digest/signature gate stays the caller's job ([`crate::install`]).
+    fs::rename(&temp, &cache_path)
+        .map_err(|e| Error::Download(format!("cache {}: {e}", cache_path.display())))?;
+    Ok((cache_path, sha256))
+}
+
+/// Whether a cached download at `cache_path` may be reused instead of re-fetching,
+/// returning its `(path, sha256)` when so. Reuse requires the file to be present and
+/// to hash to `expected_sha` (lowercase hex) — so a swapped or truncated cache is
+/// never trusted. An empty `expected_sha` (the runtime download carries no manifest
+/// digest) is treated as non-reusable, so such a download is always re-fetched fresh
+/// rather than risk serving stale bytes. A present-but-corrupt or unreadable cache
+/// file is removed and reported as a miss, so the next call re-downloads cleanly.
+/// Split out from [`fetch_artifact`] so the decision is unit-testable without a
+/// network.
+fn reusable_cache(cache_path: &Path, expected_sha: &str) -> Option<(PathBuf, String)> {
+    if expected_sha.trim().is_empty() || !cache_path.is_file() {
+        return None;
+    }
+    match crate::verify::sha256_hex_file(cache_path) {
+        Ok(sha) if sha.eq_ignore_ascii_case(expected_sha.trim()) => {
+            Some((cache_path.to_path_buf(), sha))
+        }
+        _ => {
+            let _ = fs::remove_file(cache_path);
+            None
+        }
+    }
 }
 
 /// Whether credentials may ride a download to `url`: true only when the URL's
@@ -85,8 +144,15 @@ pub(crate) fn fetch_artifact(
 /// and reused by [`crate::manifest`]'s native `.sig` sidecar fetch (§6) so the
 /// sidecar obeys the identical same-origin credential rule.
 pub(crate) fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
-    crate::http::url_host(url)
-        .is_some_and(|host| allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(host)))
+    crate::http::url_host(url).is_some_and(|host| host_in(host, allowed_hosts))
+}
+
+/// The host-level form of [`host_allowed`], reused as the per-redirect-hop
+/// attach predicate (see [`crate::http::send`]'s redirect policy): each hop's
+/// host must itself be allowlisted or the custom headers are dropped for that
+/// hop, so a redirecting server can't bounce the credentials to a third host.
+pub(crate) fn host_in(host: &str, allowed_hosts: &[String]) -> bool {
+    allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(host))
 }
 
 /// Stream `reader` to `dest`, returning the number of bytes written, refusing a
@@ -161,6 +227,36 @@ mod tests {
         // A body exactly at the cap still succeeds.
         let ok = [7u8; 64];
         assert_eq!(write_stream(&ok[..], &dest, 64).unwrap(), 64);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reusable_cache_reuses_only_a_digest_matched_file() {
+        let dir = scratch("cache");
+        let bytes = b"cached image bytes";
+        let sha = crate::verify::sha256_hex(bytes);
+        let path = dir.join("app.tar.gz");
+
+        // Absent → miss (the caller must fetch).
+        assert!(reusable_cache(&path, &sha).is_none());
+
+        // Present and the digest matches → reuse without a network fetch.
+        std::fs::write(&path, bytes).unwrap();
+        let hit = reusable_cache(&path, &sha).expect("a digest-matched cache is reused");
+        assert_eq!(hit.0, path);
+        assert_eq!(hit.1, sha);
+
+        // Present but the digest mismatches → the corrupt cache is dropped and the
+        // call reports a miss, so the next fetch re-downloads cleanly.
+        assert!(reusable_cache(&path, &"00".repeat(32)).is_none());
+        assert!(!path.exists(), "a corrupt cache file is removed");
+
+        // An empty expected digest (e.g. the runtime download) never reuses, so a
+        // stale runtime archive can't be served — and the file is left in place.
+        std::fs::write(&path, bytes).unwrap();
+        assert!(reusable_cache(&path, "").is_none());
+        assert!(path.exists(), "a non-verifiable cache is left, not deleted");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

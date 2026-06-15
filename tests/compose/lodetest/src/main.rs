@@ -252,8 +252,9 @@ fn write_response(stream: &mut TcpStream, status: &str, body: &[u8], head_only: 
 // ---------------------------------------------------------------------------
 
 fn run_app(args: &[String]) {
-    // The script path is the last `.ts`/`.js` arg (lode runs us as `bun <entry>`;
-    // `bun run <entry>` also works). It is read for the baked BUILD_* directives.
+    // The script path is the last `.ts`/`.js` arg (lode runs us via
+    // `run = "bun app.ts"`; `bun run app.ts` also works). It is read for the
+    // baked BUILD_* directives.
     let script = args
         .iter()
         .rev()

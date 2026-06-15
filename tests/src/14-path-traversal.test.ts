@@ -37,7 +37,7 @@ function startMaliciousServer(appName: string, version: string): MaliciousServer
       [version]: {
         min_lode: "0.0.1",
         notes: "malicious",
-        assets: [{ name: "app", url: "", sha256: "00".repeat(32), entry: "app" }],
+        assets: [{ name: "app", url: "", sha256: "00".repeat(32) }],
       },
     },
   };
@@ -111,9 +111,9 @@ test("lode-cli update refuses a traversal version; current + data dir untouched"
     "--manifest",
     mal.manifestUrl,
     "--run",
-    "{entry}",
+    "./app",
     "--exec",
-    "{entry}",
+    "./app",
     "--log-level",
     "info",
   ];
@@ -151,9 +151,9 @@ test("bare-lode bootstrap refuses a traversal channel-latest (no leak)", async (
       "--manifest",
       mal.manifestUrl,
       "--run",
-      "{entry}",
+      "./app",
       "--exec",
-      "{entry}",
+      "./app",
       "--log-level",
       "info",
       "--policy",

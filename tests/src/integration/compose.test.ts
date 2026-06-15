@@ -1,6 +1,6 @@
 // E3 — docker-compose end-to-end integration test for lode.
 //
-// Proves a REAL distroless `lode:e2e` image (built here from the repo Dockerfile)
+// Proves a REAL distroless lode image (built here from the repo Dockerfile)
 // end to end: two lode service containers load the two example apps from a LOCAL
 // signed manifest/artifact server, auto-update v0.0.1 -> v0.0.2, single-strike roll
 // back from a crashing v0.0.3, do an update-by-app-exit, and a third service bounds
@@ -24,8 +24,19 @@
 // running app is treated as an update, not a crash" lives in E2's suite
 // (tests/src/11-update-on-exit.test.ts, tests/src/12-auto-update-running.test.ts);
 // this file exercises the same paths inside real containers and does not duplicate.
+//
+// Concurrency isolation: many checkouts/worktrees of this repo may run this suite
+// at the same time against the SHARED docker daemon. Every daemon-global
+// identifier — compose project, network name, subnet, fileserver IP, image tags —
+// is therefore derived from a hash of the worktree path: STABLE per worktree (so
+// a crashed run's leftovers are reclaimed by the next run here) and unique across
+// worktrees (so concurrent runs never tear down or rebuild each other's stacks).
+// The derived values reach docker-compose.yml via LODE_E2E_* env interpolation,
+// and the committed lode.toml fixtures (which hard-code the default fileserver
+// IP) are rewritten to the per-run IP before being `docker cp`ed in.
 
 import { afterAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -38,8 +49,22 @@ import { baseEnv, flipHex, sleep } from "../helpers/util.ts";
 const REPO_ROOT = resolve(import.meta.dir, "../../..");
 const COMPOSE_FILE = join(REPO_ROOT, "tests/compose/docker-compose.yml");
 const COMPOSE_DIR = join(REPO_ROOT, "tests/compose");
-const PROJECT = "lode_e2e";
-const SERVER_IP = "10.123.231.2"; // fileserver fixed IP (matches docker-compose.yml + lode.toml)
+
+// Per-worktree isolation suffix + derived daemon-global identifiers (see header).
+const RUN_HASH = createHash("md5").update(REPO_ROOT).digest();
+const SUFFIX = RUN_HASH.toString("hex").slice(0, 8);
+const PROJECT = `lode_e2e_${SUFFIX}`;
+const NETWORK = `lode_e2e_net_${SUFFIX}`;
+const LODE_IMAGE = `lode:e2e-${SUFFIX}`;
+const FS_IMAGE = `lode-fileserver:e2e-${SUFFIX}`;
+// Subnet 10.<100..199>.<0..255>.0/24 — derived, so concurrent runs don't collide
+// on overlapping address pools, and clear of docker's 172.16/12 + 192.168/16
+// defaults. The fileserver keeps the fixed .2 host address inside it (static
+// distroless binaries reach it by literal IP — no DNS/NSS).
+const SUBNET_BASE = `10.${100 + (RUN_HASH[0]! % 100)}.${RUN_HASH[1]!}`;
+const SUBNET = `${SUBNET_BASE}.0/24`;
+const SERVER_IP = `${SUBNET_BASE}.2`; // per-run fileserver IP (interpolated into compose + lode.toml)
+const DEFAULT_SERVER_IP = "10.123.231.2"; // the standalone default hard-coded in the lode.toml fixtures
 const SERVER_PORT = 8080;
 const ARCH = process.arch === "arm64" ? "aarch64" : "x86_64";
 const DOCKER_ARCH = process.arch === "arm64" ? "arm64" : "amd64";
@@ -130,7 +155,6 @@ interface Asset {
   sha256: string;
   sig?: string;
   key_id?: string;
-  entry: string;
 }
 interface Manifest {
   schema: "lode/v1";
@@ -141,9 +165,10 @@ interface Manifest {
 
 interface PublishOpts {
   srcPath: string;
-  /** The served asset filename — the selection key (`[update].asset`) + advisory
-   *  entry; also the basename the signature binds. */
-  entry: string;
+  /** The served asset filename — the selection key (`[update].asset`), the
+   *  basename the signature binds, and where the raw artifact lands (each
+   *  service's lode.toml [command] names it, e.g. run = "./web-rust"). */
+  asset: string;
   latest?: boolean;
   tamperSha?: boolean;
   omitSig?: boolean;
@@ -176,25 +201,25 @@ class Registry {
   }
 
   /** Build (copy), sign, and register a version; rewrites the app's manifest.json.
-   *  The asset is served — and keyed in the manifest — under `opts.entry`, which is
+   *  The asset is served — and keyed in the manifest — under `opts.asset`, which is
    *  the filename each app's lode.toml names via `[update].asset`. */
   async publish(app: string, version: string, opts: PublishOpts): Promise<void> {
     const dir = join(this.www, app, "artifacts", version);
     mkdirSync(dir, { recursive: true });
-    const dest = join(dir, opts.entry);
+    const dest = join(dir, opts.asset);
     copyFileSync(opts.srcPath, dest);
     chmodSync(dest, 0o755);
 
-    // The signature binds the asset filename (= basename(dest) = opts.entry) +
-    // version + sha256 only; url/entry are runtime fields and are never signed.
-    const url = `http://${SERVER_IP}:${SERVER_PORT}/${app}/artifacts/${version}/${opts.entry}`;
+    // The signature binds the asset filename (= basename(dest) = opts.asset) +
+    // version + sha256 (+ run/exec overrides, unused here — each service's
+    // lode.toml [command] drives the launch); the url is never signed.
+    const url = `http://${SERVER_IP}:${SERVER_PORT}/${app}/artifacts/${version}/${opts.asset}`;
     const signed = await this.#signer.sign(dest, version);
     const sha256 = opts.tamperSha ? flipHex(signed.sha256) : signed.sha256;
     const asset: Asset = {
-      name: opts.entry,
+      name: opts.asset,
       url,
       sha256,
-      entry: opts.entry,
     };
     if (!opts.omitSig) {
       asset.sig = signed.sig;
@@ -242,7 +267,16 @@ class Registry {
 // --- docker / compose helpers ----------------------------------------------
 
 function composeEnv(trustedKey: string): Record<string, string> {
-  return { ...baseEnv(), TRUSTED_KEY: trustedKey };
+  return {
+    ...baseEnv(),
+    TRUSTED_KEY: trustedKey,
+    // Per-run identifiers interpolated by docker-compose.yml (isolation, see header).
+    LODE_E2E_NET: NETWORK,
+    LODE_E2E_SUBNET: SUBNET,
+    LODE_E2E_SERVER_IP: SERVER_IP,
+    LODE_E2E_IMAGE: LODE_IMAGE,
+    LODE_E2E_FS_IMAGE: FS_IMAGE,
+  };
 }
 
 let TRUSTED = "";
@@ -374,6 +408,13 @@ afterAll(async () => {
     } catch {
       // best effort
     }
+    try {
+      // Only THIS run's derived tags — never another worktree's images. The
+      // buildkit layer cache survives, so the next run here rebuilds cheaply.
+      await sh(["docker", "rmi", "-f", LODE_IMAGE, FS_IMAGE]);
+    } catch {
+      // best effort
+    }
   }
   for (const d of cleanup) {
     try {
@@ -393,6 +434,10 @@ itDocker(
   "two lode containers: auto-update, single-strike rollback, update-by-exit, bounded restart",
   async () => {
     const root = tmp("lode-e2e-");
+    log(
+      `isolation: project=${PROJECT} network=${NETWORK} subnet=${SUBNET} ` +
+        `fileserver=${SERVER_IP} images=${LODE_IMAGE},${FS_IMAGE}`,
+    );
 
     // PHASE 0 — publisher key + registry -------------------------------------
     log("phase 0: keygen + registry");
@@ -412,12 +457,12 @@ itDocker(
     copyFileSync(await cargoBuildStatic(webRustDir, "web-rust", { BUILD_BAD: "1" }), webRustBad);
 
     // PHASE 2 — build the local images --------------------------------------
-    log("phase 2: docker build lode:e2e + lode-fileserver:e2e");
+    log(`phase 2: docker build ${LODE_IMAGE} + ${FS_IMAGE}`);
     const stageDir = join(REPO_ROOT, `linux-${DOCKER_ARCH}`);
     mkdirSync(stageDir, { recursive: true });
     copyFileSync(lodeBin, join(stageDir, "lode"));
-    const buildLode = await sh(["docker", "build", "-t", "lode:e2e", REPO_ROOT]);
-    expect(buildLode.exitCode, `docker build lode:e2e failed:\n${buildLode.stderr}`).toBe(0);
+    const buildLode = await sh(["docker", "build", "-t", LODE_IMAGE, REPO_ROOT]);
+    expect(buildLode.exitCode, `docker build ${LODE_IMAGE} failed:\n${buildLode.stderr}`).toBe(0);
 
     const fsCtx = tmp("lode-fsctx-");
     copyFileSync(lodetestBin, join(fsCtx, "lodetest"));
@@ -425,7 +470,7 @@ itDocker(
       "docker",
       "build",
       "-t",
-      "lode-fileserver:e2e",
+      FS_IMAGE,
       "-f",
       join(COMPOSE_DIR, "fileserver/Dockerfile"),
       fsCtx,
@@ -435,12 +480,12 @@ itDocker(
     // PHASE 3 — stage the initial v0.0.1 manifests + runtime -----------------
     log("phase 3: sign + stage v0.0.1 (web-rust, web-bun, crash) + stub bun runtime");
     reg.putRuntime(lodetestBin);
-    await reg.publish("web-rust", "0.0.1", { srcPath: webRustGood, entry: "web-rust" });
+    await reg.publish("web-rust", "0.0.1", { srcPath: webRustGood, asset: "web-rust" });
     const bun001 = join(root, "app-0.0.1.ts");
     writeFileSync(bun001, makeBunScript("0.0.1", false));
-    await reg.publish("web-bun", "0.0.1", { srcPath: bun001, entry: "app.ts" });
+    await reg.publish("web-bun", "0.0.1", { srcPath: bun001, asset: "app.ts" });
     // svc-restart's "crash" app: a crashing native binary (policy=off, never updates).
-    await reg.publish("crash", "0.0.1", { srcPath: webRustBad, entry: "crashbin" });
+    await reg.publish("crash", "0.0.1", { srcPath: webRustBad, asset: "crashbin" });
 
     // PHASE 4 — create containers, cp config + registry, start ----------------
     log("phase 4: compose create + docker cp config/registry + start");
@@ -455,13 +500,18 @@ itDocker(
     expect(fsCid && rustCid && bunCid && restartCid, "all containers created").toBeTruthy();
     reg.setFileserver(fsCid);
 
-    // Config: docker cp each committed lode.toml (LODE_CONFIG=/etc/lode.toml).
+    // Config: docker cp each committed lode.toml (LODE_CONFIG=/etc/lode.toml),
+    // rewriting the fixture's default fileserver IP to this run's derived one.
+    const cfgDir = tmp("lode-cfg-");
     for (const [svc, cid] of [
       ["svc-rust", rustCid],
       ["svc-bun", bunCid],
       ["svc-restart", restartCid],
     ] as const) {
-      const cp = await sh(["docker", "cp", join(COMPOSE_DIR, svc, "lode.toml"), `${cid}:/etc/lode.toml`]);
+      const toml = readFileSync(join(COMPOSE_DIR, svc, "lode.toml"), "utf8").replaceAll(DEFAULT_SERVER_IP, SERVER_IP);
+      const local = join(cfgDir, `${svc}.toml`);
+      writeFileSync(local, toml);
+      const cp = await sh(["docker", "cp", local, `${cid}:/etc/lode.toml`]);
       expect(cp.exitCode, `cp config ${svc}: ${cp.stderr}`).toBe(0);
     }
     await reg.syncInitial();
@@ -494,10 +544,10 @@ itDocker(
 
     // PHASE 6 — auto-update v0.0.1 -> v0.0.2 (policy=auto) --------------------
     log("phase 6: publish v0.0.2 (latest) -> both auto-update");
-    await reg.publish("web-rust", "0.0.2", { srcPath: webRustGood, entry: "web-rust" });
+    await reg.publish("web-rust", "0.0.2", { srcPath: webRustGood, asset: "web-rust" });
     const bun002 = join(root, "app-0.0.2.ts");
     writeFileSync(bun002, makeBunScript("0.0.2", false));
-    await reg.publish("web-bun", "0.0.2", { srcPath: bun002, entry: "app.ts" });
+    await reg.publish("web-bun", "0.0.2", { srcPath: bun002, asset: "app.ts" });
     await reg.sync();
     await pollVersion(fsCid, rustCid,"0.0.2", 60_000, "svc-rust auto v0.0.2");
     await pollVersion(fsCid, bunCid,"0.0.2", 60_000, "svc-bun auto v0.0.2");
@@ -508,10 +558,10 @@ itDocker(
     // Published as a (signed) version but NOT channel-latest, then requested via
     // state.target, so policy=auto cannot re-apply it in a loop after rollback.
     log("phase 7: crashing v0.0.3 -> single-strike rollback to v0.0.2 (both)");
-    await reg.publish("web-rust", "0.0.3", { srcPath: webRustBad, entry: "web-rust", latest: false });
+    await reg.publish("web-rust", "0.0.3", { srcPath: webRustBad, asset: "web-rust", latest: false });
     const bun003 = join(root, "app-0.0.3.ts");
     writeFileSync(bun003, makeBunScript("0.0.3", true));
-    await reg.publish("web-bun", "0.0.3", { srcPath: bun003, entry: "app.ts", latest: false });
+    await reg.publish("web-bun", "0.0.3", { srcPath: bun003, asset: "app.ts", latest: false });
     await reg.sync();
 
     const rolledBack = async (cid: string, label: string): Promise<void> => {
@@ -550,7 +600,7 @@ itDocker(
     log("phase 8: update-by-app-exit on svc-bun -> v0.0.5 (no flap)");
     const bun005 = join(root, "app-0.0.5.ts");
     writeFileSync(bun005, makeBunScript("0.0.5", false));
-    await reg.publish("web-bun", "0.0.5", { srcPath: bun005, entry: "app.ts", latest: false });
+    await reg.publish("web-bun", "0.0.5", { srcPath: bun005, asset: "app.ts", latest: false });
     await reg.sync();
     const start002 = countMatches(await logsOf(bunCid), /\[bun\] starting version=0\.0\.2/g);
     await dropExitTrigger(bunCid, "0.0.5");
@@ -561,18 +611,20 @@ itDocker(
     expect(countMatches(bunLogs, /\[bun\] starting version=0\.0\.2/g), "no v0.0.2 relaunch (no flap)").toBe(start002);
     expect((await containerState(bunCid)).running, "svc-bun still up after update-by-exit").toBe(true);
 
-    // PHASE 9 — opt-in restart=always bounds the crash loop then exits -------
-    log("phase 9: svc-restart bounded its restart loop and exited (status=error)");
+    // PHASE 9 — restart=always bounds the crash loop then PAUSES (keep-alive) --
+    log("phase 9: svc-restart bounded its restart loop then paused (status=error, still up)");
     const restartState = await pollState(restartCid, (s) => s.status === "error", 30_000, "svc-restart status=error");
     expect(restartState.status).toBe("error");
+    expect(restartState.last_error ?? "", "svc-restart paused (not exited)").toMatch(/paused/i);
+    // Keep-alive: lode does NOT exit — PID 1 stays alive so the container does not
+    // crash-loop. The container is still running after the app gave up.
     const cs = await containerState(restartCid);
-    expect(cs.running, "svc-restart container exited (docker restart=no)").toBe(false);
-    expect(cs.exitCode, "svc-restart exited non-zero").not.toBe(0);
+    expect(cs.running, "svc-restart container still up (lode paused, did not exit)").toBe(true);
     const restartLogs = await logsOf(restartCid);
     // Bounded: the app launched and crashed more than once (initial + restarts),
-    // then lode gave up at the cap.
+    // then lode paused at the cap.
     expect(countMatches(restartLogs, /\[web-rust\] bad mode/g), "crashing app restarted (bounded)").toBeGreaterThanOrEqual(2);
-    expect(restartLogs, "lode reported hitting the restart limit").toMatch(/restart limit/);
+    expect(restartLogs, "lode reported pausing after the retry cap").toMatch(/pausing/);
 
     // PHASE 10 — clean teardown ----------------------------------------------
     log("phase 10: docker compose down -v");

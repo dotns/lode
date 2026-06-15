@@ -37,8 +37,6 @@ lode-cli [--data-dir DIR] [--app NAME] seed <APP_BIN> [options]
   <APP_BIN>        a local executable, or a .tar.gz / .zip / .gz archive
   --version VER    version id (default: 0.0.0-dev); keys versions/<VER>. Use semver so
                    rollback / the downgrade floor order correctly
-  --entry NAME     entry filename inside the version dir (default: derived from the file
-                   — the basename for a raw binary, the app name for an archive)
   --no-activate    install into versions/ but don't flip current / write state.json
 ```
 
@@ -49,15 +47,16 @@ bytes yourself. The source file is copied, not consumed.
 ### From a local archive (rebuild the version dir from a release `.tar.gz`/`.zip`)
 
 Hand it the same archive a release would ship and it reconstructs the full version
-directory tree under `versions/<VER>/`. `format` is derived from the extension; pass
-`--entry` with the in-archive path to the executable (an archive can't be auto-probed
-for "the" binary — without `--entry` it looks for a file named after `--app` at the
-archive root):
+directory tree under `versions/<VER>/`. `format` is derived from the extension, and the
+scaffolded `lode.toml` `[command].run` is derived from the filename (an archive →
+`./<app>`). The seed does **not** probe the archive for "the" binary — to launch a
+binary nested at e.g. `bin/myapp`, set `[command].run = "./bin/myapp"` in `lode.toml`
+(or have the manifest publish `run`):
 
 ```bash
 # myapp-1.0.0.tar.gz contains  bin/myapp  (+ other files)
 lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
-    --version 1.0.0 --entry bin/myapp
+    --version 1.0.0
 ```
 
 → rebuilds, byte-for-byte like a real install:
@@ -66,7 +65,7 @@ lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
 versions/1.0.0/
 ├── bin/myapp           # unpacked + made executable
 ├── lib/…               # the rest of the archive tree, preserved
-└── .lode.json          # { "version": "1.0.0", "entry": "bin/myapp", "format": "tar.gz" }
+└── .lode.json          # { "version": "1.0.0", "run": null, "exec": null, "format": "tar.gz" }
 ```
 
 ## What it writes
@@ -76,8 +75,8 @@ versions/1.0.0/
 ├── lode.toml                      # scaffolded sourceless config (policy=off) if absent
 ├── versions/
 │   └── 1.0.0/
-│       ├── myapp                  # your binary (the entry), +x
-│       └── .lode.json             # { "version": "1.0.0", "entry": "myapp", "format": "raw" }
+│       ├── myapp                  # your binary, +x
+│       └── .lode.json             # { "version": "1.0.0", "run": null, "exec": null, "format": "raw" }
 ├── current -> versions/1.0.0      # (unless --no-activate) relative symlink
 └── state.json                     # (unless --no-activate) { "current": "1.0.0", "last_good": "1.0.0" }
 ```

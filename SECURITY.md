@@ -62,3 +62,36 @@ path, including:
 
 Issues in third-party dependencies should be reported upstream, but you are
 welcome to notify us if lode's use of a dependency is exploitable.
+
+## Threat Model Summary
+
+- **Artifact verification:** every installed artifact is verified by **sha256**
+  and, when configured, an **ed25519 signature** over a minimal message
+  (asset name / version / sha256). `[trust].require_signature = off | auto |
+  enforce` gates **artifacts only**; `auto` (the default) enforces only when
+  trusted keys are configured — set `enforce` for production.
+- **Catalog/manifest signature:** *verify-if-present* — checked when a
+  signature exists, never required (so GitHub-source catalogs and unsigned
+  native catalogs install, while a present signature must still verify).
+- **Downgrade floor on `latest`:** a rolled-back (or compromised) channel
+  `latest` cannot move an instance below `max(current, last_good)`.
+- **Same-origin credential gating:** `[http].headers` credentials are attached
+  only to same-origin downloads (or hosts explicitly listed in
+  `credential_hosts`) and are stripped on cross-host redirects, so a tampered
+  manifest cannot redirect tokens to an attacker.
+- **HTTPS by default:** plain-http remote fetches are refused unless
+  `allow_insecure` is set; loopback http is always allowed.
+
+## Manifest-supplied `run`/`exec`
+
+A manifest asset may publish optional `run` and `exec` fields that override the operator's `[command]` launch commands. These fields control arbitrary command execution. lode binds them into the per-artifact signed message and the catalog signature — a tampered `run`/`exec` will fail verification under `require_signature = auto` (with keys) or `enforce`. Without signatures, a compromised manifest delivery can inject arbitrary run commands. **Recommendation:** configure `[trust].trusted_keys` and `require_signature = "enforce"` when the manifest is network-served.
+
+## Known Limitations
+
+- **`[runtime].download` artifacts are NOT hash- or signature-verified.** The
+  only protections are TLS and the operator-pinned URL. This is an accepted
+  gap. Mitigations:
+  - pin `[runtime].version` so a swapped runtime fails the version probe;
+  - serve runtimes from a host you control, over HTTPS;
+  - list that host in `credential_hosts` only if it actually needs
+    credentials.

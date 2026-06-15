@@ -59,11 +59,42 @@ pub(crate) enum Error {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// TOML (`lode.toml`) parse error.
+    /// TOML (`lode.toml`) parse error — sanitized message only (see the manual
+    /// `From<toml::de::Error>` below).
     #[error("toml: {0}")]
-    Toml(#[from] toml::de::Error),
+    Toml(String),
 
     /// Integer parse error (numeric config supplied as text).
     #[error("parse: {0}")]
     ParseInt(#[from] std::num::ParseIntError),
+}
+
+/// Sanitizing conversion: `toml::de::Error`'s `Display` echoes the offending
+/// source line (which in a malformed `lode.toml` could be a literal secret), so
+/// keep only the parser message plus the byte span — never the snippet. The
+/// message still names unknown/invalid *keys*, which is the useful part.
+impl From<toml::de::Error> for Error {
+    fn from(e: toml::de::Error) -> Self {
+        let msg = e.span().map_or_else(
+            || e.message().to_owned(),
+            |span| format!("{} (at bytes {}..{})", e.message(), span.start, span.end),
+        );
+        Self::Toml(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn toml_error_never_echoes_file_content() {
+        // A malformed line carrying a literal secret: the unquoted value is a
+        // parse error, and the sanitized variant must not leak it.
+        let bad = "[http]\ntoken = sk-SECRET-VALUE\n";
+        let err: Error = toml::from_str::<toml::Value>(bad).unwrap_err().into();
+        let rendered = err.to_string();
+        assert!(rendered.starts_with("toml: "), "got: {rendered}");
+        assert!(!rendered.contains("SECRET"), "leaked content: {rendered}");
+    }
 }

@@ -21,14 +21,11 @@ use crate::config::{Policy, Readiness, RequireSignature, RestartMode, RestartPol
 /// and falls back to its `LODE_*` env var.
 #[derive(Debug, Args)]
 pub(crate) struct Globals {
-    /// Log level: trace | debug | info | warn | error.
-    #[arg(
-        long = "log-level",
-        env = "LODE_LOG_LEVEL",
-        default_value = "info",
-        global = true
-    )]
-    pub(crate) log_level: String,
+    /// Log level: trace | debug | info | warn | error (default: info).
+    /// `None` means "not set via CLI/env", so `lode.toml`'s `[global].log_level`
+    /// can take effect (precedence CLI/env > TOML > default, resolved in config).
+    #[arg(long = "log-level", env = "LODE_LOG_LEVEL", global = true)]
+    pub(crate) log_level: Option<String>,
 
     /// Path to the `lode.toml` config file (TOML).
     #[arg(long = "config", env = "LODE_CONFIG", global = true)]
@@ -55,9 +52,6 @@ pub(crate) struct Globals {
     /// Asset filename to install on this host (the source-agnostic selection key).
     #[arg(long = "asset", env = "LODE_ASSET", global = true)]
     pub(crate) asset: Option<String>,
-    /// Override the in-archive entry path (advisory; usually omitted).
-    #[arg(long = "entry", env = "LODE_ENTRY", global = true)]
-    pub(crate) entry: Option<String>,
     /// Channel to follow.
     #[arg(long = "channel", env = "LODE_CHANNEL", global = true)]
     pub(crate) channel: Option<String>,
@@ -120,10 +114,12 @@ pub(crate) struct Globals {
     pub(crate) trusted_keys_file: Option<String>,
 
     // --- [command] ---
-    /// Bare-run launch command (`{entry}` auto-appended).
+    /// Bare-run launch command (literal, whitespace-split, cwd = workdir; a
+    /// manifest asset `run` overrides it).
     #[arg(long = "run", env = "LODE_RUN", global = true)]
     pub(crate) run: Option<String>,
-    /// CLI-passthrough base command (`lode <args>` appended).
+    /// CLI-passthrough base command (`lode <args>` appended; a manifest asset
+    /// `exec` overrides it).
     #[arg(long = "exec", env = "LODE_EXEC", global = true)]
     pub(crate) exec: Option<String>,
     /// Child working directory (`{dir}` or an absolute path).
@@ -153,7 +149,7 @@ pub(crate) struct Globals {
     pub(crate) runtime_version_check: Option<String>,
 
     // --- [supervise] ---
-    /// Restart policy: off | on-failure | always (default off).
+    /// Restart policy: off | on-failure | always (default on-failure).
     #[arg(long = "restart", env = "LODE_RESTART", global = true)]
     pub(crate) restart: Option<RestartPolicy>,
     /// Crash-restart backoff base, milliseconds (only used when restart != off).
@@ -255,9 +251,6 @@ pub(crate) enum ToolCommand {
         /// the downgrade floor order correctly).
         #[arg(long = "version", default_value = "0.0.0-dev")]
         version: String,
-        /// Entry filename inside the version dir (default: derived from the file).
-        #[arg(long)]
-        entry: Option<String>,
         /// Install into `versions/` but do not flip `current` / write `state.json`.
         #[arg(long)]
         no_activate: bool,
@@ -277,6 +270,14 @@ pub(crate) enum ToolCommand {
         /// Release version (bound into the signature).
         #[arg(long = "version")]
         version: String,
+        /// Launch-command override published with this asset (bound into the
+        /// signature; the loader runs it instead of `[command].run`).
+        #[arg(long)]
+        run: Option<String>,
+        /// Passthrough-command override published with this asset (bound into the
+        /// signature; the loader uses it instead of `[command].exec`).
+        #[arg(long)]
+        exec: Option<String>,
         /// Path to the private key file (base64 seed, from `keygen`).
         #[arg(long)]
         key: Option<String>,
@@ -292,6 +293,12 @@ pub(crate) enum ToolCommand {
         /// Release version (bound into the signature).
         #[arg(long = "version")]
         version: String,
+        /// The asset's published `run` override, if any (part of the signed message).
+        #[arg(long)]
+        run: Option<String>,
+        /// The asset's published `exec` override, if any (part of the signed message).
+        #[arg(long)]
+        exec: Option<String>,
         /// Base64 public key.
         #[arg(long)]
         pubkey: String,
@@ -309,9 +316,14 @@ pub(crate) enum ToolCommand {
         /// Download URL for this asset in the manifest (runtime; not signed).
         #[arg(long, default_value = "https://...")]
         url: String,
-        /// Advisory in-archive entry path (optional; not signed).
+        /// Launch-command override published with this asset (signed; overrides
+        /// the operator's `[command].run`).
         #[arg(long)]
-        entry: Option<String>,
+        run: Option<String>,
+        /// Passthrough-command override published with this asset (signed;
+        /// overrides the operator's `[command].exec`).
+        #[arg(long)]
+        exec: Option<String>,
         /// Expected byte size (optional integrity guard).
         #[arg(long)]
         size: Option<u64>,
@@ -334,7 +346,8 @@ pub(crate) enum ToolCommand {
         #[arg(long)]
         key: String,
     },
-    /// Write a starter `lode.toml` (the documented example config).
+    /// Write a minimal starter `lode.toml` (see docs/lode.example.toml for the
+    /// full documented reference).
     Init {
         /// Destination path; prints to stdout if omitted.
         path: Option<String>,

@@ -3,8 +3,9 @@
 //!
 //! Flow per version: verify the downloaded file's digest against the manifest and
 //! (per `trust.require_signature`) its signature over the §6 canonical message;
-//! stage the unpacked tree under `versions/<ver>.tmp`; `chmod +x` the entry; write
-//! the per-version `.lode.json` marker; then atomically swap it into
+//! stage the unpacked tree under `versions/<ver>.tmp`; `chmod +x` the effective
+//! launch command's target file (see [`chmod_command_targets`]); write the
+//! per-version `.lode.json` marker; then atomically swap it into
 //! `versions/<ver>`. Activation flips the `current` symlink via a temp-symlink
 //! rename. Pruning keeps `current` + `last_good` + the newest `keep_versions`.
 
@@ -19,16 +20,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::{Config, RequireSignature};
 use crate::error::{Error, Result};
-use crate::idval::{validate_entry, validate_id};
-use crate::manifest::{Asset, Manifest, format_from_name};
+use crate::idval::validate_id;
+use crate::manifest::{Asset, Manifest, format_from_name, validate_command_override};
 
 /// Per-version metadata written to `versions/<ver>/.lode.json` so a version can
 /// be launched offline without re-consulting the manifest (design §15). Read back
-/// by the supervisor.
+/// by the supervisor. `run`/`exec` are the manifest asset's optional launch
+/// overrides, copied at install time so an offline relaunch still applies them
+/// (they take precedence over the live `[command].run`/`exec`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Marker {
     pub(crate) version: String,
-    pub(crate) entry: String,
+    #[serde(default)]
+    pub(crate) run: Option<String>,
+    #[serde(default)]
+    pub(crate) exec: Option<String>,
     pub(crate) format: String,
 }
 
@@ -36,21 +42,28 @@ pub(crate) struct Marker {
 ///
 /// `asset.name` (the asset filename) + `version` + `computed_sha` form the §1
 /// canonical signed message. The packaging `format` is derived from `asset.name`
-/// (never stored or signed). `temp_path` is the downloaded file (its sha256 is
-/// `computed_sha`). On success the version dir holds the unpacked tree + marker
-/// and the temp file is removed; on failure no partial version dir is left.
+/// (never stored or signed). `artifact_path` is the downloaded file (its sha256 is
+/// `computed_sha`) — typically the cached `downloads/<version>/<asset>` from
+/// [`crate::download::fetch_artifact`]. On success the version dir holds the unpacked
+/// tree + marker; the artifact itself is **left in place** as a reusable cache (a
+/// later launch can re-extract it without re-downloading — it is reclaimed only by
+/// [`prune`]). On failure no partial version dir is left.
 pub(crate) fn install(
     cfg: &Config,
     version: &str,
     asset: &Asset,
-    temp_path: &Path,
+    artifact_path: &Path,
     computed_sha: &str,
 ) -> Result<()> {
-    // Guard the id + advisory in-archive entry before either reaches a path join
-    // (the `<version>.tmp` staging dir below, or the `entry` placed inside it).
+    // Guard the id before it reaches a path join (the `<version>.tmp` staging dir
+    // below), and the launch overrides before they reach the signed messages
+    // (defence in depth — `manifest::parse` already rejects them at the boundary).
     validate_id("version", version)?;
-    if let Some(entry) = asset.entry.as_deref() {
-        validate_entry(entry)?;
+    if let Some(run) = asset.run.as_deref() {
+        validate_command_override("run", run)?;
+    }
+    if let Some(exec) = asset.exec.as_deref() {
+        validate_command_override("exec", exec)?;
     }
 
     verify_integrity(asset, computed_sha)?;
@@ -64,7 +77,7 @@ pub(crate) fn install(
 
     // Stage into the `.tmp` dir; tear it down on any failure so we never leave a
     // half-extracted version behind.
-    if let Err(e) = stage(cfg, asset, temp_path, &staging, version) {
+    if let Err(e) = stage(cfg, asset, artifact_path, &staging, version) {
         let _ = fs::remove_dir_all(&staging);
         return Err(e);
     }
@@ -77,7 +90,8 @@ pub(crate) fn install(
     fs::rename(&staging, &final_dir)
         .map_err(|e| Error::Install(format!("finalize versions/{version}: {e}")))?;
 
-    let _ = fs::remove_file(temp_path);
+    // The downloaded artifact is intentionally retained as the per-version cache
+    // (`downloads/<version>/`); `prune` reclaims it alongside the version dir.
     Ok(())
 }
 
@@ -86,29 +100,21 @@ pub(crate) fn install(
 /// bytes). The staging + atomic activation are identical to a real [`install`], so
 /// the resulting `versions/<version>` is indistinguishable from a downloaded one —
 /// it just never consulted a manifest. `source`'s filename selects the packaging
-/// format (§3); `entry` overrides the launch/in-archive entry (otherwise the normal
-/// resolution applies). With `activate`, also flips `current` and records
+/// format (§3) and is where a raw/gz file lands inside the version dir; the launch
+/// command comes from `[command]` (the sourceless scaffold derives one from the
+/// same filename). With `activate`, also flips `current` and records
 /// `current`/`last_good` in `state.json`. Backs `lode-cli seed`.
-pub(crate) fn seed_local(
-    cfg: &Config,
-    version: &str,
-    source: &Path,
-    entry: Option<&str>,
-    activate: bool,
-) -> Result<()> {
+pub(crate) fn seed_local(cfg: &Config, version: &str, source: &Path, activate: bool) -> Result<()> {
     validate_id("version", version)?;
-    if let Some(entry) = entry {
-        validate_entry(entry)?;
-    }
     if !source.is_file() {
         return Err(Error::Install(format!(
             "seed source {} is not a file",
             source.display()
         )));
     }
-    // Synthetic asset: its filename drives the packaging format; `url` carries the
-    // source path so the raw/gz entry fallback (url basename) resolves; `sha256`/`sig`
-    // are unused on this path (no integrity/identity check).
+    // Synthetic asset: its filename drives the packaging format and the raw/gz
+    // landing name; `sha256`/`sig` are unused on this path (no integrity/identity
+    // check) and it publishes no run/exec override (the local `[command]` decides).
     let name = source.file_name().and_then(OsStr::to_str).ok_or_else(|| {
         Error::Install(format!("seed source {} has no filename", source.display()))
     })?;
@@ -118,7 +124,8 @@ pub(crate) fn seed_local(
         sha256: String::new(),
         sig: None,
         key_id: None,
-        entry: entry.map(ToOwned::to_owned),
+        run: None,
+        exec: None,
         size: None,
         auth: false,
     };
@@ -143,6 +150,10 @@ pub(crate) fn seed_local(
     if activate {
         switch_current(cfg, version)?;
         let path = cfg.global.data_dir.join("state.json");
+        // Strict read on purpose: seeding is CLI-only (`lode-cli seed` is its sole
+        // caller — never reached from the supervisor), and CLI commands fail loudly
+        // on a corrupt state.json instead of quarantining it (the lenient
+        // [`crate::state::read_lenient`] is reserved for supervise-loop/boot paths).
         let mut st = crate::state::read(&path)?.unwrap_or_default();
         st.current = Some(version.to_owned());
         if st.last_good.is_none() {
@@ -153,9 +164,10 @@ pub(crate) fn seed_local(
     Ok(())
 }
 
-/// Extract the asset into `staging`, make the entry executable and write the
-/// marker. The packaging `format` is derived from the asset filename (§3). Kept
-/// separate so [`install`] can clean up `staging` on any error.
+/// Extract the asset into `staging`, make the effective launch command's target
+/// executable ([`chmod_command_targets`]) and write the marker. The packaging
+/// `format` is derived from the asset filename (§3). Kept separate so [`install`]
+/// can clean up `staging` on any error.
 fn stage(
     cfg: &Config,
     asset: &Asset,
@@ -164,9 +176,33 @@ fn stage(
     version: &str,
 ) -> Result<()> {
     let format = format_from_name(&asset.name);
-    let entry = extract(cfg, asset, format, temp_path, staging)?;
-    chmod_x(&staging.join(&entry))?;
-    write_marker(staging, version, &entry, format)?;
+    extract(asset, format, temp_path, staging)?;
+    chmod_command_targets(cfg, asset, staging)?;
+    write_marker(staging, version, asset, format)?;
+    Ok(())
+}
+
+/// Auto `chmod +x` after extraction: for each of the *effective* run/exec
+/// commands (the asset's signed override, else the operator's `[command]` value),
+/// take its FIRST whitespace token; when that token is a relative path naming an
+/// existing FILE inside the version dir, add the executable bit. A token that is
+/// absolute, traversing, or not a version-dir file (e.g. `bun` in
+/// `run = "bun run app.ts"`) is left untouched — it resolves via PATH at launch.
+fn chmod_command_targets(cfg: &Config, asset: &Asset, dir: &Path) -> Result<()> {
+    let run = asset.run.as_deref().or(cfg.command.run.as_deref());
+    let exec = asset.exec.as_deref().or(cfg.command.exec.as_deref());
+    for command in [run, exec].into_iter().flatten() {
+        let Some(token) = command.split_whitespace().next() else {
+            continue;
+        };
+        // Absolute / `..` tokens are not version-dir files — skip, never error.
+        let Ok(path) = safe_join(dir, token) else {
+            continue;
+        };
+        if path.is_file() {
+            chmod_x(&path)?;
+        }
+    }
     Ok(())
 }
 
@@ -199,9 +235,14 @@ pub(crate) fn switch_current(_cfg: &Config, _version: &str) -> Result<()> {
 }
 
 /// Prune installed versions, keeping `current` + `last_good` + the newest
-/// `keep_versions` (by semver). Everything else under `versions/` is removed.
+/// `keep_versions` (by semver). Everything else under `versions/` is removed, and the
+/// matching per-version download cache (`downloads/<v>/`) is reclaimed in lockstep so
+/// the retained artifact set never outlives the version set. A download-only `<v>`
+/// (downloaded but not — or no longer — extracted) is pruned too unless it is in the
+/// keep set, so a failed install's artifact does not accumulate indefinitely.
 pub(crate) fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>) -> Result<()> {
-    let versions_dir = cfg.global.data_dir.join("versions");
+    let data_dir = &cfg.global.data_dir;
+    let versions_dir = data_dir.join("versions");
     let installed = collect_version_dirs(&versions_dir)?;
     let keep_n = usize::try_from(cfg.update.keep_versions).unwrap_or(usize::MAX);
 
@@ -223,12 +264,45 @@ pub(crate) fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>
                 .map_err(|e| Error::Install(format!("prune {}: {e}", dir.display())))?;
         }
     }
+
+    // Reclaim cached downloads for any version not in the keep set (including
+    // download-only versions that never extracted). The runtime cache is exempt — it
+    // is keyed by name, not version, and managed by the runtime path.
+    for cached in cached_download_versions(&data_dir.join("downloads")) {
+        if cached != "runtime" && !keep.contains(cached.as_str()) {
+            let dir = data_dir.join("downloads").join(&cached);
+            fs::remove_dir_all(&dir)
+                .map_err(|e| Error::Install(format!("prune {}: {e}", dir.display())))?;
+        }
+    }
     Ok(())
 }
 
-/// Startup garbage collection: drop interrupted `downloads/*.part` and
-/// half-extracted `versions/*.tmp`. Best-effort — individual failures are
-/// ignored (used by the supervisor at startup, design §5).
+/// The version ids that currently have a download cache directory under `downloads/`.
+/// Only sub*directories* count — the nested-cache layout is `downloads/<v>/<asset>`,
+/// so a stray top-level file (e.g. a legacy flat `.part`) is ignored here and left to
+/// [`gc`]. Missing `downloads/` yields an empty list.
+fn cached_download_versions(downloads_dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(downloads_dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_dir())
+            && let Some(name) = entry.file_name().to_str()
+        {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+/// Startup garbage collection: drop interrupted downloads (`*.part`) and
+/// half-extracted `versions/*.tmp`, while leaving the verified per-version download
+/// cache intact (it is reclaimed by [`prune`], not here). `.part` temps live inside
+/// the per-version cache dir (`downloads/<v>/<asset>.part`), so the sweep descends one
+/// level; a legacy flat `downloads/*.part` is also reaped. Best-effort — individual
+/// failures are ignored (used by the supervisor at startup, design §5).
 // `Result` is part of the supervisor's startup-sequence contract (it calls `gc`
 // alongside other fallible setup), even though GC itself swallows I/O errors.
 #[allow(clippy::unnecessary_wraps)]
@@ -236,7 +310,18 @@ pub(crate) fn gc(cfg: &Config) -> Result<()> {
     let data_dir = &cfg.global.data_dir;
     if let Ok(entries) = fs::read_dir(data_dir.join("downloads")) {
         for entry in entries.flatten() {
-            if entry.file_name().to_string_lossy().ends_with(".part") {
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir {
+                // Per-version cache dir: reap any interrupted `.part`, keep the rest.
+                if let Ok(inner) = fs::read_dir(entry.path()) {
+                    for f in inner.flatten() {
+                        if f.file_name().to_string_lossy().ends_with(".part") {
+                            let _ = fs::remove_file(f.path());
+                        }
+                    }
+                }
+            } else if entry.file_name().to_string_lossy().ends_with(".part") {
+                // Legacy flat layout (pre-cache): a stray top-level `.part`.
                 let _ = fs::remove_file(entry.path());
             }
         }
@@ -252,8 +337,9 @@ pub(crate) fn gc(cfg: &Config) -> Result<()> {
 }
 
 /// Read a version's `.lode.json` marker (written at install time) so the
-/// supervisor can launch it offline — `entry`/`format` without re-fetching the
-/// manifest (design §15). Errors if the version is not installed.
+/// supervisor can launch it offline — the `run`/`exec` overrides + `format`
+/// without re-fetching the manifest (design §15). Errors if the version is not
+/// installed.
 pub(crate) fn marker(cfg: &Config, version: &str) -> Result<Marker> {
     let path = cfg
         .global
@@ -428,10 +514,19 @@ fn verify_identity(cfg: &Config, version: &str, asset: &Asset, computed_sha: &st
 
 /// Bridge to [`crate::verify::verify_artifact_sig`], mapping its error into the
 /// crate's `verify:` domain. The signed identity is the asset filename
-/// (`asset.name`) + version + digest — never `platform`/`format`/`entry`/`url`.
+/// (`asset.name`) + version + digest + the optional `run`/`exec` launch overrides
+/// — never `platform`/`format`/`url`.
 fn check_sig(version: &str, asset: &Asset, sha: &str, sig: &str, keys: &[String]) -> Result<()> {
-    crate::verify::verify_artifact_sig(&asset.name, version, sha, sig, keys)
-        .map_err(|e| Error::Verify(e.to_string()))
+    crate::verify::verify_artifact_sig(
+        &asset.name,
+        version,
+        sha,
+        asset.run.as_deref(),
+        asset.exec.as_deref(),
+        sig,
+        keys,
+    )
+    .map_err(|e| Error::Verify(e.to_string()))
 }
 
 /// Manifest identity (catalog signature) — **verify-if-present, never required**.
@@ -539,112 +634,57 @@ const MAX_DECOMPRESSED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 
 /// Land the downloaded file into `dest_dir` per `format` (derived from the asset
-/// filename), returning the entry's path relative to `dest_dir`. Verifies the entry
-/// exists afterward. `format` is one of `raw`/`gz`/`tar.gz`/`zip`.
-fn extract(
-    cfg: &Config,
-    asset: &Asset,
-    format: &str,
-    temp_path: &Path,
-    dest_dir: &Path,
-) -> Result<String> {
-    let entry = match format {
+/// filename). A `raw` file lands under the asset filename itself; a `gz` lands
+/// under the filename minus its `.gz` suffix; archives unpack as-is. The launch
+/// command (manifest `run`/`exec` override, else `[command]`) names what to
+/// execute, so nothing here resolves or verifies an entry point.
+fn extract(asset: &Asset, format: &str, temp_path: &Path, dest_dir: &Path) -> Result<()> {
+    match format {
         "raw" => {
-            let rel = single_entry(cfg, asset, false)?;
-            let dest = safe_join(dest_dir, &rel)?;
+            let dest = safe_join(dest_dir, &asset.name)?;
             ensure_parent(&dest)?;
             fs::copy(temp_path, &dest)
                 .map_err(|e| Error::Install(format!("place raw asset: {e}")))?;
-            rel
         }
         "gz" => {
-            let rel = single_entry(cfg, asset, true)?;
-            let dest = safe_join(dest_dir, &rel)?;
+            let stem = strip_gz_suffix(&asset.name);
+            if stem.is_empty() {
+                return Err(Error::Install(format!(
+                    "cannot derive an output filename from gz asset {:?}",
+                    asset.name
+                )));
+            }
+            let dest = safe_join(dest_dir, stem)?;
             ensure_parent(&dest)?;
             gunzip_file(temp_path, &dest)?;
-            rel
         }
-        "tar.gz" => {
-            unpack_tar_gz(temp_path, dest_dir)?;
-            archive_entry(cfg, asset)?
-        }
-        "zip" => {
-            unpack_zip(temp_path, dest_dir)?;
-            archive_entry(cfg, asset)?
-        }
+        "tar.gz" => unpack_tar_gz(temp_path, dest_dir)?,
+        "zip" => unpack_zip(temp_path, dest_dir)?,
         other => return Err(Error::Install(format!("unsupported format {other:?}"))),
-    };
-
-    let entry_path = safe_join(dest_dir, &entry)?;
-    if !entry_path.is_file() {
-        return Err(Error::Install(format!(
-            "entry {entry:?} not found after extracting {format} archive"
-        )));
     }
-    Ok(entry)
+    Ok(())
 }
 
-/// Resolve the entry path (§4): the advisory `asset.entry`, else the operator's
-/// `[update].entry`, else `fallback` (the convention). Empty values count as unset.
-fn resolved_entry(cfg: &Config, asset: &Asset, fallback: &str) -> String {
-    let advisory = asset.entry.as_deref().filter(|e| !e.is_empty());
-    let operator = cfg.update.entry.as_deref().filter(|e| !e.is_empty());
-    advisory
-        .or(operator)
-        .map_or_else(|| fallback.to_owned(), ToOwned::to_owned)
+/// `name` minus a trailing `.gz` (case-insensitive, matching [`format_from_name`]);
+/// unchanged when the suffix is absent.
+fn strip_gz_suffix(name: &str) -> &str {
+    name.len()
+        .checked_sub(3)
+        .filter(|&i| name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".gz"))
+        .map_or(name, |i| &name[..i])
 }
 
-/// The single-file entry name for `raw`/`gz` (§4): advisory > `[update].entry` >
-/// the URL basename (with the `.gz` suffix stripped when `strip_gz`).
-fn single_entry(cfg: &Config, asset: &Asset, strip_gz: bool) -> Result<String> {
-    let base = url_basename(&asset.url);
-    let fallback = if strip_gz {
-        base.strip_suffix(".gz").unwrap_or(&base).to_owned()
-    } else {
-        base
-    };
-    let name = resolved_entry(cfg, asset, &fallback);
-    if name.is_empty() {
-        return Err(Error::Install(format!(
-            "cannot determine entry filename from {}",
-            asset.url
-        )));
-    }
-    Ok(name)
-}
-
-/// The in-archive `entry` for `tar.gz`/`zip` (§4): advisory > `[update].entry` >
-/// the app name (`{app}` at the archive root) as the convention.
-fn archive_entry(cfg: &Config, asset: &Asset) -> Result<String> {
-    let name = resolved_entry(cfg, asset, &cfg.global.app);
-    if name.is_empty() {
-        return Err(Error::Install(
-            "cannot determine archive entry (no advisory entry, no [update].entry, empty app)"
-                .to_owned(),
-        ));
-    }
-    Ok(name)
-}
-
-/// Last path segment of a URL, with any query/fragment stripped.
-fn url_basename(url: &str) -> String {
-    let path = url.split(['?', '#']).next().unwrap_or(url);
-    path.rsplit('/').next().unwrap_or(path).to_owned()
-}
-
-/// Join `rel` under `base`, rejecting absolute paths and `..` traversal so an
-/// archive/entry can never escape the version dir.
+/// Join `rel` under `base`, rejecting absolute paths and `..` traversal so a
+/// landed file or chmod target can never escape the version dir.
 fn safe_join(base: &Path, rel: &str) -> Result<PathBuf> {
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
-        return Err(Error::Install(format!(
-            "unsafe entry path (absolute): {rel:?}"
-        )));
+        return Err(Error::Install(format!("unsafe path (absolute): {rel:?}")));
     }
     for comp in rel_path.components() {
         match comp {
             Component::Normal(_) | Component::CurDir => {}
-            _ => return Err(Error::Install(format!("unsafe entry path: {rel:?}"))),
+            _ => return Err(Error::Install(format!("unsafe path: {rel:?}"))),
         }
     }
     Ok(base.join(rel_path))
@@ -695,9 +735,9 @@ fn gunzip_file_capped(src: &Path, dest: &Path, max_bytes: u64) -> Result<()> {
 /// is `false`), but it would still carry the low `0o777` bits — including
 /// world-writable — verbatim. So we iterate entries, unpack each safely, and
 /// clamp regular files and directories to a fixed safe mode exactly like
-/// [`unpack_zip`] (this also preserves the exec bit on non-entry executables,
-/// e.g. bundled helper scripts). The designated entry is additionally
-/// `chmod +x`'d by [`stage`].
+/// [`unpack_zip`] (this also preserves the exec bit on bundled executables,
+/// e.g. helper scripts). The launch command's target file is additionally
+/// `chmod +x`'d by [`stage`] (see [`chmod_command_targets`]).
 fn unpack_tar_gz(src: &Path, dest_dir: &Path) -> Result<()> {
     unpack_tar_gz_capped(src, dest_dir, MAX_DECOMPRESSED_BYTES, MAX_ARCHIVE_ENTRIES)
 }
@@ -877,11 +917,13 @@ fn chmod_x(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Write the per-version `.lode.json` marker into `dir`.
-fn write_marker(dir: &Path, version: &str, entry: &str, format: &str) -> Result<()> {
+/// Write the per-version `.lode.json` marker into `dir`, copying the asset's
+/// launch overrides so an offline relaunch applies them without the manifest.
+fn write_marker(dir: &Path, version: &str, asset: &Asset, format: &str) -> Result<()> {
     let marker = Marker {
         version: version.to_owned(),
-        entry: entry.to_owned(),
+        run: asset.run.clone(),
+        exec: asset.exec.clone(),
         format: format.to_owned(),
     };
     let json = serde_json::to_vec_pretty(&marker)?;
@@ -980,7 +1022,6 @@ mod tests {
                 github: None,
                 github_api: "https://api.github.com".to_owned(),
                 asset: None,
-                entry: None,
                 channel: "stable".to_owned(),
                 policy: Policy::Check,
                 check_interval: 300,
@@ -998,8 +1039,8 @@ mod tests {
                 trusted_keys_file: None,
             },
             command: Command {
-                run: "{entry}".to_owned(),
-                exec: "{entry}".to_owned(),
+                run: None,
+                exec: None,
                 workdir: "{dir}".to_owned(),
             },
             runtime: Runtime {
@@ -1015,6 +1056,7 @@ mod tests {
                 restart_max: 0,
                 readiness: Readiness::None,
                 ready_timeout: 30,
+                prepare_timeout: 0,
                 health_grace: 15,
                 stop_timeout: 10,
                 restart_mode: RestartMode::StopStart,
@@ -1025,6 +1067,7 @@ mod tests {
                 restart: None,
             },
             env: std::collections::BTreeMap::new(),
+            config_path: None,
         }
     }
 
@@ -1038,16 +1081,18 @@ mod tests {
         (temp, sha)
     }
 
-    /// Build an [`Asset`]; `name`'s suffix drives the derived packaging format and
-    /// is the §1 signed identity. `url` is fixed to a loopback `app.bin`.
-    fn asset(name: &str, sha256: &str, entry: Option<&str>) -> Asset {
+    /// Build an [`Asset`]; `name`'s suffix drives the derived packaging format,
+    /// the raw/gz landing filename, and is the §1 signed identity. No launch
+    /// overrides — tests that need `run`/`exec` set them on the returned value.
+    fn asset(name: &str, sha256: &str) -> Asset {
         Asset {
             name: name.to_owned(),
             url: "http://127.0.0.1/app.bin".to_owned(),
             sha256: sha256.to_owned(),
             sig: None,
             key_id: None,
-            entry: entry.map(ToOwned::to_owned),
+            run: None,
+            exec: None,
             size: None,
             auth: true,
         }
@@ -1067,35 +1112,61 @@ mod tests {
     #[test]
     fn installs_raw_artifact() {
         let dir = scratch("raw");
-        let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        let mut cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        // The operator's run command names the landed file → it gets the exec bit.
+        cfg.command.run = Some("./app.bin".to_owned());
         let body = b"#!/bin/sh\necho hi\n";
         let (temp, sha) = stage_download(&cfg, "1.0.0", body);
-        let art = asset("app.bin", &sha, Some("app.sh"));
+        let art = asset("app.bin", &sha);
 
         install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
 
-        let entry = dir.join("versions/1.0.0/app.sh");
-        assert_eq!(fs::read(&entry).unwrap(), body);
-        assert!(!temp.exists(), "the .part download is removed on success");
+        // A raw asset lands under its asset filename.
+        let placed = dir.join("versions/1.0.0/app.bin");
+        assert_eq!(fs::read(&placed).unwrap(), body);
+        assert!(
+            temp.exists(),
+            "the downloaded artifact is retained as a reusable cache"
+        );
         let marker = read_marker(&dir, "1.0.0");
-        assert_eq!(marker.entry, "app.sh");
+        assert_eq!(marker.run, None); // no manifest override published
+        assert_eq!(marker.exec, None);
         assert_eq!(marker.format, "raw");
         #[cfg(unix)]
-        assert!(is_executable(&entry));
+        assert!(is_executable(&placed));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn raw_entry_defaults_to_url_basename() {
-        let dir = scratch("rawbase");
-        let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
-        let body = b"binary-bytes";
-        let (temp, sha) = stage_download(&cfg, "2.0.0", body);
-        let art = asset("app.bin", &sha, None); // url basename = app.bin
+    fn chmod_follows_effective_run_first_token() {
+        let dir = scratch("chmodrule");
+        let mut cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        // First token `bun` is not a version-dir file → the landed script is NOT
+        // chmod'd via run; the exec override's `./app.bin` IS.
+        cfg.command.run = Some("bun run app.bin".to_owned());
+        let body = b"console.log('hi')\n";
+        let (temp, sha) = stage_download(&cfg, "1.0.0", body);
+        let mut art = asset("app.bin", &sha);
 
-        install(&cfg, "2.0.0", &art, &temp, &sha).unwrap();
-        assert_eq!(fs::read(dir.join("versions/2.0.0/app.bin")).unwrap(), body);
+        install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
+        #[cfg(unix)]
+        assert!(
+            !is_executable(&dir.join("versions/1.0.0/app.bin")),
+            "a runtime-launched file needs no exec bit"
+        );
+
+        // A manifest exec override naming the file flips the bit.
+        let dir2 = scratch("chmodrule2");
+        let cfg2 = cfg_for(dir2.clone(), RequireSignature::Off, Vec::new());
+        let (temp2, sha2) = stage_download(&cfg2, "1.0.0", body);
+        art.sha256.clone_from(&sha2);
+        art.exec = Some("./app.bin --cli".to_owned());
+        install(&cfg2, "1.0.0", &art, &temp2, &sha2).unwrap();
+        #[cfg(unix)]
+        assert!(is_executable(&dir2.join("versions/1.0.0/app.bin")));
+
         let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir2);
     }
 
     #[test]
@@ -1107,7 +1178,8 @@ mod tests {
         enc.write_all(plain).unwrap();
         let gz = enc.finish().unwrap();
         let (temp, sha) = stage_download(&cfg, "1.2.0", &gz);
-        let art = asset("app.gz", &sha, Some("app"));
+        // A gz asset lands under its filename minus the `.gz` suffix.
+        let art = asset("app.gz", &sha);
 
         install(&cfg, "1.2.0", &art, &temp, &sha).unwrap();
         assert_eq!(fs::read(dir.join("versions/1.2.0/app")).unwrap(), plain);
@@ -1133,20 +1205,27 @@ mod tests {
         let targz = enc.finish().unwrap();
 
         let (temp, sha) = stage_download(&cfg, "1.3.0", &targz);
-        let art = asset("app.tar.gz", &sha, Some("bin/app"));
+        // The manifest publishes the launch command for the nested binary; its
+        // first token names a version-dir file → chmod +x, and the marker carries
+        // the override for offline relaunches.
+        let mut art = asset("app.tar.gz", &sha);
+        art.run = Some("./bin/app serve".to_owned());
 
         install(&cfg, "1.3.0", &art, &temp, &sha).unwrap();
-        let entry = dir.join("versions/1.3.0/bin/app");
-        assert_eq!(fs::read(&entry).unwrap(), file_bytes);
+        let placed = dir.join("versions/1.3.0/bin/app");
+        assert_eq!(fs::read(&placed).unwrap(), file_bytes);
         #[cfg(unix)]
-        assert!(is_executable(&entry));
+        assert!(is_executable(&placed));
+        let marker = read_marker(&dir, "1.3.0");
+        assert_eq!(marker.run.as_deref(), Some("./bin/app serve"));
         let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn installs_zip_artifact() {
         let dir = scratch("zip");
-        let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        let mut cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        cfg.command.run = Some("./app".to_owned());
         let file_bytes = b"zipped binary\n";
         let mut zw = zip::ZipWriter::new(io::Cursor::new(Vec::new()));
         let opts = zip::write::SimpleFileOptions::default()
@@ -1156,12 +1235,15 @@ mod tests {
         let zip_bytes = zw.finish().unwrap().into_inner();
 
         let (temp, sha) = stage_download(&cfg, "1.4.0", &zip_bytes);
-        let art = asset("app.zip", &sha, Some("app"));
+        let art = asset("app.zip", &sha);
 
         install(&cfg, "1.4.0", &art, &temp, &sha).unwrap();
-        assert_eq!(
-            fs::read(dir.join("versions/1.4.0/app")).unwrap(),
-            file_bytes
+        let placed = dir.join("versions/1.4.0/app");
+        assert_eq!(fs::read(&placed).unwrap(), file_bytes);
+        #[cfg(unix)]
+        assert!(
+            is_executable(&placed),
+            "[command].run target gets the exec bit"
         );
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1277,7 +1359,7 @@ mod tests {
         let dir = scratch("badsha");
         let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
         let (temp, _real) = stage_download(&cfg, "1.0.0", b"abc");
-        let art = asset("app.bin", "00".repeat(32).as_str(), Some("app"));
+        let art = asset("app.bin", "00".repeat(32).as_str());
 
         let err = install(
             &cfg,
@@ -1305,15 +1387,15 @@ mod tests {
 
         let body = b"signed payload";
         let (temp, sha) = stage_download(&cfg, "1.0.0", body);
-        // Canonical §1 message: asset filename + version + digest only.
+        // Canonical §1 message: filename + version + digest + run/exec (empty here).
         // `asset("app.bin", …)` → the signed `name` is the filename `app.bin`.
-        let msg = format!("lode.artifact.v1\napp.bin\n1.0.0\n{sha}");
+        let msg = format!("lode.artifact.v1\napp.bin\n1.0.0\n{sha}\n\n");
         let sig = B64.encode(signing.sign(msg.as_bytes()).to_bytes());
 
-        let mut art = asset("app.bin", &sha, Some("app"));
+        let mut art = asset("app.bin", &sha);
         art.sig = Some(sig);
         install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
-        assert!(dir.join("versions/1.0.0/app").exists());
+        assert!(dir.join("versions/1.0.0/app.bin").exists());
 
         // Tampered: an untrusted key signs the same message → must fail.
         let dir2 = scratch("sig2");
@@ -1324,13 +1406,65 @@ mod tests {
             vec![format!("testid:{pub_b64}")],
         );
         let (temp2, sha2) = stage_download(&cfg2, "1.0.0", body);
-        let msg2 = format!("lode.artifact.v1\napp.bin\n1.0.0\n{sha2}");
+        let msg2 = format!("lode.artifact.v1\napp.bin\n1.0.0\n{sha2}\n\n");
         let bad_sig = B64.encode(attacker.sign(msg2.as_bytes()).to_bytes());
-        let mut art2 = asset("app.bin", &sha2, Some("app"));
+        let mut art2 = asset("app.bin", &sha2);
         art2.sig = Some(bad_sig);
         let err = install(&cfg2, "1.0.0", &art2, &temp2, &sha2).unwrap_err();
         assert!(matches!(err, Error::Verify(_)));
         assert!(!dir2.join("versions/1.0.0").exists());
+
+        let _ = fs::remove_dir_all(&dir);
+        let _ = fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn tampered_manifest_run_fails_under_enforce() {
+        // §7 regression: the launch overrides are bound into the §1 message, so a
+        // manifest whose `run` was tampered — while carrying an otherwise-valid
+        // signature for the same artifact — must be REFUSED under enforce.
+        let dir = scratch("runsig");
+        let signing = SigningKey::from_bytes(&[21u8; 32]);
+        let pub_b64 = B64.encode(signing.verifying_key().to_bytes());
+        let cfg = cfg_for(
+            dir.clone(),
+            RequireSignature::Enforce,
+            vec![format!("testid:{pub_b64}")],
+        );
+
+        let body = b"#!/bin/sh\necho hi\n";
+        let (temp, sha) = stage_download(&cfg, "1.0.0", body);
+        // The publisher signs run="./app.bin" (exec absent).
+        let msg = format!("lode.artifact.v1\napp.bin\n1.0.0\n{sha}\n./app.bin\n");
+        let sig = B64.encode(signing.sign(msg.as_bytes()).to_bytes());
+
+        // Published as signed → installs, and the marker carries the override.
+        let mut art = asset("app.bin", &sha);
+        art.run = Some("./app.bin".to_owned());
+        art.sig = Some(sig.clone());
+        install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
+        assert_eq!(read_marker(&dir, "1.0.0").run.as_deref(), Some("./app.bin"));
+
+        // Tampered `run` under the same (otherwise valid) signature → refused.
+        let dir2 = scratch("runsig2");
+        let cfg2 = cfg_for(
+            dir2.clone(),
+            RequireSignature::Enforce,
+            vec![format!("testid:{pub_b64}")],
+        );
+        let (temp2, sha2) = stage_download(&cfg2, "1.0.0", body);
+        let mut tampered = asset("app.bin", &sha2);
+        tampered.run = Some("./app.bin --evil".to_owned());
+        tampered.sig = Some(sig.clone());
+        let err = install(&cfg2, "1.0.0", &tampered, &temp2, &sha2).unwrap_err();
+        assert!(matches!(err, Error::Verify(_)));
+        assert!(!dir2.join("versions/1.0.0").exists());
+
+        // Stripping the signed override entirely is tampering too.
+        let mut stripped = asset("app.bin", &sha2);
+        stripped.sig = Some(sig);
+        let err = install(&cfg2, "1.0.0", &stripped, &temp2, &sha2).unwrap_err();
+        assert!(matches!(err, Error::Verify(_)));
 
         let _ = fs::remove_dir_all(&dir);
         let _ = fs::remove_dir_all(&dir2);
@@ -1343,7 +1477,7 @@ mod tests {
         let pub_b64 = B64.encode(signing.verifying_key().to_bytes());
         let cfg = cfg_for(dir.clone(), RequireSignature::Enforce, vec![pub_b64]);
         let (temp, sha) = stage_download(&cfg, "1.0.0", b"x");
-        let art = asset("app.bin", &sha, Some("app")); // sig=None
+        let art = asset("app.bin", &sha); // sig=None
         let err = install(&cfg, "1.0.0", &art, &temp, &sha).unwrap_err();
         assert!(matches!(err, Error::Verify(_)));
         let _ = fs::remove_dir_all(&dir);
@@ -1361,7 +1495,7 @@ mod tests {
             vec![format!("kid:{pub_b64}")],
         );
         let (temp, sha) = stage_download(&cfg, "1.0.0", b"x");
-        let art = asset("app.bin", &sha, Some("app")); // sig=None
+        let art = asset("app.bin", &sha); // sig=None
         let err = install(&cfg, "1.0.0", &art, &temp, &sha).unwrap_err();
         assert!(matches!(err, Error::Verify(_)));
         assert!(!dir.join("versions/1.0.0").exists());
@@ -1375,9 +1509,9 @@ mod tests {
         let cfg = cfg_for(dir.clone(), RequireSignature::Auto, Vec::new());
         let body = b"#!/bin/sh\necho hi\n";
         let (temp, sha) = stage_download(&cfg, "1.0.0", body);
-        let art = asset("app.bin", &sha, Some("app")); // sig=None, but no keys
+        let art = asset("app.bin", &sha); // sig=None, but no keys
         install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
-        assert!(dir.join("versions/1.0.0/app").exists());
+        assert!(dir.join("versions/1.0.0/app.bin").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1400,7 +1534,7 @@ mod tests {
             "1.0.0".to_owned(),
             VersionEntry {
                 notes: None,
-                assets: vec![asset("app.bin", "abc", Some("app"))],
+                assets: vec![asset("app.bin", "abc")],
             },
         );
         Manifest {
@@ -1452,6 +1586,12 @@ mod tests {
         );
         assert!(verify_manifest_identity(&enforce, &tampered).is_err());
         assert!(manifest_trust_posture(&enforce, &tampered).starts_with("VERIFICATION FAILED"));
+
+        // §7 regression (catalog level): a tampered asset `run` under an otherwise
+        // valid catalog signature is rejected too — the signature covers it.
+        let mut run_tampered = m.clone();
+        run_tampered.versions.get_mut("1.0.0").unwrap().assets[0].run = Some("./evil".to_owned());
+        assert!(verify_manifest_identity(&enforce, &run_tampered).is_err());
 
         // A MISSING catalog signature is NEVER required — accepted under every policy
         // (the per-artifact check, gated by require_signature, still binds downloads).
@@ -1512,20 +1652,24 @@ mod tests {
         let dir = scratch("seed");
         // enforce + NO keys: a normal install would refuse, but seed skips verify —
         // proving the local path bypasses the integrity/identity checks by design.
-        let cfg = cfg_for(dir.clone(), RequireSignature::Enforce, Vec::new());
+        let mut cfg = cfg_for(dir.clone(), RequireSignature::Enforce, Vec::new());
+        // What the sourceless scaffold would write for this source filename.
+        cfg.command.run = Some("./myapp.bin".to_owned());
         let src = dir.join("myapp.bin"); // ".bin" → raw format
         let body = b"#!/bin/sh\necho hi\n";
         fs::write(&src, body).unwrap();
 
-        seed_local(&cfg, "1.0.0", &src, Some("app"), true).unwrap();
+        seed_local(&cfg, "1.0.0", &src, true).unwrap();
 
-        // Installed: entry placed + executable, marker written.
-        let entry = dir.join("versions/1.0.0/app");
-        assert_eq!(fs::read(&entry).unwrap(), body);
+        // Installed: the file lands under its own name, the run command's first
+        // token names it → exec bit set; marker written (no overrides to copy).
+        let placed = dir.join("versions/1.0.0/myapp.bin");
+        assert_eq!(fs::read(&placed).unwrap(), body);
         #[cfg(unix)]
-        assert!(is_executable(&entry));
+        assert!(is_executable(&placed));
         let marker = read_marker(&dir, "1.0.0");
-        assert_eq!(marker.entry, "app");
+        assert_eq!(marker.run, None);
+        assert_eq!(marker.exec, None);
         assert_eq!(marker.format, "raw");
 
         // Activated: relative `current` symlink + state.json current/last_good.
@@ -1551,8 +1695,8 @@ mod tests {
         let src = dir.join("app.bin");
         fs::write(&src, b"binary").unwrap();
 
-        // entry=None → derives from the source basename (url fallback).
-        seed_local(&cfg, "2.0.0", &src, None, false).unwrap();
+        // The raw file lands under its source basename.
+        seed_local(&cfg, "2.0.0", &src, false).unwrap();
 
         assert!(dir.join("versions/2.0.0/app.bin").is_file());
         assert!(
@@ -1567,10 +1711,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unsafe_entry_path() {
+    fn seed_local_activate_fails_loudly_on_corrupt_state() {
+        let dir = scratch("seedcorrupt");
+        let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
+        let src = dir.join("app.bin");
+        fs::write(&src, b"binary").unwrap();
+        fs::write(dir.join("state.json"), b"{ definitely not json").unwrap();
+
+        // Seeding is CLI-only, so the activate path keeps the STRICT state read:
+        // a corrupt state.json is an error, and the file stays in place untouched
+        // (no `.corrupt` quarantine — that is the supervisor's lenient behaviour).
+        assert!(seed_local(&cfg, "3.0.0", &src, true).is_err());
+        assert_eq!(
+            fs::read(dir.join("state.json")).unwrap(),
+            b"{ definitely not json",
+            "strict read must not quarantine or rewrite the corrupt file"
+        );
+        assert!(!dir.join("state.json.corrupt").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn safe_join_rejects_escapes() {
         assert!(safe_join(Path::new("/base"), "../escape").is_err());
         assert!(safe_join(Path::new("/base"), "/etc/passwd").is_err());
         assert!(safe_join(Path::new("/base"), "ok/nested").is_ok());
+        assert!(safe_join(Path::new("/base"), "./ok").is_ok());
+    }
+
+    #[test]
+    fn strip_gz_suffix_is_case_insensitive() {
+        assert_eq!(strip_gz_suffix("app.gz"), "app");
+        assert_eq!(strip_gz_suffix("APP.GZ"), "APP");
+        assert_eq!(strip_gz_suffix("app"), "app");
+        assert_eq!(strip_gz_suffix(".gz"), ""); // rejected upstream by extract()
     }
 
     #[cfg(unix)]
@@ -1598,15 +1772,42 @@ mod tests {
         let mut cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
         cfg.update.keep_versions = 2;
         let versions = dir.join("versions");
+        let downloads = dir.join("downloads");
         for v in ["1.0.0", "1.1.0", "1.2.0", "1.3.0", "1.4.0"] {
             fs::create_dir_all(versions.join(v)).unwrap();
+            // Each extracted version also has a cached download to reclaim in lockstep.
+            fs::create_dir_all(downloads.join(v)).unwrap();
+            fs::write(downloads.join(v).join("app.tar.gz"), b"x").unwrap();
         }
+        // A download-only version (never extracted, not in the keep set) and the
+        // runtime cache (keyed by name, exempt from version pruning).
+        fs::create_dir_all(downloads.join("0.9.0")).unwrap();
+        fs::write(downloads.join("0.9.0").join("app.tar.gz"), b"x").unwrap();
+        fs::create_dir_all(downloads.join("runtime")).unwrap();
+        fs::write(downloads.join("runtime").join("bun"), b"x").unwrap();
+
         // keep newest 2 = {1.4.0, 1.3.0}, plus current=1.1.0, last_good=1.0.0
         prune(&cfg, Some("1.1.0"), Some("1.0.0")).unwrap();
         for v in ["1.4.0", "1.3.0", "1.1.0", "1.0.0"] {
-            assert!(versions.join(v).exists(), "{v} should be kept");
+            assert!(versions.join(v).exists(), "{v} version should be kept");
+            assert!(
+                downloads.join(v).exists(),
+                "{v} download cache should be kept"
+            );
         }
-        assert!(!versions.join("1.2.0").exists(), "1.2.0 should be pruned");
+        assert!(!versions.join("1.2.0").exists(), "1.2.0 version pruned");
+        assert!(
+            !downloads.join("1.2.0").exists(),
+            "1.2.0 download cache pruned"
+        );
+        assert!(
+            !downloads.join("0.9.0").exists(),
+            "download-only orphan pruned"
+        );
+        assert!(
+            downloads.join("runtime").exists(),
+            "runtime cache is exempt from version pruning"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1616,12 +1817,15 @@ mod tests {
         let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
         let body = b"#!/bin/sh\necho hi\n";
         let (temp, sha) = stage_download(&cfg, "1.0.0", body);
-        let art = asset("app.bin", &sha, Some("app.sh"));
+        let mut art = asset("app.bin", &sha);
+        art.run = Some("./app.bin serve".to_owned());
+        art.exec = Some("./app.bin".to_owned());
         install(&cfg, "1.0.0", &art, &temp, &sha).unwrap();
 
         let m = marker(&cfg, "1.0.0").unwrap();
         assert_eq!(m.version, "1.0.0");
-        assert_eq!(m.entry, "app.sh");
+        assert_eq!(m.run.as_deref(), Some("./app.bin serve"));
+        assert_eq!(m.exec.as_deref(), Some("./app.bin"));
         assert_eq!(m.format, "raw");
         assert!(marker(&cfg, "9.9.9").is_err());
         let _ = fs::remove_dir_all(&dir);
@@ -1705,16 +1909,26 @@ mod tests {
     }
 
     #[test]
-    fn gc_removes_part_and_tmp() {
+    fn gc_reaps_interrupted_parts_but_keeps_the_cache() {
         let dir = scratch("gc");
         let cfg = cfg_for(dir.clone(), RequireSignature::Off, Vec::new());
-        fs::create_dir_all(dir.join("downloads")).unwrap();
+        fs::create_dir_all(dir.join("downloads/1.0.0")).unwrap();
         fs::create_dir_all(dir.join("versions/1.0.0")).unwrap();
         fs::create_dir_all(dir.join("versions/1.1.0.tmp")).unwrap();
-        fs::write(dir.join("downloads/1.0.0.part"), b"partial").unwrap();
+        // A verified cached artifact (kept) alongside an interrupted download (reaped),
+        // both under the per-version cache dir.
+        fs::write(dir.join("downloads/1.0.0/app.tar.gz"), b"cached").unwrap();
+        fs::write(dir.join("downloads/1.0.0/app.tar.gz.part"), b"partial").unwrap();
+        // A legacy flat top-level `.part` is also reaped.
+        fs::write(dir.join("downloads/legacy.part"), b"old-partial").unwrap();
 
         gc(&cfg).unwrap();
-        assert!(!dir.join("downloads/1.0.0.part").exists());
+        assert!(
+            dir.join("downloads/1.0.0/app.tar.gz").exists(),
+            "verified cache artifact is kept"
+        );
+        assert!(!dir.join("downloads/1.0.0/app.tar.gz.part").exists());
+        assert!(!dir.join("downloads/legacy.part").exists());
         assert!(!dir.join("versions/1.1.0.tmp").exists());
         assert!(dir.join("versions/1.0.0").exists(), "real version kept");
         let _ = fs::remove_dir_all(&dir);

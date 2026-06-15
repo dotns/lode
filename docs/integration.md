@@ -38,27 +38,26 @@ asset    = "myapp-linux-x64.tar.gz"   # the asset filename for THIS host (the se
 channel  = "stable"         # github: stable=/releases/latest, else newest prerelease ; native: channel key
 policy   = "auto"           # off | check | auto
 # pin    = "1.4.2"          # lock a version (disables auto-update)
-# entry  = "bin/myapp"      # override the in-archive entry; usually omitted (defaults to {app} at root)
 
 [trust]
 require_signature = "enforce"                       # off | auto | enforce
 trusted_keys = ["<key_id>:<base64-pubkey>"]         # from `lode-cli keygen`
 
 [command]
-run     = "{entry}"         # bare `lode` → launch the app ({entry} = installed path)
-exec    = "{entry}"         # `lode <args>` → passthrough base
+run     = "./myapp"         # literal command to launch the app (cwd = version dir; a manifest asset may override)
+exec    = "./myapp"         # literal base for `lode <args>` passthrough
 # workdir = "{dir}"         # optional; omit for the version dir (default). Set an absolute path to run elsewhere (e.g. for .env discovery)
 
 [supervise]
 readiness    = "state"      # none | state (commit a version only after the app reports ready)
 health_grace = 15           # seconds a new version must survive to be "good" (else rollback)
 stop_timeout = 10           # graceful-stop window before SIGKILL
-restart      = "off"        # off (mirror child) | on-failure | always
+restart      = "on-failure" # on-failure (default, keep-alive: retry then pause) | always | off (mirror child)
 ```
 
 Common shapes:
 
-- **Self-contained binary:** `run = "{entry} serve"`, `exec = "{entry}"`.
+- **Self-contained binary:** `run = "./myapp serve"`, `exec = "./myapp"` (or omit `[command]` and publish `run`/`exec` in the manifest asset instead).
 - **Script under a runtime:** `run = "bun run"`, `exec = "bun"`, plus a `[runtime]` block to fetch `bun` if it's not on PATH — cached for reuse, optionally version-pinned (`version`); note a runtime download is **not** signature-verified.
 - **Private source:** add `[http].headers = ["Authorization: Bearer ${TOKEN}"]` — sent on manifest + artifact fetches, with `${ENV}` expansion.
 
@@ -99,9 +98,27 @@ Implement these (all but `SIGTERM` are optional, but recommended):
   process.on("SIGTERM", async () => { await drain(); process.exit(0) })
   ```
 - **Readiness (if `readiness = "state"`):** after you can actually serve, atomically write `state.ready = LODE_INSTANCE` (temp-file + rename, preserving lode's fields). lode won't commit the version (or stop the old instance, in zero-downtime modes) until then; missing it past `ready_timeout` → rollback.
+  - **Phased prepare handshake (opt-in):** report serving with `state.ready = "{LODE_INSTANCE}-0"` instead of the bare token. On an update lode writes `state.ready = "{LODE_INSTANCE}-1"` to prompt you to prepare; drain/checkpoint, then ack with `"{LODE_INSTANCE}-2"` and the cut-over begins. The cut-over is app-paced by default (`prepare_timeout = 0`); a non-zero `[supervise].prepare_timeout` (seconds) forces it if you never ack. Mechanism details in [architecture](architecture.md) §8.
 - **Health:** `exit(non-zero)` on startup failure. A version that exits within `health_grace` is rolled back to the last good one (single-strike).
 - **Self-report version** (e.g. `GET /version`) matching `LODE_ACTIVE_VERSION`.
 - **Request an update/restart (optional):** atomically patch `state.json` — set `target` (a version or `"latest"`) or bump `restart_nonce`. lode polls the file's mtime (~1s) and acts; the file *is* the notification.
+
+### Concurrent writes — the `state.json.lock` contract
+
+`state.json` has two writers (lode and your app), and a read-modify-write —
+read, patch your fields, write back — can silently lose the other side's
+concurrent update. lode serialises **all of its own RMWs** with an exclusive
+`flock(2)` on the sibling file `$LODE_DATA_DIR/state.json.lock` (created on
+demand, never deleted; the lock lives on a sibling because `state.json` itself
+is replaced by temp-file + rename on every write).
+
+- **Apps doing RMW SHOULD take the same lock:** open `state.json.lock`
+  (create if absent), `flock(fd, LOCK_EX)` (blocks only microseconds), then
+  read `state.json` → patch your fields → write atomically (temp + rename) →
+  unlock (closing the fd releases it). Hold the lock for the whole cycle and
+  nothing more.
+- **Plain reads need no lock:** the temp + rename replacement is atomic, so
+  any read of `state.json` always sees a complete, consistent snapshot.
 
 > A worked Rust + Bun pair lives in [`../tests/apps`](../tests/apps).
 
@@ -112,8 +129,8 @@ Implement these (all but `SIGTERM` are optional, but recommended):
 lode resolves a **channel → version → asset**, verifies it, and installs/runs it.
 The asset each host installs is chosen by **filename** (`[update].asset`), and every
 asset carries an ed25519 signature over the canonical message
-`lode.artifact.v1\n{name}\n{version}\n{sha256}` (UTF-8, `\n`-separated, no trailing
-newline). `name` is the asset filename. Full spec, including the native manifest
+`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}` (UTF-8, `\n`-separated, no trailing
+newline; `run`/`exec` are empty string when absent). `name` is the asset filename. Full spec, including the native manifest
 shape and field tables: [source-adapters.md](source-adapters.md).
 
 Packaging + signing are the **publisher's** job, doable in any CI. `lode-cli` is a
@@ -185,8 +202,9 @@ Host a `lode/v1` manifest whose per-version `assets[]` are keyed by `name`, plus
 assets at any HTTPS URLs:
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
-    --key private.key --into manifest.json   # upserts the asset by name, sets channels.latest
+lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+    --run ./myapp --exec ./myapp \
+    --key private.key --into manifest.json   # upserts the asset by name, sets channels.latest; --run/--exec are optional
 lode-cli manifest-sign --into manifest.json --key private.key   # optional: tamper-evidence over the catalog
 ```
 
@@ -198,11 +216,7 @@ entirely.
 
 ### Signing model (both sources)
 
-- The artifact signature binds **`name` (filename) / `version` / `sha256`** only.
-  `format` is derived from the filename extension (`.tar.gz`/`.tgz` → tar.gz, `.gz`
-  → gz, `.zip` → zip, else raw). `entry` is **advisory** and **never signed**
-  (resolution: manifest hint > `lode.toml [update].entry` > `{app}` at archive
-  root).
+- The artifact signature binds **`name` (filename) / `version` / `sha256` / `run` / `exec`**. `format` is derived from the filename extension (`.tar.gz`/`.tgz` → tar.gz, `.gz` → gz, `.zip` → zip, else raw). `run`/`exec` are bound into the signature when present (empty string otherwise) — a tampered catalog cannot inject malicious launch commands under `require_signature = auto` (with keys) or `enforce`.
 - Under `require_signature = enforce`, every installed asset must carry a valid
   signature (github: the `label`; native: the `sig` field or a `.sig` sidecar).
   `auto` is fail-closed once any trusted key is configured; without keys it installs

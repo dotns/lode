@@ -11,8 +11,9 @@
 #   build.sh 0.0.3 dist/0.0.3/web-rust --bad      # crashing v0.0.3 (rollback)
 #
 # The asset filename (`web-rust`) is the selection key (`[update].asset`); `format`
-# is `raw` (derived from the extension) and the advisory `entry` defaults to it.
-# lode chmod +x's the entry after install. No [runtime] needed — self-contained.
+# is `raw` (derived from the extension) and the file lands under that filename in
+# the version dir; lode chmod +x's the run command's target (run = "./web-rust")
+# after install. No [runtime] needed — self-contained.
 set -eu
 
 ver="${1:?usage: build.sh <version> [outfile] [--bad]}"

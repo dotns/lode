@@ -26,15 +26,16 @@ asset   = "app.mjs"       # a bundled ESM file. Tarball instead: asset = "myapp-
 channel = "stable"
 policy  = "auto"
 # pin   = "1.4.2"
-# entry = "dist/server.js"   # for a tarball: the in-archive entry (else {app} at root)
 
 [trust]
 require_signature = "enforce"
 trusted_keys = ["<key_id>:<base64-pubkey>"]
 
-# `node <entry>` for bare `lode`; `node <args>` for `lode <args>`.
+# `node app.mjs` for bare `lode` (cwd = the version dir, where the file lands
+# under its asset name; for a tarball name the unpacked path, e.g.
+# run = "node dist/server.js"); `node <args>` for `lode <args>`.
 [command]
-run     = "node"          # TS on Node >= 22: run = "node --experimental-strip-types"
+run     = "node app.mjs"  # TS on Node >= 22: run = "node --experimental-strip-types app.mts"
 exec    = "node"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 

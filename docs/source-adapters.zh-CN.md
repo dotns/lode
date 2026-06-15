@@ -19,6 +19,8 @@ lode.artifact.v1
 {name}
 {version}
 {sha256}
+{run}
+{exec}
 ```
 
 | 字段 | 含义 | 来源 |
@@ -26,6 +28,8 @@ lode.artifact.v1
 | `name` | **资产文件名**(如 `myapp-linux-x64.tar.gz`) | 选择 key;签名身份所绑定的对象 |
 | `version` | 发布版本 | github:`tag_name` 去前导 `v`;native:`versions` 的 key |
 | `sha256` | **原始下载文件**(解包前)的小写 hex | github:资产 `digest`;native:资产的 `sha256` |
+| `run` | manifest 发布的裸跑启动命令覆盖(缺省为空字符串) | 资产的 `run` 字段,或 `""` |
+| `exec` | manifest 发布的透传启动命令覆盖(缺省为空字符串) | 资产的 `exec` 字段,或 `""` |
 
 `name` 是**资产文件名,不是应用名**。它是唯一绑定"这份签名授权的是*哪个* artifact"的
 字段,因此防止把某个 artifact 的签名重放到别的资产或版本上。文件名还按惯例承载品牌与
@@ -41,9 +45,9 @@ lode.artifact.v1
 
 ### 签名绑定什么、不绑定什么
 
-绑定:哪个资产(`name`)、哪个发布(`version`)、哪些字节(`sha256`)。**不**绑定
-`platform`/`format`/`entry`/`url` —— 它们由文件名推导或属操作者本地(见下)。因为 `name`
-是文件名且被签,被篡改的目录无法把一份真签名挪到别的字节、别的资产或别的版本上。
+绑定:哪个资产(`name`)、哪个发布(`version`)、哪些字节(`sha256`)、哪些启动命令(`run`/`exec`)。**不**绑定
+`platform`/`format`/`url` —— 它们由文件名推导或属操作者本地(见下)。因为 `name`
+是文件名且被签,被篡改的目录无法把一份真签名挪到别的字节、别的资产、别的版本或注入恶意启动命令上。
 
 ## 2. 目录级(manifest)签名 —— 可选,present 才验
 
@@ -97,16 +101,9 @@ lode.manifest.v1
 
   后缀具权威性 —— 命名资产时让后缀反映真实打包方式。
 
-## 4. `entry` 解析(永不签名)
+## 4. 启动命令覆盖(`run`/`exec`)与 format 推导
 
-`entry` 是 lode 执行的归档内路径。它是**运行期**关切,不出现在**任何**签名消息里。优先级:
-
-```
-manifest advisory entry  >  lode.toml [update].entry  >  约定({app} 在归档根)
-```
-
-安全边界是**被签的归档内容**(`sha256`):`entry` 永远只在已认证的文件里选,且解析出的
-路径会做目录穿越校验。清单里的 advisory `entry` 是发布者(知道布局)给的便利提示,不权威。
+`entry` 概念已移除。**`format`** 运行时从资产文件名后缀推导(§3),不存储、不签名。manifest 资产可携带可选的 **`run`** 和 **`exec`** 字段,覆盖 operator 的 `[command].run`/`exec` 启动命令。这些字段被签进 per-artifact 签名消息(§1)和目录签名(§2)——在 `require_signature=auto`(有密钥)或 `enforce` 下,被篡改的目录无法注入恶意启动命令。
 
 ## 5. 源适配器 —— GitHub Releases
 
@@ -126,7 +123,6 @@ asset  = "myapp-linux-x64.tar.gz"
 
 - **版本指针 = tag 权威。** `channel = stable` → `/releases/latest`;其它 channel → 最新
   非草稿 prerelease;`pin` → `/releases/tags/{tag}`。
-- 无 advisory `entry` 槽 → `entry` 走 lode.toml / 约定。
 - `browser_download_url` 会 302 跳到 CDN 主机;这对验证透明 —— 验证用记录在案的字段,
   从不用跳转目标。
 
@@ -212,7 +208,7 @@ asset    = "myapp-linux-x64.tar.gz"
         { "name": "myapp-linux-x64.tar.gz",
           "url": "https://.../myapp-linux-x64.tar.gz",
           "sha256": "…", "sig": "…",
-          "entry": "bin/myapp", "size": 5242880 },
+          "run": "./myapp", "exec": "./myapp", "size": 5242880 },
         { "name": "myapp-darwin-arm64.tar.gz",
           "url": "https://.../myapp-darwin-arm64.tar.gz",
           "sha256": "…", "sig": "…" }
@@ -228,8 +224,9 @@ asset    = "myapp-linux-x64.tar.gz"
 | `name` | ✓ | 选择 key;与 `[update].asset` 匹配 |
 | `url` | ✓ | 绝对下载 URL |
 | `sha256` | ✓ | 原始文件的小写 hex |
-| `sig` | enforce / auto+keys | 对 §1 消息的 base64 ed25519;内嵌,或在资产旁放 `.sig` sidecar |
-| `entry` | | advisory 归档内路径(§4) |
+| `sig` | enforce / auto+keys | 对 §1 消息(含 `run`/`exec`)的 base64 ed25519;内嵌,或在资产旁放 `.sig` sidecar |
+| `run` | | 可选字面启动命令覆盖(已签名;覆盖 `[command].run`;见 §4) |
+| `exec` | | 可选 CLI 透传命令覆盖(已签名;覆盖 `[command].exec`;见 §4) |
 | `size` | | 期望字节数(额外完整性校验) |
 | `auth` | | 默认 `true`;`false` = 不给该 URL 附 `[http].headers` |
 
@@ -241,8 +238,9 @@ asset    = "myapp-linux-x64.tar.gz"
 **发布:**
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" --entry bin/myapp \
-    --key private.key --into manifest.json     # 按 name upsert 资产,设 channels.latest
+lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+    --run ./myapp --exec ./myapp \
+    --key private.key --into manifest.json     # 按 name upsert 资产,设 channels.latest;--run/--exec 可选
 lode-cli manifest-sign --into manifest.json --key private.key   # 可选 §2 目录防篡改证据
 ```
 
@@ -257,7 +255,6 @@ asset    = "myapp-linux-x64.tar.gz"   # 本机要的资产文件名(选择 key)
 channel  = "stable"
 policy   = "auto"                 # off | check | auto
 # pin    = "1.4.2"                # 锁定版本(禁用自动更新)
-# entry  = "bin/myapp"            # 覆盖归档内 entry(§4);通常省略
 
 [trust]
 require_signature = "enforce"     # off | auto | enforce —— 门控 PER-ARTIFACT 签名
@@ -271,9 +268,9 @@ trusted_keys = ["<key_id>:<base64-公钥>"]
 
 | 模块 | 职责 |
 |---|---|
-| `verify.rs` | §1 artifact 消息(`lode.artifact.v1`)与 §2 目录消息(`lode.manifest.v1`);`verify_artifact_sig` 对 `(name, version, sha256)` |
+| `verify.rs` | §1 artifact 消息(`lode.artifact.v1`)与 §2 目录消息(`lode.manifest.v1`);`verify_artifact_sig` 对 `(name, version, sha256, run, exec)` |
 | `manifest.rs` | 内部 `Manifest`,每版 `assets[]` 按 `name`;按 `name` 选资产;从后缀推 `format`;两个适配器(`fetch_github`、`fetch_native`)产出完全相同的内部模型 |
-| `config.rs` | `[update].asset`、`[update].entry` override;`manifest`/`github` 保持互斥 |
+| `config.rs` | `[update].asset`;`manifest`/`github` 保持互斥 |
 | `download.rs` | 按 `url` 拉取;`[http].headers` 仅同源附加;交叉校验 GitHub `digest` 并对下载文件重新 hash 比对签名里的 `sha256` |
 | `authoring.rs` / `lode-cli` | `keygen`;`sign` → `(name, version, sha256)` 签名与 GitHub `label` 字符串;native `manifest` 组装 + `manifest-sign` 走 §2 目录形式 |
 

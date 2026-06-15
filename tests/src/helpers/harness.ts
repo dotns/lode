@@ -17,12 +17,18 @@ export interface PublishVersionOpts {
   exitCode?: number;
   target?: string;
   gate?: boolean;
+  preGate?: boolean;
   /** Make channels.stable.latest point at this version (default true). */
   latest?: boolean;
   /** Serve a sha256 that does NOT match the bytes (tampered artifact). */
   tamperSha?: boolean;
   /** Publish without a signature (to be rejected under require_signature=enforce). */
   omitSig?: boolean;
+  /** Manifest-published `run` launch override (signed — bound into the artifact
+   *  signature and published verbatim in the manifest asset). */
+  run?: string;
+  /** Manifest-published `exec` launch override (signed, like `run`). */
+  exec?: string;
 }
 
 const APP_NAME = "e2e-app";
@@ -81,11 +87,13 @@ export class Harness {
       exitCode: opts.exitCode ?? 0,
       target: opts.target ?? "",
       gate: opts.gate ?? false,
+      preGate: opts.preGate ?? false,
     });
 
-    // The signature binds the asset filename (basename) + version + sha256; it
-    // never sees url/entry, so they are free to vary. `name` is the selection key.
-    const signed = await this.signer.sign(artifactPath, version);
+    // The signature binds the asset filename (basename) + version + sha256 + the
+    // optional run/exec overrides; it never sees the url. `name` is the selection
+    // key, so published overrides must ride the same sign call verbatim.
+    const signed = await this.signer.sign(artifactPath, version, { run: opts.run, exec: opts.exec });
     const sha256 = opts.tamperSha ? flipHex(signed.sha256) : signed.sha256;
     const sig = opts.omitSig ? undefined : signed.sig;
     const keyId = opts.omitSig ? undefined : this.signer.keyId;
@@ -96,12 +104,15 @@ export class Harness {
       sha256,
       sig,
       keyId,
-      entry: ASSET_NAME,
+      run: opts.run,
+      exec: opts.exec,
       latest: opts.latest ?? true,
     });
   }
 
-  /** Base CLI flags shared by every lode invocation in this world. */
+  /** Base CLI flags shared by every lode invocation in this world. The artifact
+   *  lands under its asset filename (raw format), so the literal launch command
+   *  is "./app.sh" relative to the version dir. */
   baseArgs(): string[] {
     return [
       "--app",
@@ -113,9 +124,9 @@ export class Harness {
       "--asset",
       ASSET_NAME,
       "--run",
-      "{entry}",
+      `./${ASSET_NAME}`,
       "--exec",
-      "{entry}",
+      `./${ASSET_NAME}`,
       "--log-level",
       "info",
     ];
@@ -133,9 +144,22 @@ export class Harness {
     return runner;
   }
 
-  /** Drop the readiness gate file so a gated app announces readiness. */
+  /** Spawn lode with EXACTLY these args (no baseArgs) — for driving it from a
+   *  `lode.toml` via `--config` so the file's `[command]`/source are authoritative. */
+  runLodeRaw(args: string[]): LodeRunner {
+    const runner = new LodeRunner(args, this.dataDir, baseEnv());
+    this.#lodes.push(runner);
+    return runner;
+  }
+
+  /** Drop the readiness gate file so a gated app announces serving readiness (-0). */
   openReadinessGate(): void {
     writeFileSync(join(this.dataDir, "ready_ok"), "ok");
+  }
+
+  /** Drop the prepare gate file so a pre-gated app acks the staged-update prompt (-2). */
+  openPrepareGate(): void {
+    writeFileSync(join(this.dataDir, "prepare_ok"), "ok");
   }
 
   async dispose(): Promise<void> {

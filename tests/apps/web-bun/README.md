@@ -63,29 +63,29 @@ sh build.sh 0.0.1 dist/0.0.1/app.ts --bundle    # also emits dist/0.0.1/app.js
 bun build app.ts --target bun --outfile app.js
 ```
 
-Then use `entry = "app.js"` and `run = "bun run"` (so `bun run app.js`).
+Then use `asset = "app.js"` and `run = "bun run app.js"`.
 
 ## Artifact & lode.toml
 
 - **asset / selection key**: `[update].asset = "app.ts"` — the asset filename lode
   installs on this host (or `app.js` if bundled); lode matches it by `name`.
 - **format**: `raw`, *derived from the filename extension* (the URL *is* the
-  script). The advisory manifest `entry` defaults to that same filename.
+  script). The raw artifact lands under that same filename in the version dir.
 - **`[runtime]` required**: lode finds `bun` on `PATH`, else downloads it.
 
 ```toml
 [command]
-run     = "bun"       # bare `lode`   -> bun <entry>        (long-running server)
+run     = "bun app.ts"   # bare `lode`  -> bun app.ts (long-running server; cwd = version dir)
 exec    = "bun"       # `lode <args>` -> bun <args>
 # workdir = "{dir}"   # optional; omit for the version dir (default)
 
 [runtime]
 runtime  = "bun"
 download = "https://example.com/bun-linux-x64.zip"   # used only if bun is absent from PATH
-# format = "zip"   # entry = "bun"   # sha256 = "<hex>"
+# format = "zip"   # sha256 = "<hex>"
 ```
 
-> `run = "bun"` runs `bun <entry>`. `run = "bun run"` (→ `bun run <entry>`) is
+> `run = "bun app.ts"` runs `bun app.ts`. `run = "bun run app.ts"` is
 > equivalent for a script file; use the latter for the bundled `app.js`.
 
 See [`docs/lode.example.toml`](../../../docs/lode.example.toml) for a full `lode.toml`, and

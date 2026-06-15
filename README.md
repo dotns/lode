@@ -46,7 +46,7 @@ app = "myapp"
 manifest = "https://releases.example.com/myapp/manifest.json"   # or: github = "owner/repo"
 policy   = "auto"                                               # off | check | auto
 [command]
-run = "{entry}"                                                 # how to launch the app
+run = "./myapp"                                                # how to launch the app (literal command, cwd = version dir)
 [trust]
 require_signature = "enforce"
 ```
@@ -84,14 +84,16 @@ zzci/ubase         ────► │  lode  (static Rust binary)         │
 
 ## Two binaries, one file
 
-lode is a **multi-call binary**. As `lode` it is the loader with **no subcommands** — every
-argument is the app's, so the loader never shadows your app's CLI. As **`lode-cli`** (a symlink
+lode is a **multi-call binary**. As `lode` it is the loader with **no subcommands** — arguments
+are forwarded to the app. One caveat: lode parses its own flags first (`--version`, `--help` and
+the `LODE_*` global options), so a leading app argument that matches one of them is consumed by
+lode. Use `lode -- <args…>` to forward flag-like arguments verbatim. As **`lode-cli`** (a symlink
 shipped alongside it) it is the operator/publisher toolkit.
 
 | Invocation | Does |
 |---|---|
 | `lode` | start & supervise the app (`[command].run`); auto-update per policy |
-| `lode <args…>` | passthrough: run `[command].exec` + `<args>` (e.g. `lode run db:init`) |
+| `lode <args…>` / `lode -- <args…>` | passthrough: run `[command].exec` + `<args>` (e.g. `lode run db:init`); use `--` when an arg collides with a lode flag |
 | `lode-cli status` / `update` / `rollback` / `restart` / `versions` | manage a running instance (via `state.json`) |
 | `lode-cli keygen` / `sign` / `verify` / `manifest` / `init` | publisher/operator tools |
 
@@ -105,8 +107,8 @@ shipped alongside it) it is the operator/publisher toolkit.
 
 - **Update** `[update].policy = off | check | auto`; source is either `manifest` (native `lode/v1` JSON) **or** `github = "owner/repo"` (Releases).
 - **Rollback** — a new version that exits within `health_grace` is reverted to the last known-good (single-strike).
-- **Restart** `[supervise].restart = off | on-failure | always` — `off` (default) mirrors the child; lode-initiated update/rollback/restart always relaunch.
-- **Trust** — `sha256` + `ed25519`; set `[trust].trusted_keys` + `require_signature = off | auto | enforce`. Signing is the publisher's job — see [Integration §3](docs/integration.md).
+- **Restart** `[supervise].restart = off | on-failure | always` — `on-failure` (default, keep-alive) retries a failing app `restart_max` times then **pauses** (lode stays alive, never crash-looping the container); `off` opts back into mirroring the child; lode-initiated update/rollback/restart always relaunch.
+- **Trust** — `sha256` + `ed25519`; set `[trust].trusted_keys` + `require_signature = off | auto | enforce`. Note: verification defaults to `auto` (enforced only when trusted keys are configured) — set `require_signature = "enforce"` for production. Signing is the publisher's job — see [Integration §3](docs/integration.md).
 - **Private sources** — `[http].headers` (with `${ENV}` expansion) is sent on every fetch.
 
 ## Build from source

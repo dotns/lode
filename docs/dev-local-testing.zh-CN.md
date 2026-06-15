@@ -34,8 +34,6 @@ lode-cli [--data-dir DIR] [--app NAME] seed <APP_BIN> [选项]
   <APP_BIN>        本地可执行文件,或 .tar.gz / .zip / .gz 压缩包
   --version VER    版本 id(默认 0.0.0-dev),用作 versions/<VER> 的键。用 semver,
                    以便 rollback / 禁降级 floor 的排序正确
-  --entry NAME     版本目录内入口文件名(默认从文件推导 —— 裸二进制取其 basename,
-                   压缩包取与 app 同名、位于归档根目录的文件)
   --no-activate    只装进 versions/,不切 current / 不写 state.json
 ```
 
@@ -45,13 +43,14 @@ lode-cli [--data-dir DIR] [--app NAME] seed <APP_BIN> [选项]
 ### 从本地压缩包重建版本目录(用发布 `.tar.gz`/`.zip` 重建)
 
 把发布会用的同一个压缩包交给它,它就把 `versions/<VER>/` 下整棵版本目录树重建出来。`format`
-由扩展名判断;用 `--entry` 给出归档内可执行文件的路径(归档无法自动判定哪个是"主程序" ——
-不给 `--entry` 时,会在归档根目录找与 `--app` 同名的文件):
+由扩展名推导,scaffold 出的 `lode.toml` 的 `[command].run` 由文件名推导(压缩包 → `./<app>`)。
+seed **不会**去探测归档里哪个是"主程序" —— 要启动嵌套在 e.g. `bin/myapp` 的二进制,在 `lode.toml`
+里设 `[command].run = "./bin/myapp"`(或由 manifest 发布 `run`):
 
 ```bash
 # myapp-1.0.0.tar.gz 里含  bin/myapp  (以及其它文件)
 lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
-    --version 1.0.0 --entry bin/myapp
+    --version 1.0.0
 ```
 
 → 重建结果,与真实 install 逐字节一致:
@@ -60,7 +59,7 @@ lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
 versions/1.0.0/
 ├── bin/myapp           # 解包并 +x
 ├── lib/…               # 归档其余内容,完整保留
-└── .lode.json          # { "version": "1.0.0", "entry": "bin/myapp", "format": "tar.gz" }
+└── .lode.json          # { "version": "1.0.0", "run": null, "exec": null, "format": "tar.gz" }
 ```
 
 ## 写出了什么
@@ -70,8 +69,8 @@ versions/1.0.0/
 ├── lode.toml                      # 若缺失则 scaffold 一份无源配置(policy=off)
 ├── versions/
 │   └── 1.0.0/
-│       ├── myapp                  # 你的二进制(入口),+x
-│       └── .lode.json             # { "version": "1.0.0", "entry": "myapp", "format": "raw" }
+│       ├── myapp                  # 你的二进制,+x
+│       └── .lode.json             # { "version": "1.0.0", "run": null, "exec": null, "format": "raw" }
 ├── current -> versions/1.0.0      # (除非 --no-activate)相对软链
 └── state.json                     # (除非 --no-activate){ "current": "1.0.0", "last_good": "1.0.0" }
 ```

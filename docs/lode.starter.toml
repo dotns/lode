@@ -1,0 +1,13 @@
+# lode.toml — minimal starter config. Fill in the values for YOUR app and re-run.
+# Full reference (every section + option, documented): docs/lode.example.toml
+
+[global]
+app = "myapp"                       # must match manifest "name"
+
+[update]
+manifest = "https://releases.example.com/myapp/manifest.json"  # or: github = "owner/repo"
+asset    = "myapp-linux-x86_64.tar.gz"   # the asset filename to install on THIS host
+
+[command]
+run  = "./myapp"                    # command to run the program (cwd = version dir); a manifest asset may override this
+exec = "./myapp"                    # command for `lode <args>` (CLI)

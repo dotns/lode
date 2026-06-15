@@ -1,11 +1,13 @@
 # svc-rust — lode loads the native (no-runtime) `tests/apps/web-rust` binary.
 #
 # The crashing-v0.0.3 rollback artifact is a second web-rust binary built with
-# BUILD_BAD=1. lode runs the binary directly (`run = "{entry}"`): no [runtime].
+# BUILD_BAD=1. lode runs the binary directly (`run = "./web-rust"`): no [runtime].
 #
 # The publisher's trusted key is injected at runtime via LODE_TRUSTED_KEYS (it is
 # generated per test run by `lode keygen`); everything else is static here. The
-# manifest is fetched from the local fileserver over a fixed compose IP (no DNS).
+# manifest is fetched from the local fileserver over a fixed compose IP (no DNS);
+# the IP below is the standalone default — the e2e test rewrites it to its per-run
+# derived address before `docker cp`ing this file in.
 
 [global]
 app      = "web-rust"
@@ -28,8 +30,8 @@ require_signature = "enforce"   # a valid ed25519 signature is mandatory
 # trusted_keys injected via env LODE_TRUSTED_KEYS
 
 [command]
-run     = "{entry}"   # bare `lode` -> run the native binary as the server
-exec    = "{entry}"
+run     = "./web-rust"   # bare `lode` -> run the native binary as the server (cwd = version dir)
+exec    = "./web-rust"
 workdir = "{dir}"
 
 [supervise]
