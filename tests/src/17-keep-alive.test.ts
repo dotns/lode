@@ -31,7 +31,7 @@ test("default: a crashing app retries then pauses; a new target recovers it", as
     "--restart-max",
     "2",
     "--restart-backoff",
-    "100",
+    "1",
     // Small grace: the app crashes instantly (elapsed << grace, so the retry count
     // still accumulates), and the recovered v0.0.2 commits quickly.
     "--health-grace",
@@ -86,7 +86,7 @@ exec = "./app.sh"
 [supervise]
 restart = "on-failure"
 restart_max = 2
-restart_backoff = 100
+restart_backoff = 1
 health_grace = 60
 `;
 

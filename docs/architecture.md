@@ -384,8 +384,8 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_RUNTIME_VERSION_CHECK` | `--runtime-version-check <args>` | `runtime.version_check` | `--version` | arg(s) that print the runtime version (used only with `version`) |
 | **`[supervise]` — supervision (restart policy/health/rollback/stop/restart mode)** | | | | |
 | `LODE_RESTART` | `--restart <off\|on-failure\|always>` | `supervise.restart` | `on-failure` | restart policy (keep-alive): `on-failure` = retry on failure then **pause** (stay alive); `always` = also retry a clean exit; `off` = mirror the child (lode exits with it), §8 |
-| `LODE_RESTART_BACKOFF` | `--restart-backoff <ms>` | `supervise.restart_backoff` | `500` | restart backoff base (exponential); effective only when `restart != off` |
-| `LODE_RESTART_BACKOFF_MAX` | `--restart-backoff-max <ms>` | `supervise.restart_backoff_max` | `30000` | backoff cap; effective only when `restart != off` |
+| `LODE_RESTART_BACKOFF` | `--restart-backoff <seconds>` | `supervise.restart_backoff` | `1` | restart backoff base in **seconds** (exponential); effective only when `restart != off` |
+| `LODE_RESTART_BACKOFF_MAX` | `--restart-backoff-max <seconds>` | `supervise.restart_backoff_max` | `30` | backoff cap in **seconds**; effective only when `restart != off` |
 | `LODE_RESTART_MAX` | `--restart-max <n>` | `supervise.restart_max` | `3` | retry cap before lode **pauses** (keep-alive), 0 = retry forever; effective only when `restart != off` |
 | `LODE_READINESS` | `--readiness <none\|state>` | `supervise.readiness` | `none` | readiness determination: `none` = alive for the full grace; `state` = wait for the app to write `state.ready`, §8 |
 | `LODE_READY_TIMEOUT` | `--ready-timeout <sec>` | `supervise.ready_timeout` | `30` | with `readiness=state`, the max wait for readiness; a timeout is judged a failure |

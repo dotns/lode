@@ -152,10 +152,10 @@ pub(crate) struct Globals {
     /// Restart policy: off | on-failure | always (default on-failure).
     #[arg(long = "restart", env = "LODE_RESTART", global = true)]
     pub(crate) restart: Option<RestartPolicy>,
-    /// Crash-restart backoff base, milliseconds (only used when restart != off).
+    /// Crash-restart backoff base, seconds (only used when restart != off).
     #[arg(long = "restart-backoff", env = "LODE_RESTART_BACKOFF", global = true)]
     pub(crate) restart_backoff: Option<u64>,
-    /// Crash-restart backoff cap, milliseconds (only used when restart != off).
+    /// Crash-restart backoff cap, seconds (only used when restart != off).
     #[arg(
         long = "restart-backoff-max",
         env = "LODE_RESTART_BACKOFF_MAX",

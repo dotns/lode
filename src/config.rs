@@ -205,8 +205,8 @@ pub(crate) struct Supervise {
     /// Crash-restart policy. `on-failure` (default) retries then pauses (keep-alive);
     /// `off` mirrors the child; `always` also retries a clean exit.
     pub(crate) restart: RestartPolicy,
-    /// Backoff base/cap and the retry cap before pausing — only used when
-    /// [`restart`](Self::restart) is not `off`. `restart_max=0` retries forever.
+    /// Backoff base/cap **in seconds** and the retry cap before pausing — only used
+    /// when [`restart`](Self::restart) is not `off`. `restart_max=0` retries forever.
     pub(crate) restart_backoff: u64,
     pub(crate) restart_backoff_max: u64,
     pub(crate) restart_max: u32,
@@ -614,11 +614,11 @@ fn merge_supervise(cli: &Globals, t: &TomlSupervise) -> Supervise {
             .restart
             .or(t.restart)
             .unwrap_or(RestartPolicy::OnFailure),
-        restart_backoff: cli.restart_backoff.or(t.restart_backoff).unwrap_or(500),
+        restart_backoff: cli.restart_backoff.or(t.restart_backoff).unwrap_or(1),
         restart_backoff_max: cli
             .restart_backoff_max
             .or(t.restart_backoff_max)
-            .unwrap_or(30_000),
+            .unwrap_or(30),
         // Retry this many times after a failure, then pause (0 = retry forever).
         restart_max: cli.restart_max.or(t.restart_max).unwrap_or(3),
         readiness: cli.readiness.or(t.readiness).unwrap_or(Readiness::None),
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(cfg.supervise.restart, RestartPolicy::OnFailure);
         assert_eq!(cfg.supervise.restart_max, 3);
         assert_eq!(cfg.supervise.restart_mode, RestartMode::StopStart);
-        assert_eq!(cfg.supervise.restart_backoff, 500);
+        assert_eq!(cfg.supervise.restart_backoff, 1);
         // prepare_timeout defaults to 0 = disabled (app-paced cut-over, §8).
         assert_eq!(cfg.supervise.prepare_timeout, 0);
         assert!(cfg.http.headers.is_empty());
@@ -965,11 +965,11 @@ mod tests {
 
     #[test]
     fn unknown_toml_key_rejected_and_named() {
-        // A typo'd key must be a hard parse error naming the key (operators fix
-        // lode.toml while the app is paused — a silent no-op would strand them).
-        let err = toml::from_str::<TomlConfig>("[update]\nchanel = \"stable\"\n").unwrap_err();
+        // An unknown key (e.g. a typo) must be a hard parse error naming the key
+        // (operators fix lode.toml while the app is paused — a silent no-op strands them).
+        let err = toml::from_str::<TomlConfig>("[update]\nbogus_key = \"stable\"\n").unwrap_err();
         let rendered = crate::error::Error::from(err).to_string();
-        assert!(rendered.contains("chanel"), "got: {rendered}");
+        assert!(rendered.contains("bogus_key"), "got: {rendered}");
 
         // ...in every section, including the top level.
         assert!(toml::from_str::<TomlConfig>("[globall]\napp = \"x\"\n").is_err());
@@ -1069,8 +1069,8 @@ mod tests {
     #[test]
     fn backoff_range_rejected() {
         let mut cli = blank_cli();
-        cli.restart_backoff = Some(1000);
-        cli.restart_backoff_max = Some(500);
+        cli.restart_backoff = Some(60);
+        cli.restart_backoff_max = Some(30);
         let cfg = merge(&cli, &TomlConfig::default());
         assert!(validate(&cfg).is_err());
     }

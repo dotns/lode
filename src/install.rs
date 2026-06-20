@@ -1051,8 +1051,8 @@ mod tests {
             },
             supervise: Supervise {
                 restart: RestartPolicy::Off,
-                restart_backoff: 500,
-                restart_backoff_max: 30_000,
+                restart_backoff: 1,
+                restart_backoff_max: 30,
                 restart_max: 0,
                 readiness: Readiness::None,
                 ready_timeout: 30,

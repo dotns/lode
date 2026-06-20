@@ -918,10 +918,10 @@ fn exit_code_from(status: WaitStatus) -> u8 {
 }
 
 /// Exponential backoff for the `attempt`-th restart (0-based): `base * 2^attempt`,
-/// capped at `max` (all in milliseconds), saturating rather than overflowing.
-fn backoff_delay(attempt: u32, base_ms: u64, max_ms: u64) -> Duration {
+/// capped at `max` (all in seconds), saturating rather than overflowing.
+fn backoff_delay(attempt: u32, base_secs: u64, max_secs: u64) -> Duration {
     let factor = 1u64.checked_shl(attempt).unwrap_or(u64::MAX);
-    Duration::from_millis(base_ms.saturating_mul(factor).min(max_ms))
+    Duration::from_secs(base_secs.saturating_mul(factor).min(max_secs))
 }
 
 /// Did the child *fail*? Any outcome other than a clean `exit(0)` (a non-zero
@@ -964,8 +964,8 @@ fn exit_action(
     code: u8,
     restarts: u32,
     restart_max: u32,
-    backoff_base_ms: u64,
-    backoff_max_ms: u64,
+    backoff_base_secs: u64,
+    backoff_max_secs: u64,
 ) -> ExitAction {
     if let Some(version) = pending_target {
         return ExitAction::ApplyUpdate(version.to_owned());
@@ -982,7 +982,7 @@ fn exit_action(
     if restart_max > 0 && restarts + 1 > restart_max {
         return ExitAction::Pause;
     }
-    ExitAction::Restart(backoff_delay(restarts, backoff_base_ms, backoff_max_ms))
+    ExitAction::Restart(backoff_delay(restarts, backoff_base_secs, backoff_max_secs))
 }
 
 // --- pure update / readiness / rollback decision logic (design §5/§8) ---
@@ -1508,10 +1508,10 @@ impl<'c> Supervisor<'c> {
                 self.restart_count = self.restart_count.saturating_add(1);
                 self.child = None;
                 self.restart_at = Some(Instant::now() + delay);
-                let backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+                let backoff_secs = delay.as_secs();
                 tracing::warn!(
                     restart = self.restart_count,
-                    backoff_ms,
+                    backoff_secs,
                     "app failed to start; backing off"
                 );
                 self.set_status(Status::Error);
@@ -1685,12 +1685,12 @@ impl<'c> Supervisor<'c> {
     fn schedule_restart(&mut self, status: WaitStatus, delay: Duration) {
         self.restart_count = self.restart_count.saturating_add(1);
         let code = exit_code_from(status);
-        let backoff_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        let backoff_secs = delay.as_secs();
         tracing::warn!(
             version = self.target.version,
             code,
             restart = self.restart_count,
-            backoff_ms,
+            backoff_secs,
             "child exited; scheduling restart"
         );
         self.restart_at = Some(Instant::now() + delay);
@@ -2701,12 +2701,12 @@ mod tests {
 
     #[test]
     fn backoff_doubles_then_caps() {
-        let base = 500;
-        let max = 30_000;
-        assert_eq!(backoff_delay(0, base, max), Duration::from_millis(500));
-        assert_eq!(backoff_delay(1, base, max), Duration::from_secs(1));
-        assert_eq!(backoff_delay(2, base, max), Duration::from_secs(2));
-        assert_eq!(backoff_delay(6, base, max), Duration::from_secs(30));
+        let base = 1;
+        let max = 30;
+        assert_eq!(backoff_delay(0, base, max), Duration::from_secs(1));
+        assert_eq!(backoff_delay(1, base, max), Duration::from_secs(2));
+        assert_eq!(backoff_delay(2, base, max), Duration::from_secs(4));
+        assert_eq!(backoff_delay(5, base, max), Duration::from_secs(30)); // 32 -> cap
         // A huge attempt saturates to the cap instead of overflowing.
         assert_eq!(backoff_delay(99, base, max), Duration::from_secs(30));
     }
@@ -3492,11 +3492,11 @@ mod tests {
     fn exit_action_off_always_mirrors_child() {
         // restart=off: a clean exit and a crash both exit lode with the code.
         assert_eq!(
-            exit_action(RestartPolicy::Off, None, false, 0, 0, 0, 500, 30_000),
+            exit_action(RestartPolicy::Off, None, false, 0, 0, 0, 1, 30),
             ExitAction::Exit { code: 0 }
         );
         assert_eq!(
-            exit_action(RestartPolicy::Off, None, true, 7, 0, 0, 500, 30_000),
+            exit_action(RestartPolicy::Off, None, true, 7, 0, 0, 1, 30),
             ExitAction::Exit { code: 7 }
         );
     }
@@ -3505,13 +3505,13 @@ mod tests {
     fn exit_action_on_failure_exits_clean_restarts_crash() {
         // Clean exit → exit 0 (mirror the intentional shutdown).
         assert_eq!(
-            exit_action(RestartPolicy::OnFailure, None, false, 0, 0, 0, 500, 30_000),
+            exit_action(RestartPolicy::OnFailure, None, false, 0, 0, 0, 1, 30),
             ExitAction::Exit { code: 0 }
         );
         // Failure → restart with the base backoff.
         assert_eq!(
-            exit_action(RestartPolicy::OnFailure, None, true, 137, 0, 0, 500, 30_000),
-            ExitAction::Restart(Duration::from_millis(500))
+            exit_action(RestartPolicy::OnFailure, None, true, 137, 0, 0, 1, 30),
+            ExitAction::Restart(Duration::from_secs(1))
         );
     }
 
@@ -3519,22 +3519,22 @@ mod tests {
     fn exit_action_always_restarts_then_pauses_at_cap() {
         // Clean exit still restarts; backoff doubles with the consecutive count.
         assert_eq!(
-            exit_action(RestartPolicy::Always, None, false, 0, 0, 0, 500, 30_000),
-            ExitAction::Restart(Duration::from_millis(500))
+            exit_action(RestartPolicy::Always, None, false, 0, 0, 0, 1, 30),
+            ExitAction::Restart(Duration::from_secs(1))
         );
         assert_eq!(
-            exit_action(RestartPolicy::Always, None, false, 0, 2, 0, 500, 30_000),
-            ExitAction::Restart(Duration::from_secs(2))
+            exit_action(RestartPolicy::Always, None, false, 0, 2, 0, 1, 30),
+            ExitAction::Restart(Duration::from_secs(4))
         );
         // restart_max=2 allows 2 retries; the 3rd failure (restarts already 2) PAUSES
         // (keep-alive) rather than exiting — lode stays alive as PID 1.
         assert_eq!(
-            exit_action(RestartPolicy::Always, None, true, 3, 2, 2, 500, 30_000),
+            exit_action(RestartPolicy::Always, None, true, 3, 2, 2, 1, 30),
             ExitAction::Pause
         );
         // on-failure pauses at the cap the same way (restarts==restart_max==3).
         assert_eq!(
-            exit_action(RestartPolicy::OnFailure, None, true, 1, 3, 3, 500, 30_000),
+            exit_action(RestartPolicy::OnFailure, None, true, 1, 3, 3, 1, 30),
             ExitAction::Pause
         );
     }
@@ -3544,29 +3544,11 @@ mod tests {
         // A pending different target applies the update regardless of policy —
         // even restart=off (mirror) and even past the retry cap.
         assert_eq!(
-            exit_action(
-                RestartPolicy::Off,
-                Some("2.0.0"),
-                false,
-                0,
-                0,
-                0,
-                500,
-                30_000
-            ),
+            exit_action(RestartPolicy::Off, Some("2.0.0"), false, 0, 0, 0, 1, 30),
             ExitAction::ApplyUpdate("2.0.0".to_owned())
         );
         assert_eq!(
-            exit_action(
-                RestartPolicy::Always,
-                Some("2.0.0"),
-                true,
-                1,
-                9,
-                2,
-                500,
-                30_000
-            ),
+            exit_action(RestartPolicy::Always, Some("2.0.0"), true, 1, 9, 2, 1, 30),
             ExitAction::ApplyUpdate("2.0.0".to_owned())
         );
     }
@@ -3669,8 +3651,8 @@ mod tests {
             },
             supervise: config::Supervise {
                 restart: RestartPolicy::OnFailure,
-                restart_backoff: 500,
-                restart_backoff_max: 30_000,
+                restart_backoff: 1,
+                restart_backoff_max: 30,
                 restart_max: 3,
                 readiness: Readiness::None,
                 ready_timeout: 30,

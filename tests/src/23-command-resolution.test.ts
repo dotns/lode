@@ -70,7 +70,7 @@ test("missing both [command].run and manifest run => clear 'no run command' erro
 
   // …and no [command] in lode.toml either. Small retry caps for speed.
   const cfgPath = join(h.dataDir, "lode.toml");
-  writeFileSync(cfgPath, configWithoutCommand("restart = \"on-failure\"\nrestart_max = 1\nrestart_backoff = 100\n"));
+  writeFileSync(cfgPath, configWithoutCommand("restart = \"on-failure\"\nrestart_max = 1\nrestart_backoff = 1\n"));
   const lode = h.runLodeRaw(["--config", cfgPath, "--log-level", "info"]);
 
   // The spawn fails with the actionable resolution error…

@@ -47,7 +47,7 @@ exec = "./app.sh"
 [supervise]
 restart = "on-failure"
 restart_max = 2
-restart_backoff = 100
+restart_backoff = 1
 health_grace = 60
 `;
 

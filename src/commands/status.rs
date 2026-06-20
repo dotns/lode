@@ -71,7 +71,7 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
     writeln!(out, "  stop_to:    {}s", cfg.supervise.stop_timeout)?;
     writeln!(
         out,
-        "  backoff:    {}..{} ms (max {} restarts; restart != off)",
+        "  backoff:    {}..{}s (max {} restarts; restart != off)",
         cfg.supervise.restart_backoff, cfg.supervise.restart_backoff_max, cfg.supervise.restart_max
     )?;
     writeln!(out, "  mode:       {:?}", cfg.supervise.restart_mode)?;

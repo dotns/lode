@@ -38,9 +38,9 @@ test("restart=on-failure: app crash => bounded restarts then pause (stay alive)"
     "--restart-max",
     String(restartMax),
     "--restart-backoff",
-    "200",
+    "1",
     "--restart-backoff-max",
-    "5000",
+    "5",
     "--health-grace",
     "60",
   ]);

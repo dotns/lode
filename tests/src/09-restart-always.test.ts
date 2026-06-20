@@ -28,9 +28,9 @@ test("restart=always: bounded restarts (max) with growing backoff, then pause (s
     "--restart-max",
     String(restartMax),
     "--restart-backoff",
-    "200",
+    "1",
     "--restart-backoff-max",
-    "5000",
+    "5",
     // Large grace so a fast crash never resets the consecutive-restart counter.
     "--health-grace",
     "60",

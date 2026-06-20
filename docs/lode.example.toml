@@ -98,8 +98,8 @@ ready_timeout       = 30             # (readiness=state) seconds to wait for rea
 # prepare_timeout   = 60             # (readiness=state) max seconds to wait for the app's prepare ack before forcing the staged cut-over; 0 = no timeout (app-paced, default)
 health_grace        = 15             # (readiness=none) seconds a new version must survive; also the single-strike rollback window
 stop_timeout        = 10             # graceful-stop seconds before SIGKILL (set >= app cleanup, < container grace)
-restart_backoff     = 500            # ms, exponential base (only used when restart != off)
-restart_backoff_max = 30000          # ms cap (only used when restart != off)
+restart_backoff     = 1              # seconds, exponential base (only used when restart != off)
+restart_backoff_max = 30             # seconds cap (only used when restart != off)
 restart_max         = 3              # retries before lode pauses (keep-alive); 0 = retry forever (only used when restart != off)
 restart_mode        = "stop-start"   # stop-start | reuseport-overlap | socket-activation
 # listen            = "0.0.0.0:3000" # required for socket-activation

@@ -5,6 +5,18 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.6] - 2026-06-16
+
+### Changed (behavioral)
+
+- **`[supervise].restart_backoff` and `restart_backoff_max` are now in SECONDS, not milliseconds.**
+  Defaults change accordingly: `restart_backoff` `500` (ms) → `1` (second); `restart_backoff_max`
+  `30000` (ms) → `30` (seconds). The crash-restart backoff sequence is now `1s, 2s, 4s, 8s, 16s, 30s(cap)`
+  (previously `0.5s, 1s, 2s, …`). **Breaking:** an existing config with `restart_backoff = 500` now means
+  500 *seconds*, not 0.5s — update such values to seconds. This unifies every `[supervise]`/`[update]`
+  time field on seconds (the only remaining sub-second values are internal loop-tick constants, not config).
+  CLI flags `--restart-backoff`/`--restart-backoff-max` and `LODE_RESTART_BACKOFF*` now take seconds.
+
 ## [0.0.5] - 2026-06-11
 
 ### Changed (behavioral)

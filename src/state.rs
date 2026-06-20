@@ -345,7 +345,7 @@ mod tests {
         let quarantined = quarantine_path(&path);
         let _ = std::fs::remove_file(&quarantined);
         let _ = std::fs::remove_file(lock_path(&path));
-        std::fs::write(&path, b"{\"current\": tru").unwrap();
+        std::fs::write(&path, b"{\"current\":").unwrap();
 
         // The strict variant errors; the lenient one quarantines + rebuilds.
         assert!(locked_update(&path, |_| {}).is_err());
@@ -389,7 +389,7 @@ mod tests {
         let path = scratch("lenient-corrupt");
         let quarantined = quarantine_path(&path);
         let _ = std::fs::remove_file(&quarantined);
-        let garbage: &[u8] = b"{\"current\": tru";
+        let garbage: &[u8] = b"{\"current\":";
         std::fs::write(&path, garbage).unwrap();
 
         // The strict read rejects it; the lenient read tolerates + quarantines.

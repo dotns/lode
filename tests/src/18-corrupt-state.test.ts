@@ -19,8 +19,8 @@ afterEach(async () => {
   await h?.dispose();
 });
 
-/** A torn write: valid JSON truncated mid-token — unparseable. */
-const GARBAGE = '{"current": tru';
+/** A torn write: JSON cut off right after the key — invalid / unparsable. */
+const GARBAGE = '{"current":';
 
 test("boot: a pre-existing corrupt state.json is quarantined and the app still comes up", async () => {
   h = await Harness.start();

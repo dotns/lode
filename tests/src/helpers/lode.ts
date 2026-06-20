@@ -119,7 +119,7 @@ export class LodeRunner {
     return this.stdoutLines.filter((e) => re.test(e.line)).length;
   }
 
-  /** Read state.json (null if absent/unparseable mid-write). */
+  /** Read state.json (null if absent/unparsable mid-write). */
   readState(): LodeState | null {
     try {
       return JSON.parse(readFileSync(join(this.dataDir, "state.json"), "utf8")) as LodeState;

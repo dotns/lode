@@ -39,8 +39,8 @@ workdir = "{dir}"
 [supervise]
 restart             = "always"   # relaunch on any exit...
 restart_max         = 3          # ...but give up after 3 consecutive restarts
-restart_backoff     = 100        # ms (exponential base)
-restart_backoff_max = 1000       # ms cap
+restart_backoff     = 1          # seconds (exponential base)
+restart_backoff_max = 2          # seconds cap
 readiness           = "none"
 health_grace        = 2
 stop_timeout        = 5
