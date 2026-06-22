@@ -104,7 +104,7 @@ case "$BUILD_MODE" in
 esac
 
 # --- service mode (long-running) ------------------------------------------
-log "starting version=$VERSION pid=$$ instance=${LODE_INSTANCE:-none} data_dir=${LODE_DATA_DIR:-unset}"
+log "starting version=$VERSION pid=$$ instance=${LODE_INSTANCE:-none} data_dir=${LODE_DATA_DIR:-unset} marker=${RELOAD_MARKER:-none}"
 
 if [ "$BUILD_GATE" = "1" ]; then
   # Announce serving readiness (-0) only once the test drops the gate file — this

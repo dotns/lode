@@ -230,7 +230,7 @@ Three concepts, with clear responsibilities:
 
 All communication goes through **`state.json`** (bidirectional, each side writing its own fields + atomic temp+rename write; lode polls its mtime):
 
-- **lode writes**: `current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`.
+- **lode writes**: `current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`/`config_generation`.
 - **app writes** (requests): `target` (the version to upgrade/downgrade to, or `"latest"`), `restart_nonce` (incremented = restart request).
 - **co-owned** (`readiness=state` handshake, §8): `ready` = `{LODE_INSTANCE}-{phase}`. The app reports it can serve with `-0`; on a staged update lode prompts the running app with `-1`; the app acks "prepared, cut over now" with `-2`. lode reads `-0`/`-2`, writes the `-1` prompt, and clears the field at cut-over. **Backward compatible**: an app may still write the bare `{LODE_INSTANCE}` (legacy serving signal) — it just opts out of the prepare window and cuts over immediately.
 - Typical flow (`policy=check`): lode writes the newly discovered version into `available` → **once the app reads it, it decides on its own to upgrade by writing `target` to that version (or `"latest"`)** → lode applies and hot-updates.
@@ -239,6 +239,7 @@ All communication goes through **`state.json`** (bidirectional, each side writin
 
 - **app → lode** (request a restart/upgrade): the app **atomically writes `state.json`** (changing `target` or incrementing `restart_nonce`); **lode polls `state.json`'s mtime at a short interval (~1s)**, and on a change re-reads and executes. **The file itself is the notification**, so there's no need to send a signal to lode (which also avoids conflicting with signals forwarded to the child process).
 - **lode → app** (request a restart, letting the app clean up): lode first sets `state.status` to `updating` (hot-update) or `stopping` (shutdown) so the app can distinguish them, then sends **`SIGTERM`** to the child process; in its SIGTERM handler the app does cleanup (draining/flush/release) and then `exit(0)`, which must happen within `supervise.stop_timeout`, otherwise `SIGKILL`. After exit, lode switches the version and starts a new process (§5).
+- **lode → app** (config changed, **no auto-restart**): when `lode.toml` is edited while the app is **running**, lode does **not** restart it (a running app is never disturbed) — it bumps **`config_generation`** (a monotonic counter) so the app learns a restart is needed to apply the change. The app applies it at its own pace by bumping `restart_nonce`, which makes lode **re-read `lode.toml`** on the relaunch (new `[env]`/config takes effect). A *paused* app instead auto-reloads on an edit; host-process env (`-e`/k8s) requires restarting lode itself.
 
 > `lode.toml` is pure configuration, **the app does not write it** (only the lode side/operator writes it); to lock a version, use `pin` in it. For a complete `lode.toml`, see `docs/lode.example.toml`.
 
@@ -255,6 +256,7 @@ All communication goes through **`state.json`** (bidirectional, each side writin
   "last_check": "2026-06-04T22:00:00Z",
   "last_error": null,
   "history": [ { "version": "1.4.2", "at": "2026-06-04T21:00:00Z", "result": "good" } ],
+  "config_generation": 0,
 
   "target": null,
   "restart_nonce": 0

@@ -230,7 +230,7 @@ lode.manifest.v1
 
 通信全走 **`state.json`**(双向,各自单写字段 + 原子写 temp+rename;lode 轮询其 mtime):
 
-- **lode 写**:`current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`。
+- **lode 写**:`current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`/`config_generation`。
 - **app 写**(请求):`target`(想升/降到的版本,或 `"latest"`)、`restart_nonce`(递增=请求重启)。
 - **双方共写**(`readiness=state` 握手,§8):`ready` = `{LODE_INSTANCE}-{相位}`。app 用 `-0` 表示"我能服务了";暂存升级时 lode 用 `-1` 提示在跑的 app;app 用 `-2` 应答"已准备好,可以切了"。lode 读 `-0`/`-2`、写 `-1` 提示,并在切换时清空该字段。**向后兼容**:app 也可继续写裸 `{LODE_INSTANCE}`(旧就绪信号)——这等于放弃准备窗口、直接切换。
 - 典型流程(`policy=check`):lode 把发现的新版写进 `available` → **app 读到后,自己决定升级就把 `target` 写成该版本(或 `"latest"`)** → lode 应用并热更。
@@ -239,6 +239,7 @@ lode.manifest.v1
 
 - **app → lode**(请求重启/升级):app **原子写 `state.json`**(改 `target` 或递增 `restart_nonce`);**lode 短间隔(~1s)轮询 `state.json` 的 mtime**,变化即重读并执行。**文件本身就是通知**,无需给 lode 发信号(也避免与转发给子进程的信号冲突)。
 - **lode → app**(要求重启,让 app 清理):lode 先把 `state.status` 置为 `updating`(热更)或 `stopping`(关停)让 app 能区分,再给子进程发 **`SIGTERM`**;app 在 SIGTERM 处理器里做清理(排空/flush/释放)后 `exit(0)`,须在 `supervise.stop_timeout` 内,否则 `SIGKILL`。退出后 lode 切版本起新进程(§5)。
+- **lode → app**(配置变了,**不自动重启**):运行中编辑 `lode.toml` 时,lode **不**重启它(运行中的 app 不被打扰)——而是递增 **`config_generation`**(单调计数器)告知 app 需要重启才能生效。app 自定时机递增 `restart_nonce` 来应用,那次重启会让 lode **重读 `lode.toml`**(新 `[env]`/配置生效)。*暂停*中的 app 则在编辑时自动 reload;宿主进程 env(`-e`/k8s)需重启 lode 自身。
 
 > `lode.toml` 是纯配置,**app 不写它**(只有 lode 侧/operator 写);要锁版本用其中的 `pin`。完整 `lode.toml` 见 `docs/lode.example.toml`。
 
@@ -255,6 +256,7 @@ lode.manifest.v1
   "last_check": "2026-06-04T22:00:00Z",
   "last_error": null,
   "history": [ { "version": "1.4.2", "at": "2026-06-04T21:00:00Z", "result": "good" } ],
+  "config_generation": 0,
 
   "target": null,
   "restart_nonce": 0

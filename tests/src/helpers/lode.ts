@@ -24,6 +24,7 @@ export interface LodeState {
   last_check?: string;
   last_error?: string;
   history?: HistoryEntry[];
+  config_generation?: number;
   target?: string;
   restart_nonce?: number;
   ready?: string;

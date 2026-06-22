@@ -80,6 +80,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
   "current": "1.4.2", "last_good": "1.4.2", "available": "1.5.0",
   "status": "running",        // starting|running|updating|rolling-back|stopping|stopped|error
   "pid": 12345, "last_check": "…", "last_error": null,
+  "config_generation": 0,     // 运行中编辑 lode.toml 时 lode 递增它 => 重启才生效
   // 应用写(请求 / 就绪):
   "target": null,             // 某版本或 "latest" => 请求升/降级
   "restart_nonce": 0,          // 递增 => 重启当前版本
@@ -98,6 +99,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 - **健康:** 启动失败要 `exit(非0)`。新版本若在 `health_grace` 内退出,回滚到上一个 good(单次触发)。
 - **自报版本**(如 `GET /version`),与 `LODE_ACTIVE_VERSION` 一致。
 - **请求更新/重启(可选):** 原子改写 `state.json` —— 设 `target`(版本或 `"latest"`)或递增 `restart_nonce`。lode 轮询文件 mtime(~1s)并执行;文件本身即通知。
+- **运行中应用 `lode.toml`/`[env]` 改动(可选):** lode **绝不**因配置编辑自动重启(运行中的 app 不被打扰)。`lode.toml` 被编辑时,lode **递增 `config_generation`** 通知你;你自定时机递增 `restart_nonce` 来应用 —— 那次重启会**重读 `lode.toml`**(新 `[env]`/配置生效)。想响应运维改动就监听 `config_generation`。(宿主进程 env —— `-e`/k8s —— 仍需重启 lode 自身。)
 
 > 可运行的 Rust + Bun 示例见 [`../tests/apps`](../tests/apps)。
 

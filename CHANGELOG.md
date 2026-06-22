@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.7] - 2026-06-20
+
+### Added
+
+- **Config-change notification (design §7): a `lode.toml` edit while the app is RUNNING no longer
+  does nothing — lode now NOTIFIES the app instead of auto-restarting it.** lode watches `lode.toml`
+  while the app runs and, on an edit, bumps a new lode-owned `state.json` field **`config_generation`**
+  (a monotonic counter) — it does **not** restart the app (a running app is never disturbed by an edit).
+  The app observes the bumped counter and, at its own pace, requests the restart by bumping
+  `restart_nonce`.
+
+### Changed (behavioral)
+
+- **A normal (`Run`-phase) restart — via `restart_nonce` or the configured restart signal — now
+  RE-READS `lode.toml`** (relaunches via the config-reload path), so an edited `[env]`/config is
+  applied on the relaunch. Previously a nonce/signal restart re-spawned with the in-memory config.
+  (A restart during an in-progress staged-update prepare/observation still re-spawns in place to
+  preserve rollout safety; the edited config is applied on the next normal restart.)
+- Net effect (the §7 contract): apply a `[env]`/config change to a running app with
+  **edit `lode.toml` → app sees `config_generation` bump → app bumps `restart_nonce` → lode reloads**.
+  lode never auto-restarts on a config edit. A paused app keeps the existing "edit → auto reload +
+  re-attempt" recovery. Host-process env (`-e`/k8s) still requires restarting lode itself.
+
 ## [0.0.6] - 2026-06-16
 
 ### Changed (behavioral)

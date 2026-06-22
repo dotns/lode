@@ -1345,6 +1345,15 @@ impl<'c> Supervisor<'c> {
             );
         }
 
+        // Watermark the lode.toml mtime from the start so a later edit is detected
+        // WHILE the app runs (design §7): a running edit notifies the app (bumps
+        // state.config_generation) and never auto-restarts; only a paused edit reloads.
+        self.last_config_mtime = self
+            .cfg
+            .config_path
+            .as_deref()
+            .and_then(|p| state::mtime(p).ok().flatten());
+
         self.set_status(Status::Starting);
         if let Some(outcome) = self.spawn_supervised() {
             return Ok(outcome);
@@ -1360,11 +1369,7 @@ impl<'c> Supervisor<'c> {
                     // A restart request resumes a paused app; otherwise it cycles
                     // the running child.
                     Action::Restart if self.paused => self.resume(),
-                    Action::Restart => {
-                        if let Some(outcome) = self.graceful_restart() {
-                            return Ok(outcome);
-                        }
-                    }
+                    Action::Restart => return Ok(self.graceful_restart_reload()),
                     Action::Forward => {
                         if let Some(pid) = self.child {
                             // Forward to the whole process group so a fork-model
@@ -1397,11 +1402,17 @@ impl<'c> Supervisor<'c> {
             if let Some(outcome) = self.poll_state() {
                 return Ok(outcome);
             }
-            // While paused, an edited `lode.toml` is the operator's "fixed it — try
-            // again": reload + re-attempt. A running app is never disturbed by edits.
-            if self.paused && self.config_changed() {
-                tracing::info!("lode.toml changed while paused; reloading and re-attempting");
-                return Ok(Outcome::Reload);
+            // An edited `lode.toml`: while PAUSED it's the operator's "fixed it — try
+            // again" → reload + re-attempt. While RUNNING lode never auto-restarts (a
+            // running app is never disturbed) — it only NOTIFIES the app (bumps
+            // state.config_generation) so the app can request a restart at its own pace
+            // (bump restart_nonce, which re-reads lode.toml) to apply the change (§7).
+            if self.config_changed() {
+                if self.paused {
+                    tracing::info!("lode.toml changed while paused; reloading and re-attempting");
+                    return Ok(Outcome::Reload);
+                }
+                self.notify_config_changed();
             }
             if !self.paused {
                 self.maybe_check_update();
@@ -1814,6 +1825,44 @@ impl<'c> Supervisor<'c> {
         self.spawn_supervised()
     }
 
+    /// A normal (`Run`-phase) restart request — from `restart_nonce` or the configured
+    /// restart signal. Unlike [`Self::graceful_restart`] (which re-spawns the same
+    /// version in place), this stops the child and returns [`Outcome::Reload`] so
+    /// `serve` RE-READS `lode.toml`, applying any edited `[env]`/config on relaunch
+    /// (design §7 — config changes reach a running app via "edit → app bumps nonce →
+    /// reload"). A restart during a staged-update prepare/observation uses the
+    /// in-place path instead, to preserve rollout safety; config is then applied on
+    /// the next normal restart.
+    fn graceful_restart_reload(&mut self) -> Outcome {
+        tracing::info!(
+            version = self.target.version,
+            "restart requested; reloading lode.toml and relaunching"
+        );
+        if self.child.is_some() {
+            self.set_status(Status::Stopping);
+            self.stop_child();
+        }
+        Outcome::Reload
+    }
+
+    /// A running app's `lode.toml` was edited. lode does NOT restart (a running app is
+    /// never disturbed by an edit) — it advances the mtime watermark and bumps
+    /// `state.config_generation` so the app learns a restart is needed to apply the
+    /// change. The app applies it at its own pace by bumping `restart_nonce` (which
+    /// reloads `lode.toml`). Best-effort: a state-write failure never kills PID 1.
+    fn notify_config_changed(&mut self) {
+        self.last_config_mtime = self
+            .cfg
+            .config_path
+            .as_deref()
+            .and_then(|p| state::mtime(p).ok().flatten());
+        self.mutate_state(|st| st.config_generation = st.config_generation.saturating_add(1));
+        tracing::info!(
+            "lode.toml changed while the app is running; notified the app via \
+             state.config_generation (no auto-restart — bump restart_nonce to apply)"
+        );
+    }
+
     /// Graceful shutdown: stop the child and exit with its code.
     fn shutdown(&mut self) -> ExitCode {
         tracing::info!("termination signal received; stopping child");
@@ -1961,7 +2010,7 @@ impl<'c> Supervisor<'c> {
                 }
                 NonceAction::Restart => {
                     tracing::info!(nonce, "restart requested via state.json");
-                    return self.graceful_restart();
+                    return Some(self.graceful_restart_reload());
                 }
                 NonceAction::AbandonPrepareAndRestart => {
                     // Drop the staged prepare (and its `-1` prompt) first; the

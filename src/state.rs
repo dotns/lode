@@ -71,6 +71,13 @@ pub(crate) struct State {
     pub(crate) last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) history: Vec<HistoryEntry>,
+    /// Monotonic counter lode bumps each time it detects an edited `lode.toml` while
+    /// the app is RUNNING. lode never auto-restarts on a config edit — it only bumps
+    /// this so the app learns a restart is needed to apply the change; the app picks
+    /// its own moment and requests the restart by bumping [`Self::restart_nonce`]
+    /// (which makes lode re-read `lode.toml`). See design §7.
+    #[serde(default)]
+    pub(crate) config_generation: u64,
 
     // --- app-owned (requests) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
