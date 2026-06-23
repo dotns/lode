@@ -8,17 +8,23 @@ does under lode:
 |---|---|---|
 | 1 | **START** (启动) | bind `$PORT` and serve — lode runs the app as its child |
 | 2 | **READ** (读取变量) | read `LODE_ACTIVE_VERSION` / `LODE_DATA_DIR` / `LODE_INSTANCE` + host env (`PORT`, operator `[env]`) → `GET /env` |
-| 3 | **UPGRADE** (升级) | *passive*: readiness + `SIGTERM` so lode's update/rollback is seamless · *active*: `POST /upgrade` (→ `state.target="latest"`), `POST /restart` (→ bump `restart_nonce`) |
+| 3 | **UPGRADE** (升级) | *passive*: readiness + `SIGTERM` so lode's update/rollback is seamless · *active*: `POST /upgrade`, `POST /restart` · *maintenance*: `POST /hold` / `/release` (set `state.hold` → lode won't (re)start the app) · *reload*: an operator editing `lode.toml` while the app runs does **not** auto-restart it — lode bumps `state.config_generation`; the app applies it at its own pace |
+
+Each demo integrates through the single-file **SDK** in [`../sdks`](../sdks), so it
+never hand-rolls the `state.json` format or locking: **Bun** imports `lode.ts`,
+**Rust** includes `lode.rs` via `#[path]`, **Go** imports `lode.go` through a local
+`replace`.
 
 ```
 examples/
-├── go/    main.go · go.mod · lode.toml          (stdlib only; static binary)
-├── bun/   app.ts · package.ts · lode.toml       (package.ts bundles → dist/app.js)
-└── rust/  src/main.rs · Cargo.toml · lode.toml  (tiny_http + serde_json + signal-hook)
+├── go/    main.go · go.mod · lode.toml          (imports ../../sdks/lode.go; static binary)
+├── bun/   app.ts · package.ts · lode.toml       (imports ../../sdks/lode.ts; bundles → dist/app.js)
+└── rust/  src/main.rs · Cargo.toml · lode.toml  (#[path]-includes ../../sdks/lode.rs; tiny_http + serde)
 ```
 
 > Demos may use ordinary libraries — lode does not constrain your app's deps; only
-> lode itself stays minimal. For a **zero-dependency, std-only** reference see
+> lode itself stays minimal. For a **zero-dependency, std-only** reference that
+> hand-rolls the contract without the SDK see
 > [`../tests/apps/web-rust`](../tests/apps/web-rust) and [`../tests/apps/web-bun`](../tests/apps/web-bun).
 
 ## The contract (identical across all three)
@@ -29,23 +35,28 @@ Every demo exposes:
 |---|---|---|
 | `/version` | GET | the running version (`LODE_ACTIVE_VERSION`, else the baked build version) |
 | `/healthz` | GET | `200 ok` |
-| `/env` | GET | JSON of the injected + passthrough env (the **READ** demo) |
-| `/upgrade` | POST | write `state.target = "latest"` — ask lode to pull the newest version |
-| `/restart` | POST | bump `state.restart_nonce` — ask lode to restart the current version |
+| `/env` | GET | JSON of the injected + passthrough env (the **READ** demo) — via the SDK's `activeVersion()` / `instanceId()` / `dataDir()` |
+| `/upgrade` | POST | `lode.requestUpdate("latest")` — ask lode to pull the newest version |
+| `/restart` | POST | `lode.reboot()` — ask lode to restart the current version |
+| `/hold` | POST | `lode.hold()` — ask lode NOT to (re)start the app (maintenance); status `held` |
+| `/release` | POST | `lode.release()` — clear the hold |
 
-And on the lifecycle side:
+And on the lifecycle side (all via the SDK):
 
-- **Readiness** — after the listener is bound it atomically writes
-  `state.ready = $LODE_INSTANCE` into `$LODE_DATA_DIR/state.json` (so
-  `readiness = "state"` commits the version). No-op when run standalone.
-- **Graceful stop** — on `SIGTERM`/`SIGINT` it drains and `exit(0)` within
-  `supervise.stop_timeout`, or lode `SIGKILL`s it.
+- **Readiness** — once the listener is bound it calls `lode.markReady()`
+  (`state.ready = $LODE_INSTANCE`, under the `state.json.lock`) so
+  `readiness = "state"` commits the version. No-op when run standalone.
+- **Graceful stop** — `lode.onTerminate(...)` drains and `exit(0)` on
+  `SIGTERM`/`SIGINT` within `supervise.stop_timeout`, or lode `SIGKILL`s it.
 - **`version` subcommand** — `<app> version` prints the version and exits (so
   `lode version` passthrough works when `exec = "./<binary>"`).
 
 `state.json` is the app ↔ lode comms file: **lode writes status, the app writes
-requests** (`ready` / `target` / `restart_nonce`); the examples patch it
-atomically (temp + rename) so lode never reads a half-written file. Full contract:
+requests** (`ready` / `target` / `restart_nonce` / `hold`); the SDK patches it
+under the `state.json.lock` so concurrent lode/app writes never clobber each other. lode also
+writes `config_generation` — a monotonic counter it bumps when `lode.toml` is
+edited while the app runs, so the app can notice and ask for a `restart_nonce`
+reload at its own pace (lode never auto-restarts on a config edit). Full contract:
 [`../docs/integration.md`](../docs/integration.md).
 
 ## Build

@@ -46,8 +46,8 @@ exec    = "node"
 # — pin + trusted origin. Or bake node into the base image and drop this block.
 [runtime]
 runtime  = "node"
-download = "https://nodejs.org/dist/v22.11.0/node-v22.11.0-linux-x64.tar.gz"   # arm64: node-v22.11.0-linux-arm64.tar.gz
-version  = "22.11.0"   # probed via `node --version` (prints v22.11.0; matched as a substring)
+download = "https://nodejs.org/dist/v26.3.1/node-v26.3.1-linux-x64.tar.gz"   # arm64: node-v26.3.1-linux-arm64.tar.gz
+version  = "26.3.1"   # probed via `node --version` (prints v26.3.1; matched as a substring). LTS alt: v24.17.0
 
 # Extra env for the child, as DEFAULTS — a per-deploy `-e KEY=VALUE` overrides them
 # (lode's LODE_* always win).

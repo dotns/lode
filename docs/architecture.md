@@ -115,7 +115,7 @@ When `run`/`exec` depends on a runtime (such as `bun`), it can be declared in th
 [runtime]
 runtime       = "bun"                                    # the executable name used by run/exec
 download      = "https://example.com/bun-linux-x64.zip"  # downloaded when bun is not found on PATH/cache
-version       = "1.1.38"                                 # optional: require this version (substring of the probe output)
+version       = "1.3.14"                                 # optional: require this version (substring of the probe output)
 # version_check = "--version"                            # optional: arg(s) that print the version (default --version)
 ```
 
@@ -297,6 +297,8 @@ A minimal rule:
 
 ### Restart mode `supervise.restart_mode`
 
+> **⚠ Implementation status (v1): only `stop-start` is implemented.** `reuseport-overlap` and `socket-activation` (and the `[supervise].listen` key that only feeds them) are **NOT yet implemented** — selecting either makes lode log a notice (`restart_mode is not yet supported; using stop-start`) and **fall back to `stop-start`**. The table below documents the intended design of the zero-downtime modes; treat them as forward-looking until this caveat is lifted.
+
 | Value | Behavior | App cooperation |
 |---|---|---|
 | `stop-start` (default) | stop the old then start the new, with a very short port gap | none; works for non-network services too |
@@ -305,7 +307,7 @@ A minimal rule:
 
 > **No systemd in the container? It doesn't matter.** socket-activation is a **protocol (environment variables + inherited fds)** that does not depend on the systemd process — **lode acts as the activator itself** (binds the socket, passes the fd, sets `LISTEN_FDS`), and the app only needs to read fd 3. Inside a container, prefer the simpler `reuseport-overlap`, or the default `stop-start`.
 > `socket-activation` requires `LODE_LISTEN` (e.g. `0.0.0.0:3000`); fd passing goes through the `command-fds` wrapper, preserving `#![forbid(unsafe_code)]`.
-> Difference from overseer: overseer is an **in-process library** and **does not auto-restart on crash** (it exits with the same code); lode is an **external general-purpose supervisor** that by default **keeps the app alive** (retry-then-pause, never crash-looping the container) and additionally offers `off` (mirror) + rollback, making it a superset. **Zero-downtime is an optional advanced feature; v1 defaults to `stop-start`, with socket-activation/overlap enabled later as needed.**
+> Difference from overseer: overseer is an **in-process library** and **does not auto-restart on crash** (it exits with the same code); lode is an **external general-purpose supervisor** that by default **keeps the app alive** (retry-then-pause, never crash-looping the container) and additionally offers `off` (mirror) + rollback, making it a superset. **Zero-downtime is an optional advanced feature; v1 implements only `stop-start` — `socket-activation`/`reuseport-overlap` fall back to it for now (see the caveat above) and are enabled later as needed.**
 
 ### Readiness / stop handshake (key: don't kill the process before the app is ready)
 
@@ -393,8 +395,8 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_READY_TIMEOUT` | `--ready-timeout <sec>` | `supervise.ready_timeout` | `30` | with `readiness=state`, the max wait for readiness; a timeout is judged a failure |
 | `LODE_HEALTH_GRACE` | `--health-grace <sec>` | `supervise.health_grace` | `15` | (readiness=none) the new version must stay alive for this many seconds to be good; also the observation window for single-shot rollback |
 | `LODE_STOP_TIMEOUT` | `--stop-timeout <sec>` | `supervise.stop_timeout` | `10` | SIGKILL after the graceful-stop timeout |
-| `LODE_RESTART_MODE` | `--restart-mode <mode>` | `supervise.restart_mode` | `stop-start` | restart strategy, §8 |
-| `LODE_LISTEN` | `--listen <addr>` | `supervise.listen` | — | socket-activation listen address |
+| `LODE_RESTART_MODE` | `--restart-mode <mode>` | `supervise.restart_mode` | `stop-start` | restart strategy, §8 (**only `stop-start` is implemented; `reuseport-overlap`/`socket-activation` fall back to it**) |
+| `LODE_LISTEN` | `--listen <addr>` | `supervise.listen` | — | socket-activation listen address (**socket-activation not yet implemented; this key is currently inert**) |
 | **`[signals]` — signals** | | | | |
 | `LODE_FORWARD_SIGNALS` | `--forward-signals <list>` | `signals.forward` | (standard set) | the set of signals forwarded to the child process, §8 |
 | `LODE_RESTART_SIGNAL` | `--restart-signal <sig>` | `signals.restart` | — | the signal that triggers a graceful restart (unset by default), §8 |
@@ -534,12 +536,14 @@ lode-cli management (writes state.json, communicates with the running service in
   rollback     set target in state.json to last_good (or --version <v>)
   restart      increment restart_nonce in state.json, having the service restart the child process
   versions     list the locally installed versions
+  seed         dev/testing: install a LOCAL executable/archive as a version (no manifest, no download, no signature check) and activate it, so bare `lode` runs it fully offline
 
 lode-cli publishing/signing (publisher, see docs/integration.md):
   keygen       generate an ed25519 private key/public key/key_id
   sign         compute sha256 for an artifact + produce a sig
   verify       verify an artifact's sha256 + sig locally
-  manifest     sign and generate / merge (--into) a lode/v1 manifest
+  manifest     sign one asset and generate / merge (--into) a lode/v1 manifest
+  manifest-sign  stamp a complete lode/v1 manifest's top-level key_id + sig in place (--into)
   init         write out a starter lode.toml (example config)
 ```
 

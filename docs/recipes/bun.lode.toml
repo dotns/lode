@@ -42,8 +42,8 @@ exec    = "bun"
 # origin. Or bake bun into the base image and drop this block (PATH wins over cache).
 [runtime]
 runtime  = "bun"
-download = "https://github.com/oven-sh/bun/releases/download/bun-v1.1.38/bun-linux-x64.zip"   # glibc; arm64: bun-linux-aarch64.zip
-version  = "1.1.38"   # probed via `bun --version`; a cache/PATH bun of another version is bypassed for a fresh download
+download = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"   # glibc; arm64: bun-linux-aarch64.zip
+version  = "1.3.14"   # probed via `bun --version`; a cache/PATH bun of another version is bypassed for a fresh download
 
 # Extra env for the child, as DEFAULTS — a per-deploy `-e KEY=VALUE` overrides them
 # (lode's LODE_* always win).

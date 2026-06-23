@@ -91,8 +91,8 @@ lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何
 |---|---|
 | `lode` | 启动并监督应用(`[command].run`);按策略自动更新 |
 | `lode <args…>` / `lode -- <args…>` | 直通:执行 `[command].exec` + `<args>`(如 `lode run db:init`);参数与 lode 旗标同名时用 `--` |
-| `lode-cli status` / `update` / `rollback` / `restart` / `versions` | 管理运行中的实例(经 `state.json`) |
-| `lode-cli keygen` / `sign` / `verify` / `manifest` / `init` | 发布方 / 运维工具 |
+| `lode-cli status` / `update` / `rollback` / `restart` / `versions` / `seed` | 管理运行中的实例(经 `state.json`);`seed` 离线安装本地版本,用于开发/测试 |
+| `lode-cli keygen` / `sign` / `verify` / `manifest` / `manifest-sign` / `init` | 发布方 / 运维工具 |
 
 ## 三个文件
 

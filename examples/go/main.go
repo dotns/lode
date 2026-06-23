@@ -1,19 +1,19 @@
 // Package main is a lode demo app (Go). See ../README.md.
 //
-// It conforms to the language-agnostic lode app contract and shows the three
-// things an app does under lode:
+// It conforms to the lode app contract via the SDK (github.com/dotns/lode/sdks,
+// a local replace to ../../sdks/lode.go) and shows the three things an app does
+// under lode:
 //
-//	1. START   — bind $PORT and serve; lode runs this binary as its child.
-//	2. READ    — read the env lode injects (LODE_ACTIVE_VERSION / LODE_DATA_DIR /
-//	             LODE_INSTANCE) plus passthrough host env (PORT, operator [env]).
-//	3. UPGRADE — participate in updates two ways:
-//	     a) PASSIVE: announce readiness (state.ready = LODE_INSTANCE) and handle
-//	        SIGTERM gracefully, so lode's update/rollback is seamless;
-//	     b) ACTIVE:  POST /upgrade writes state.target = "latest" to ASK lode to
-//	        pull the newest version; POST /restart bumps state.restart_nonce.
+//  1. START   — bind $PORT and serve; lode runs this binary as its child.
+//  2. READ    — read the env lode injects (lode.ActiveVersion / LODE_DATA_DIR /
+//     lode.InstanceID) plus passthrough host env (PORT, operator [env]).
+//  3. UPGRADE — a) PASSIVE: MarkReady() + lode.OnTerminate(), so lode's update/
+//     rollback is seamless;
+//     b) ACTIVE:  the endpoints below call RequestUpdate / Reboot /
+//     Hold / Release.
 //
-// Standalone (no lode): LODE_DATA_DIR is unset, so the state.json steps are
-// no-ops and you still get a working server for `start` + `read`.
+// Standalone (no lode): LODE_DATA_DIR is unset, so lode.FromEnv() errors and the
+// request endpoints reply 503 — you still get a working server.
 package main
 
 import (
@@ -23,10 +23,9 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
 	"time"
+
+	lode "github.com/dotns/lode/sdks"
 )
 
 // buildVersion is the fallback baked at build time:
@@ -38,7 +37,7 @@ import (
 var buildVersion = "0.0.0-dev"
 
 func version() string {
-	if v := os.Getenv("LODE_ACTIVE_VERSION"); v != "" {
+	if v := lode.ActiveVersion(); v != "" {
 		return v
 	}
 	return buildVersion
@@ -51,10 +50,10 @@ func env(key, def string) string {
 	return def
 }
 
-func log(format string, a ...any) { fmt.Printf("[demo-go] "+format+"\n", a...) }
+func logf(format string, a ...any) { fmt.Printf("[demo-go] "+format+"\n", a...) }
 
 func main() {
-	// `lode version` passthrough when the operator sets exec = "./demo-go-linux-x64".
+	// `lode version` passthrough when the operator sets exec = "./demo-go".
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "version", "--version", "-v":
@@ -66,39 +65,48 @@ func main() {
 	port := env("PORT", "8080")
 	addr := ":" + port
 
+	// The SDK handle — nil when run standalone (LODE_DATA_DIR unset).
+	client, _ := lode.FromEnv()
+
+	// ask runs an SDK request, or replies 503 when not supervised by lode.
+	ask := func(w http.ResponseWriter, fn func(*lode.Client) error, ok string) {
+		if client == nil {
+			http.Error(w, "not running under lode (LODE_DATA_DIR unset)", http.StatusServiceUnavailable)
+			return
+		}
+		if err := fn(client); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, ok)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintln(w, "ok")
-	})
-	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) {
-		fmt.Fprintln(w, version())
-	})
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, "ok") })
+	mux.HandleFunc("/version", func(w http.ResponseWriter, _ *http.Request) { fmt.Fprintln(w, version()) })
 	// READ: surface the env lode injected + passthrough host/operator env.
 	mux.HandleFunc("/env", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"version":  version(),                  // LODE_ACTIVE_VERSION or baked
-			"instance": os.Getenv("LODE_INSTANCE"), // unique id per launch
-			"dataDir":  os.Getenv("LODE_DATA_DIR"), // where state.json lives
-			"port":     port,                       // host env passthrough
-			"greeting": os.Getenv("APP_GREETING"),  // operator [env] / host -e
+			"version":  version(),         // LODE_ACTIVE_VERSION or baked
+			"instance": lode.InstanceID(), // unique id per launch
+			"dataDir":  os.Getenv("LODE_DATA_DIR"),
+			"port":     port,                      // host env passthrough
+			"greeting": os.Getenv("APP_GREETING"), // operator [env] / host -e
 		})
 	})
-	// UPGRADE (active): ask lode to pull the newest version.
+	// UPGRADE (active) + maintenance.
 	mux.HandleFunc("/upgrade", func(w http.ResponseWriter, _ *http.Request) {
-		if err := patchState(map[string]any{"target": "latest"}); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "requested update to latest")
+		ask(w, func(c *lode.Client) error { return c.RequestUpdate("latest") }, "requested update to latest")
 	})
-	// UPGRADE (active): ask lode to restart the current version.
 	mux.HandleFunc("/restart", func(w http.ResponseWriter, _ *http.Request) {
-		if err := bumpRestart(); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Fprintln(w, "requested restart")
+		ask(w, func(c *lode.Client) error { _, err := c.Reboot(); return err }, "requested restart")
+	})
+	mux.HandleFunc("/hold", func(w http.ResponseWriter, _ *http.Request) {
+		ask(w, func(c *lode.Client) error { return c.Hold() }, "held (lode will not (re)start the app)")
+	})
+	mux.HandleFunc("/release", func(w http.ResponseWriter, _ *http.Request) {
+		ask(w, func(c *lode.Client) error { return c.Release() }, "released")
 	})
 
 	srv := &http.Server{Handler: mux}
@@ -109,96 +117,32 @@ func main() {
 		fmt.Fprintf(os.Stderr, "[demo-go] bind %s: %v\n", addr, err)
 		os.Exit(1)
 	}
-	log("starting version=%s pid=%d instance=%s data_dir=%s addr=%s",
+	logf("starting version=%s pid=%d instance=%s data_dir=%s addr=%s",
 		version(), os.Getpid(), env("LODE_INSTANCE", "none"), env("LODE_DATA_DIR", "unset"), addr)
 
-	// UPGRADE (passive): graceful stop. On SIGTERM/SIGINT drain and exit(0) well
-	// within supervise.stop_timeout, or lode SIGKILLs us.
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-	go func() {
-		s := <-stop
-		log("%v received — shutting down", s)
+	// UPGRADE (passive): graceful stop — on SIGTERM/SIGINT drain and exit(0) within
+	// supervise.stop_timeout (the SDK calls os.Exit(0) after the handler returns).
+	lode.OnTerminate(func() {
+		logf("shutting down")
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(ctx)
-	}()
+	})
 
 	// UPGRADE (passive): announce readiness so lode (readiness="state") commits us.
-	announceReady()
+	if client != nil {
+		if err := client.MarkReady(); err != nil {
+			logf("readiness skipped: %v", err)
+		} else {
+			logf("ready: state.ready=%s", lode.InstanceID())
+		}
+	} else {
+		logf("readiness skipped (standalone)")
+	}
 
 	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "[demo-go] serve: %v\n", err)
 		os.Exit(1)
 	}
-	log("cleanup done, exiting 0")
-}
-
-// --- state.json: the app <-> lode comms file under $LODE_DATA_DIR -----------
-
-func statePath() (string, bool) {
-	dir := os.Getenv("LODE_DATA_DIR")
-	if dir == "" {
-		return "", false // standalone (not under lode)
-	}
-	return filepath.Join(dir, "state.json"), true
-}
-
-// patchState merges fields into state.json (atomic temp+rename), preserving
-// lode's own fields so it never reads a half-written file.
-func patchState(fields map[string]any) error {
-	path, ok := statePath()
-	if !ok {
-		return fmt.Errorf("not running under lode (LODE_DATA_DIR unset)")
-	}
-	state := map[string]any{}
-	if b, err := os.ReadFile(path); err == nil {
-		_ = json.Unmarshal(b, &state) // tolerate empty/corrupt: start fresh
-	}
-	for k, v := range fields {
-		state[k] = v
-	}
-	b, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	b = append(b, '\n')
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
-}
-
-func bumpRestart() error {
-	path, ok := statePath()
-	if !ok {
-		return fmt.Errorf("not running under lode (LODE_DATA_DIR unset)")
-	}
-	n := 0.0
-	if b, err := os.ReadFile(path); err == nil {
-		var s map[string]any
-		if json.Unmarshal(b, &s) == nil {
-			if v, ok := s["restart_nonce"].(float64); ok { // JSON numbers decode to float64
-				n = v
-			}
-		}
-	}
-	return patchState(map[string]any{"restart_nonce": n + 1})
-}
-
-// announceReady writes state.ready = $LODE_INSTANCE so lode (readiness="state")
-// marks this version running/good. No-op standalone.
-func announceReady() {
-	inst := os.Getenv("LODE_INSTANCE")
-	if err := patchState(map[string]any{"ready": inst}); err != nil {
-		log("readiness skipped: %v", err)
-		return
-	}
-	path, _ := statePath()
-	log("ready: wrote state.ready=%s -> %s", inst, path)
+	logf("cleanup done, exiting 0")
 }

@@ -14,12 +14,14 @@ path = "src/main.rs"
 
 # A demo APP may use ordinary libraries — lode does not constrain your app's
 # dependencies (lode itself is the one that stays minimal). These are all pure
-# Rust and build into a static musl binary. (See ../../tests/apps/web-rust for a
-# zero-dependency, std-only variant.)
+# Rust and build into a static musl binary. serde/serde_json are what the SDK
+# (../../sdks/lode.rs, included as `mod lode`) needs; the SDK provides the SIGTERM
+# handler itself, so no signal crate is required. (See ../../tests/apps/web-rust
+# for a zero-dependency, std-only variant that hand-rolls the contract.)
 [dependencies]
 tiny_http = "0.12"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-signal-hook = "0.3"
 
 [profile.release]
 opt-level = "z"

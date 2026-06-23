@@ -94,8 +94,8 @@ shipped alongside it) it is the operator/publisher toolkit.
 |---|---|
 | `lode` | start & supervise the app (`[command].run`); auto-update per policy |
 | `lode <args…>` / `lode -- <args…>` | passthrough: run `[command].exec` + `<args>` (e.g. `lode run db:init`); use `--` when an arg collides with a lode flag |
-| `lode-cli status` / `update` / `rollback` / `restart` / `versions` | manage a running instance (via `state.json`) |
-| `lode-cli keygen` / `sign` / `verify` / `manifest` / `init` | publisher/operator tools |
+| `lode-cli status` / `update` / `rollback` / `restart` / `versions` / `seed` | manage a running instance (via `state.json`); `seed` installs a local version offline for dev/testing |
+| `lode-cli keygen` / `sign` / `verify` / `manifest` / `manifest-sign` / `init` | publisher/operator tools |
 
 ## Three files
 

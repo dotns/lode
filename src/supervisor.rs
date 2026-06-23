@@ -1262,6 +1262,10 @@ struct Supervisor<'c> {
     /// does not exit) and stops respawning until a recovery trigger — an edited
     /// `lode.toml`, a bumped `restart_nonce`, or a new `target` (design §8).
     paused: bool,
+    /// App-requested hold (`state.json`'s `hold` flag): don't (re)start the process
+    /// — deliberate maintenance, reports `status = held`. Unlike [`Self::paused`]
+    /// (a failure fallback) it gates *starts* only; a running child is left alone.
+    hold: bool,
     /// `lode.toml`'s mtime captured when the app paused; while paused, a change
     /// triggers a config reload + re-attempt. A *running* app is never disturbed.
     last_config_mtime: Option<SystemTime>,
@@ -1286,9 +1290,11 @@ struct Supervisor<'c> {
 impl<'c> Supervisor<'c> {
     fn new(cfg: &'c Config, target: Target, runtime_dir: Option<PathBuf>) -> Self {
         // Seed the serviced nonce from any existing state so a pre-existing
-        // `restart_nonce` does not trigger a spurious restart on startup.
-        let last_nonce = state::read_lenient(&cfg.global.data_dir.join("state.json"))
-            .map_or(0, |st| st.restart_nonce);
+        // `restart_nonce` does not trigger a spurious restart on startup, and the
+        // hold flag so a `hold = true` present at boot is honoured before spawning.
+        let seed = state::read_lenient(&cfg.global.data_dir.join("state.json"));
+        let last_nonce = seed.as_ref().map_or(0, |st| st.restart_nonce);
+        let hold = seed.as_ref().is_some_and(|st| st.hold);
         // Schedule the first update check immediately for check/auto (unless
         // pinned); `off`/pinned never checks (design §5).
         let next_check_at = if cfg.update.pin.is_some() || matches!(cfg.update.policy, Policy::Off)
@@ -1308,6 +1314,7 @@ impl<'c> Supervisor<'c> {
             restart_count: 0,
             restart_at: None,
             paused: false,
+            hold,
             last_config_mtime: None,
             instance: String::new(),
             phase: Phase::Run,
@@ -1354,9 +1361,15 @@ impl<'c> Supervisor<'c> {
             .as_deref()
             .and_then(|p| state::mtime(p).ok().flatten());
 
-        self.set_status(Status::Starting);
-        if let Some(outcome) = self.spawn_supervised() {
-            return Ok(outcome);
+        if self.hold {
+            // A hold present at boot: wait, never spawning, until it is cleared (§7).
+            tracing::info!("hold is set; not starting the app — waiting for release (hold=false)");
+            self.enter_held();
+        } else {
+            self.set_status(Status::Starting);
+            if let Some(outcome) = self.spawn_supervised() {
+                return Ok(outcome);
+            }
         }
 
         loop {
@@ -1388,6 +1401,7 @@ impl<'c> Supervisor<'c> {
             }
 
             if !self.paused
+                && !self.hold
                 && self.child.is_none()
                 && self.restart_at.is_some_and(|at| Instant::now() >= at)
             {
@@ -1586,6 +1600,47 @@ impl<'c> Supervisor<'c> {
         });
     }
 
+    /// Enter an app-requested hold: stop respawning and wait (status `held`) until
+    /// the app clears `hold` in `state.json`. Drops any in-flight rollout so a
+    /// release respawns under normal supervision.
+    fn enter_held(&mut self) {
+        self.child = None;
+        self.restart_at = None;
+        self.phase = Phase::Run;
+        self.mutate_state(|st| {
+            st.status = Some(Status::Held);
+            st.pid = None;
+        });
+    }
+
+    /// Apply a `hold`-flag transition from `state.json`, returning whether lode is
+    /// currently held. While held lode never spawns (a running child is left
+    /// alone); releasing schedules a prompt respawn.
+    fn apply_hold(&mut self, st: &state::State) -> bool {
+        if st.hold != self.hold {
+            self.hold = st.hold;
+            if self.hold {
+                tracing::info!("hold requested via state.json; lode will not (re)start the app");
+                self.restart_at = None;
+                if self.child.is_none() {
+                    self.enter_held();
+                }
+            } else {
+                tracing::info!("hold released via state.json; resuming");
+                if self.child.is_none() && !self.paused {
+                    self.set_status(Status::Starting);
+                    self.restart_at = Some(Instant::now());
+                }
+            }
+        }
+        self.hold
+    }
+
+    /// Fresh read of the `hold` flag (best-effort: any read problem is `false`).
+    fn hold_requested(&self) -> bool {
+        state::read_lenient(&self.cfg.global.data_dir.join("state.json")).is_some_and(|st| st.hold)
+    }
+
     /// Resume a paused app: clear the pause, reset the retry count, and respawn
     /// promptly (the run loop spawns once `restart_at` is due).
     fn resume(&mut self) {
@@ -1641,6 +1696,17 @@ impl<'c> Supervisor<'c> {
     /// mirroring the child (exit with its code). While observing a freshly-applied
     /// version this is a single-strike rollback (design §5).
     fn on_child_exit(&mut self, status: WaitStatus) -> Option<Outcome> {
+        // A hold set before this exit (e.g. for maintenance) wins over the restart
+        // policy: hold instead of respawning. Re-read fresh to catch a flag write
+        // the mtime poll may not have observed yet.
+        if self.hold_requested() {
+            self.hold = true;
+            tracing::info!(
+                "child exited while hold is set; holding (lode stays alive, not respawning)"
+            );
+            self.enter_held();
+            return None;
+        }
         if matches!(self.phase, Phase::Observe(_)) {
             return self.on_observe_exit(status);
         }
@@ -1996,6 +2062,13 @@ impl<'c> Supervisor<'c> {
         // Lenient: an app could tear a write at any poll — warn + quarantine and
         // skip the tick rather than kill PID 1 mid-run.
         let st = state::read_lenient(&path)?;
+
+        // Hold gates all (re)starts; while held, defer restart/target requests but
+        // still watermark the nonce so a bump made during hold can't fire on release.
+        if self.apply_hold(&st) {
+            self.last_nonce = self.last_nonce.max(st.restart_nonce);
+            return None;
+        }
 
         // A bumped restart nonce is high-water-marked so it acts exactly once —
         // and it acts in EVERY phase (P2-13): a restart requested mid-prepare or
@@ -3755,6 +3828,69 @@ mod tests {
         );
         assert!(sup.child.is_none());
         assert!(sup.restart_at.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hold_engages_reports_held_and_releases() {
+        let dir = std::env::temp_dir().join(format!("lode-hold-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = test_config(dir.clone());
+        let mut sup = Supervisor::new(&cfg, test_target(&dir), None);
+        let path = dir.join("state.json");
+
+        // App sets hold=true (as its RMW would). apply_hold engages the hold:
+        // no child, no pending respawn, status=held, and the flag is preserved.
+        state::write(
+            &path,
+            &state::State {
+                hold: true,
+                ..state::State::default()
+            },
+        )
+        .unwrap();
+        let st = state::read(&path).unwrap().unwrap();
+        assert!(sup.apply_hold(&st), "apply_hold reports currently held");
+        assert!(sup.hold);
+        assert!(sup.child.is_none());
+        assert!(sup.restart_at.is_none());
+        assert!(sup.hold_requested());
+        let written = state::read(&path).unwrap().unwrap();
+        assert_eq!(written.status, Some(Status::Held));
+        assert_eq!(written.pid, None);
+        assert!(written.hold, "hold flag preserved through enter_held");
+
+        // Releasing the hold (no child, not paused) schedules a prompt respawn.
+        state::locked_update(&path, |s| s.hold = false).unwrap();
+        let st = state::read(&path).unwrap().unwrap();
+        assert!(!sup.apply_hold(&st), "apply_hold reports released");
+        assert!(!sup.hold);
+        assert!(sup.restart_at.is_some(), "release schedules a respawn");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hold_present_at_boot_is_seeded() {
+        let dir = std::env::temp_dir().join(format!("lode-holdboot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        state::write(
+            &dir.join("state.json"),
+            &state::State {
+                hold: true,
+                ..state::State::default()
+            },
+        )
+        .unwrap();
+        let cfg = test_config(dir.clone());
+        let sup = Supervisor::new(&cfg, test_target(&dir), None);
+        assert!(
+            sup.hold,
+            "a hold present at boot is seeded so run() won't spawn"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

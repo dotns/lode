@@ -71,9 +71,9 @@ the cache, or freshly downloaded) by running it with `version_check` (default
 ```toml
 [runtime]
 runtime       = "bun"
-download      = "https://github.com/oven-sh/bun/releases/download/bun-v1.1.38/bun-linux-x64.zip"
-version       = "1.1.38"      # require `bun --version` to report this
-# version_check = "--version" # default; e.g. deno also uses --version, node prints "v22…"
+download      = "https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-x64.zip"
+version       = "1.3.14"      # require `bun --version` to report this
+# version_check = "--version" # default; e.g. deno also uses --version, node prints "v26…"
 ```
 
 - A cached or PATH runtime of the **wrong** version is bypassed and the configured
@@ -81,8 +81,8 @@ version       = "1.1.38"      # require `bun --version` to report this
   runtime forward with no manual `rm $DATA_DIR/runtime/<name>`.
 - A freshly downloaded runtime whose version still doesn't match is a **hard error**
   (the URL served the wrong version, or `version`/`version_check` is misconfigured).
-- Substring match, so `1.1.38` matches bun's `1.1.38`, node's `v22.11.0` matches
-  `22.11.0`, and deno's `deno 2.1.4 (…)` matches `2.1.4`.
+- Substring match, so `1.3.14` matches bun's `1.3.14`, node's `v26.3.1` matches
+  `26.3.1`, and deno's `deno 2.8.3 (…)` matches `2.8.3`.
 
 ---
 

@@ -43,8 +43,8 @@ exec    = "deno"
 # Runtime downloads are UNVERIFIED — pin the version (swap arch for arm64).
 [runtime]
 runtime  = "deno"
-download = "https://github.com/denoland/deno/releases/download/v2.1.4/deno-x86_64-unknown-linux-gnu.zip"   # arm64: deno-aarch64-unknown-linux-gnu.zip
-version  = "2.1.4"   # probed via `deno --version` (output contains "deno 2.1.4 …")
+download = "https://github.com/denoland/deno/releases/download/v2.8.3/deno-x86_64-unknown-linux-gnu.zip"   # arm64: deno-aarch64-unknown-linux-gnu.zip
+version  = "2.8.3"   # probed via `deno --version` (output contains "deno 2.8.3 …")
 
 # Extra env for the child, as DEFAULTS — a per-deploy `-e KEY=VALUE` overrides them
 # (lode's LODE_* always win).

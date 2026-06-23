@@ -82,12 +82,13 @@ wins over them, and lode's three vars above always win over everything.
 {
   // lode writes (app reads):
   "current": "1.4.2", "last_good": "1.4.2", "available": "1.5.0",
-  "status": "running",        // starting|running|updating|rolling-back|stopping|stopped|error
+  "status": "running",        // starting|running|held|updating|rolling-back|stopping|stopped|error
   "pid": 12345, "last_check": "…", "last_error": null,
   "config_generation": 0,     // lode bumps this on a lode.toml edit while you run => restart to apply
   // app writes (requests / readiness):
   "target": null,             // a version or "latest" => request up/down-grade
   "restart_nonce": 0,          // increment => restart the current version
+  "hold": false,              // set true => lode will NOT (re)start the process (maintenance) => status "held"
   "ready": null               // set to LODE_INSTANCE => "I can serve now"
 }
 ```
@@ -103,6 +104,7 @@ Implement these (all but `SIGTERM` are optional, but recommended):
 - **Health:** `exit(non-zero)` on startup failure. A version that exits within `health_grace` is rolled back to the last good one (single-strike).
 - **Self-report version** (e.g. `GET /version`) matching `LODE_ACTIVE_VERSION`.
 - **Request an update/restart (optional):** atomically patch `state.json` — set `target` (a version or `"latest"`) or bump `restart_nonce`. lode polls the file's mtime (~1s) and acts; the file *is* the notification.
+- **Hold off a (re)start (optional):** set `hold = true` to tell lode **not** to (re)start the process — for planned maintenance that must finish before the app comes up (e.g. a DB migration needing CLI intervention). lode reports `status = "held"` and waits — at boot, after the child exits, and across `restart_nonce`/`target` requests — until you set `hold = false`. A hold gates a *start*, not a running child: lode never kills the current process, so to take the app down for maintenance set `hold = true` then `exit(0)` yourself (lode then holds instead of respawning). An operator can drive this the same way (`hold` is just a `state.json` field).
 - **Apply a `lode.toml`/`[env]` change while running (optional):** lode **never auto-restarts** on a config edit (a running app is never disturbed). When `lode.toml` is edited, lode **bumps `config_generation`** to notify you; apply the change at your own pace by bumping `restart_nonce` — that relaunch **re-reads `lode.toml`** (new `[env]`/config takes effect). Watch `config_generation` if you want to react to operator edits. (Host-process env — `-e`/k8s — still requires restarting lode itself.)
 
 ### Concurrent writes — the `state.json.lock` contract

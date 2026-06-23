@@ -1,36 +1,34 @@
 //! lode demo (Rust). See ../README.md.
 //!
-//! Conforms to the language-agnostic lode app contract and shows the three things
-//! an app does under lode:
+//! Conforms to the lode app contract via the SDK (../../sdks/lode.rs, included
+//! below as `mod lode`) and shows the three things an app does under lode:
 //!   1. START   — bind $PORT and serve; lode runs this binary as its child.
-//!   2. READ    — read lode-injected env (LODE_ACTIVE_VERSION / LODE_DATA_DIR /
-//!                LODE_INSTANCE) + passthrough host env (PORT, operator [env]).
-//!   3. UPGRADE — (a) PASSIVE: announce readiness + handle SIGTERM, so lode's
-//!                update/rollback is seamless; (b) ACTIVE: POST /upgrade writes
-//!                state.target="latest", POST /restart bumps state.restart_nonce.
+//!   2. READ    — read lode-injected env via the SDK (active_version / instance_id
+//!                / data dir) + passthrough host env (PORT, operator [env]).
+//!   3. UPGRADE — (a) PASSIVE: mark_ready() + install_term_handler(), so lode's
+//!                update/rollback is seamless; (b) ACTIVE: the endpoints below call
+//!                request_update / reboot / hold / release.
 //!
-//! Standalone (no lode): LODE_DATA_DIR is unset, so the state.json steps are
-//! no-ops and you still get a working server for `start` + `read`.
+//! Standalone (no lode): LODE_DATA_DIR is unset, so `Lode::from_env()` is `None`
+//! and the request endpoints reply 503 — you still get a working server.
+
+// The single-file SDK, referenced in place (no copy). It needs serde + serde_json
+// (see Cargo.toml); an app may use ordinary libraries — lode does not constrain them.
+#[path = "../../../sdks/lode.rs"]
+mod lode;
 
 use std::env;
-use std::fs;
-use std::path::{Path, PathBuf};
 use std::process;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
-use serde_json::{json, Map, Value};
+use serde_json::json;
 
-// Baked at build time; lode's LODE_ACTIVE_VERSION wins at runtime so /version
-// matches what lode installed. Bump the Cargo.toml version per release.
+use lode::Lode;
+
 const BUILD_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn version() -> String {
-    match env::var("LODE_ACTIVE_VERSION") {
-        Ok(v) if !v.is_empty() => v,
-        _ => BUILD_VERSION.to_string(),
-    }
+    lode::active_version().unwrap_or_else(|| BUILD_VERSION.to_string())
 }
 
 fn log(msg: &str) {
@@ -38,7 +36,7 @@ fn log(msg: &str) {
 }
 
 fn main() {
-    // `lode version` passthrough (exec = "./demo-rust-linux-x64").
+    // `lode version` passthrough (exec = "./lode-demo-rust").
     if let Some(arg) = env::args().nth(1) {
         if arg == "version" || arg == "--version" || arg == "-v" {
             println!("{}", version());
@@ -61,26 +59,33 @@ fn main() {
         }
     };
 
-    // UPGRADE (passive): graceful stop. SIGTERM/SIGINT flips the flag; the accept
-    // loop notices within one recv timeout and exits(0) within stop_timeout.
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown));
-    let _ = signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown));
+    // The SDK handle — None when run standalone (LODE_DATA_DIR unset).
+    let lode = Lode::from_env().ok();
+
+    // UPGRADE (passive): graceful stop. The SDK flips a flag on SIGTERM/SIGINT; the
+    // accept loop notices within one recv timeout and exits(0) within stop_timeout.
+    lode::install_term_handler();
 
     log(&format!(
         "starting version={} pid={} instance={} data_dir={} addr={addr}",
         version(),
         process::id(),
-        env::var("LODE_INSTANCE").unwrap_or_else(|_| "none".into()),
+        lode::instance_id(),
         env::var("LODE_DATA_DIR").unwrap_or_else(|_| "unset".into()),
     ));
 
     // UPGRADE (passive): announce readiness so lode (readiness="state") commits us.
-    announce_ready();
+    match &lode {
+        Some(l) => match l.mark_ready() {
+            Ok(()) => log(&format!("ready: state.ready={}", lode::instance_id())),
+            Err(e) => log(&format!("readiness skipped: {e}")),
+        },
+        None => log("readiness skipped (standalone)"),
+    }
 
-    while !shutdown.load(Ordering::SeqCst) {
+    while !lode::terminating() {
         match server.recv_timeout(Duration::from_millis(200)) {
-            Ok(Some(req)) => handle(req),
+            Ok(Some(req)) => handle(req, lode.as_ref()),
             Ok(None) => {} // timed out — re-check the shutdown flag
             Err(e) => {
                 eprintln!("[demo-rust] recv error: {e}");
@@ -92,27 +97,44 @@ fn main() {
     process::exit(0);
 }
 
-fn handle(req: tiny_http::Request) {
+fn handle(req: tiny_http::Request, lode: Option<&Lode>) {
     let method = req.method().as_str().to_string();
     let path = req.url().split('?').next().unwrap_or("/").to_string();
+
+    // Run an SDK request, or 503 when not supervised by lode.
+    let ask = |f: &dyn Fn(&Lode) -> lode::Result<()>, ok: &str| match lode {
+        Some(l) => match f(l) {
+            Ok(()) => (200, format!("{ok}\n")),
+            Err(e) => (503, format!("{e}\n")),
+        },
+        None => (503, "not running under lode (LODE_DATA_DIR unset)\n".to_string()),
+    };
 
     let (code, ctype, body) = match (method.as_str(), path.as_str()) {
         ("GET", "/healthz") => (200, "text/plain; charset=utf-8", "ok\n".to_string()),
         ("GET", "/version") => (200, "text/plain; charset=utf-8", format!("{}\n", version())),
         ("GET", "/env") => (200, "application/json", env_json()), // READ
-        ("POST", "/upgrade") => match patch_state(&[("target", json!("latest"))]) {
-            Ok(()) => (200, "text/plain; charset=utf-8", "requested update to latest\n".into()),
-            Err(e) => (503, "text/plain; charset=utf-8", format!("{e}\n")),
-        },
-        ("POST", "/restart") => match bump_restart() {
-            Ok(()) => (200, "text/plain; charset=utf-8", "requested restart\n".into()),
-            Err(e) => (503, "text/plain; charset=utf-8", format!("{e}\n")),
-        },
-        _ => (404, "text/plain; charset=utf-8", "not found\n".into()),
+        ("POST", "/upgrade") => {
+            let (c, b) = ask(&|l| l.request_update("latest"), "requested update to latest");
+            (c, "text/plain; charset=utf-8", b)
+        }
+        ("POST", "/restart") => {
+            let (c, b) = ask(&|l| l.reboot().map(|_| ()), "requested restart");
+            (c, "text/plain; charset=utf-8", b)
+        }
+        ("POST", "/hold") => {
+            let (c, b) = ask(&|l| l.hold(), "held (lode will not (re)start the app)");
+            (c, "text/plain; charset=utf-8", b)
+        }
+        ("POST", "/release") => {
+            let (c, b) = ask(&|l| l.release(), "released");
+            (c, "text/plain; charset=utf-8", b)
+        }
+        _ => (404, "text/plain; charset=utf-8", "not found\n".to_string()),
     };
 
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
-        .expect("static header");
+    let header =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).expect("static header");
     let resp = tiny_http::Response::from_string(body)
         .with_status_code(code)
         .with_header(header);
@@ -123,65 +145,10 @@ fn handle(req: tiny_http::Request) {
 fn env_json() -> String {
     json!({
         "version": version(),                          // LODE_ACTIVE_VERSION or baked
-        "instance": env::var("LODE_INSTANCE").unwrap_or_default(), // unique id per launch
+        "instance": lode::instance_id(),               // unique id per launch
         "dataDir": env::var("LODE_DATA_DIR").ok(),     // where state.json lives
         "port": env::var("PORT").unwrap_or_else(|_| "8080".into()), // host env passthrough
         "greeting": env::var("APP_GREETING").ok(),     // operator [env] / host -e
     })
     .to_string()
-}
-
-// --- state.json: the app <-> lode comms file under $LODE_DATA_DIR -----------
-
-fn state_path() -> Option<PathBuf> {
-    match env::var("LODE_DATA_DIR") {
-        Ok(d) if !d.is_empty() => Some(Path::new(&d).join("state.json")),
-        _ => None, // standalone (not under lode)
-    }
-}
-
-fn read_state(path: &Path) -> Map<String, Value> {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default()
-}
-
-// Merge fields into state.json (atomic temp + rename), preserving lode's fields.
-fn patch_state(fields: &[(&str, Value)]) -> Result<(), String> {
-    let path = state_path().ok_or("not running under lode (LODE_DATA_DIR unset)")?;
-    let mut state = read_state(&path);
-    for (k, v) in fields {
-        state.insert((*k).to_string(), v.clone());
-    }
-    let body = format!(
-        "{}\n",
-        serde_json::to_string_pretty(&Value::Object(state)).map_err(|e| e.to_string())?
-    );
-    let tmp = path.with_extension(format!("tmp.{}", process::id()));
-    fs::write(&tmp, &body).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        e.to_string()
-    })?;
-    Ok(())
-}
-
-fn bump_restart() -> Result<(), String> {
-    let path = state_path().ok_or("not running under lode (LODE_DATA_DIR unset)")?;
-    let n = read_state(&path)
-        .get("restart_nonce")
-        .and_then(Value::as_i64)
-        .unwrap_or(0);
-    patch_state(&[("restart_nonce", json!(n + 1))])
-}
-
-// Announce readiness so lode (readiness="state") marks this version running/good.
-fn announce_ready() {
-    let inst = env::var("LODE_INSTANCE").unwrap_or_default();
-    match patch_state(&[("ready", json!(inst))]) {
-        Ok(()) => log(&format!("ready: wrote state.ready={inst}")),
-        Err(e) => log(&format!("readiness skipped: {e}")),
-    }
 }

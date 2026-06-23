@@ -82,6 +82,36 @@ welcome to notify us if lode's use of a dependency is exploitable.
 - **HTTPS by default:** plain-http remote fetches are refused unless
   `allow_insecure` is set; loopback http is always allowed.
 
+## Artifact extraction safety
+
+Even a verified artifact is treated as untrusted bytes during landing, so a
+malicious or malformed archive cannot escape the data dir, smuggle in dangerous
+permissions, or exhaust the host. These guards are implemented:
+
+- **Path-component validation** (`src/idval.rs`): every untrusted id that becomes
+  a filesystem path — a manifest `versions` key, a GitHub release tag, the
+  `[runtime].runtime` name — is validated before any path join. It must be one
+  safe component: no `..`, no `/` or `\`, not absolute, no control characters, no
+  leading `.` or `-`, and nothing outside `[A-Za-z0-9._-]`.
+- **Archive containment** (`src/install.rs`): `tar.gz` is unpacked entry-by-entry
+  via the `tar` crate's `unpack_in`, which skips any entry whose path contains
+  `..` or is absolute (and keeps symlink targets inside the destination); `zip`
+  uses `enclosed_name()`, rejecting any entry that would traverse out; and the
+  `safe_join` helper rejects absolute or `..` landing paths for raw/gz files.
+- **Decompression / size caps (zip-bomb & DoS guards):** cumulative *decompressed*
+  output is capped at `MAX_DECOMPRESSED_BYTES` = 2 GiB for `tar.gz`/`gz`/`zip`
+  (enforced independently of the manifest `size`, which only bounds the
+  compressed download), the archive entry count is capped at
+  `MAX_ARCHIVE_ENTRIES` = 100,000, and the streamed download body itself is
+  capped at `MAX_DOWNLOAD_BYTES` = 2 GiB (`src/download.rs`). A bomb is rejected
+  mid-stream — at most one byte past a cap ever reaches disk — so a tiny artifact
+  cannot expand to fill the disk or exhaust memory/inodes.
+- **Permission clamping** (`src/install.rs`): archive-supplied unix modes are NOT
+  trusted. setuid/setgid/sticky (`0o7000`) and group/other-write bits are
+  stripped; each extracted file is clamped to `0o644` (or `0o755` when it carries
+  an execute bit) and directories to `0o755`. The effective launch command's
+  target file is then `chmod +x`'d explicitly.
+
 ## Manifest-supplied `run`/`exec`
 
 A manifest asset may publish optional `run` and `exec` fields that override the operator's `[command]` launch commands. These fields control arbitrary command execution. lode binds them into the per-artifact signed message and the catalog signature — a tampered `run`/`exec` will fail verification under `require_signature = auto` (with keys) or `enforce`. Without signatures, a compromised manifest delivery can inject arbitrary run commands. **Recommendation:** configure `[trust].trusted_keys` and `require_signature = "enforce"` when the manifest is network-served.

@@ -25,6 +25,7 @@ use crate::error::Result;
 pub(crate) enum Status {
     Starting,
     Running,
+    Held,
     Updating,
     RollingBack,
     Stopping,
@@ -84,6 +85,10 @@ pub(crate) struct State {
     pub(crate) target: Option<String>,
     #[serde(default)]
     pub(crate) restart_nonce: u64,
+    /// App-owned: set `true` to ask lode not to (re)start the process (maintenance);
+    /// lode reports `status = held` and waits until it is cleared (design §7).
+    #[serde(default)]
+    pub(crate) hold: bool,
 
     // --- co-owned staged-update + readiness handshake (§8) ---
     /// The value is `{LODE_INSTANCE}-{phase}`, where the trailing phase digit drives
@@ -294,6 +299,29 @@ mod tests {
     fn status_serialises_kebab_case() {
         let json = serde_json::to_string(&Status::RollingBack).unwrap();
         assert_eq!(json, "\"rolling-back\"");
+        assert_eq!(serde_json::to_string(&Status::Held).unwrap(), "\"held\"");
+    }
+
+    #[test]
+    fn hold_flag_roundtrips_and_defaults_false() {
+        let path = scratch("hold");
+        // Absent in the file => defaults to false.
+        write(&path, &State::default()).unwrap();
+        assert!(!read(&path).unwrap().unwrap().hold);
+        // Set by the app => round-trips.
+        write(
+            &path,
+            &State {
+                hold: true,
+                status: Some(Status::Held),
+                ..State::default()
+            },
+        )
+        .unwrap();
+        let back = read(&path).unwrap().unwrap();
+        assert!(back.hold);
+        assert_eq!(back.status, Some(Status::Held));
+        let _ = std::fs::remove_file(&path);
     }
 
     // --- locked_update (P2-14 RMW serialisation) ---

@@ -73,7 +73,7 @@ exec    = "bun"              # `lode <args>` -> bun <args>   (so `lode run db:in
 [runtime]
 runtime  = "bun"
 download = "https://example.com/bun-linux-x64.zip"   # raw/.gz/.zip/.tar.gz; the binary is hoisted to runtime/<name> even from a nested archive
-# version       = "1.1.38"     # require this version: lode probes the runtime (PATH / cache / freshly
+# version       = "1.3.14"     # require this version: lode probes the runtime (PATH / cache / freshly
 #                              # downloaded) and requires the output to CONTAIN this string. A wrong-version
 #                              # PATH/cache entry is bypassed for a fresh download; a downloaded mismatch is
 #                              # a hard error. Pins the runtime version without manually clearing the cache.
@@ -102,7 +102,8 @@ restart_backoff     = 1              # seconds, exponential base (only used when
 restart_backoff_max = 30             # seconds cap (only used when restart != off)
 restart_max         = 3              # retries before lode pauses (keep-alive); 0 = retry forever (only used when restart != off)
 restart_mode        = "stop-start"   # stop-start | reuseport-overlap | socket-activation
-# listen            = "0.0.0.0:3000" # required for socket-activation
+                                     # NOTE: only stop-start is implemented in v1; reuseport-overlap and socket-activation are NOT yet implemented — lode logs a notice and falls back to stop-start
+# listen            = "0.0.0.0:3000" # (would be) required for socket-activation — NOT yet implemented, so this key is currently inert
 
 # --- manage: signals ---
 [signals]

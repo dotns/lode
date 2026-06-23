@@ -5,6 +5,30 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.8] - 2026-06-23
+
+### Added
+
+- **App-requested hold (design §7): the app (or an operator, via `state.json`) can ask lode NOT to
+  (re)start the process.** A new app-owned `state.json` field **`hold`** (bool): set it `true` and lode
+  refrains from spawning — at boot, after the child exits, and on a `restart_nonce`/`target` request
+  — and reports a new lifecycle status **`held`** while waiting. Clearing it (`false`) resumes a normal
+  start. Use it for planned maintenance that must complete before the app comes up, e.g. a DB migration
+  needing CLI intervention. lode polls `state.json`'s mtime and applies the flag (~1s); a hold present
+  at boot is honoured before the first spawn.
+- **SDKs (`sdks/`) gain `hold()` / `release()`** (set/clear the flag), the `held` status, and a `watch`
+  `onHold` change callback.
+
+### Behavior notes
+
+- A hold gates *starts*, not a running child: lode does **not** kill an already-running process when
+  `hold` is set — the app exits itself if maintenance needs the process down (e.g. set `hold` then
+  `exit(0)`; lode then holds instead of respawning). A child exit racing the flag write is still caught
+  (lode re-reads `hold` fresh on exit).
+- While held, `restart_nonce`/`target` requests are deferred (the nonce is watermarked so a bump made
+  during the hold cannot fire a stale restart on release). The keep-alive failure pause (`status =
+  error`) is independent; a hold takes precedence over respawning.
+
 ## [0.0.7] - 2026-06-20
 
 ### Added
