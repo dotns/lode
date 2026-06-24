@@ -429,6 +429,18 @@ pub fn workdir() -> Option<String> {
     std::env::var("LODE_WORKDIR").ok().filter(|s| !s.is_empty())
 }
 
+/// Path to lode's config file (`LODE_CONFIG`), or `None` when not under lode / file-less.
+pub fn config_path() -> Option<String> {
+    std::env::var("LODE_CONFIG").ok().filter(|s| !s.is_empty())
+}
+
+/// Read lode's config file (lode.toml) as raw text — READ-ONLY (never write it; it's the
+/// operator's file). `None` when there's no config path or it can't be read. Parse with a
+/// TOML crate if you need individual fields.
+pub fn read_config() -> Option<String> {
+    config_path().and_then(|p| std::fs::read_to_string(p).ok())
+}
+
 /// The version lode launched (`LODE_ACTIVE_VERSION`).
 pub fn active_version() -> Option<String> {
     std::env::var("LODE_ACTIVE_VERSION")

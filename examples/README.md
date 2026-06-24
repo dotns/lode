@@ -36,6 +36,7 @@ Every demo exposes:
 | `/version` | GET | the running version (`LODE_ACTIVE_VERSION`, else the baked build version) |
 | `/healthz` | GET | `200 ok` |
 | `/env` | GET | JSON of the injected + passthrough env (the **READ** demo) — via the SDK's `activeVersion()` / `instanceId()` / `dataDir()` |
+| `/config` | GET | lode's config path + raw `lode.toml` (read-only) — via `configPath()` / `readConfig()` |
 | `/upgrade` | POST | `lode.requestUpdate("latest")` — ask lode to pull the newest version |
 | `/restart` | POST | `lode.reboot()` — ask lode to restart the current version |
 | `/hold` | POST | `lode.hold()` — ask lode NOT to (re)start the app (maintenance); status `held` |

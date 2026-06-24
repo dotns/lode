@@ -140,6 +140,9 @@ pub(crate) fn exec_passthrough(cfg: &Config, args: &[String]) -> Result<Infallib
     );
     let workdir = PathBuf::from(expand_token(&cfg.command.workdir, &dir));
     set_env(&mut env, "LODE_WORKDIR", &workdir.display().to_string());
+    if let Some(p) = cfg.config_path.as_deref() {
+        set_env(&mut env, "LODE_CONFIG", &p.display().to_string());
+    }
 
     let (program, rest) = command_line
         .split_first()
@@ -1474,6 +1477,10 @@ impl<'c> Supervisor<'c> {
         // The app's run directory (its cwd) — injected so the app can locate itself
         // (`$LODE_WORKDIR`), the same self-introspection role as the vars above.
         set_env(&mut env, "LODE_WORKDIR", &workdir.display().to_string());
+        // The resolved lode.toml path, so the app can read lode's config (read-only).
+        if let Some(p) = self.cfg.config_path.as_deref() {
+            set_env(&mut env, "LODE_CONFIG", &p.display().to_string());
+        }
 
         let pid = spawn_process(&argv, &workdir, &env)?;
         self.child = Some(pid);

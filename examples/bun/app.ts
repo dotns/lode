@@ -13,7 +13,7 @@
 // is the artifact lode installs (asset = "app.js"), run with `run = "bun run"`.
 // The bundler inlines the SDK, so dist/app.js is self-contained.
 
-import { activeVersion, dataDir, instanceId, isSupervised, Lode, onTerminate } from "../../sdks/lode.ts";
+import { activeVersion, configPath, dataDir, instanceId, isSupervised, Lode, onTerminate, readConfig } from "../../sdks/lode.ts";
 
 // BUILD_VERSION is inlined by package.ts (`--define`); absent when run unbundled.
 declare const BUILD_VERSION: string;
@@ -60,6 +60,8 @@ const server = Bun.serve({
           port, // host env passthrough
           greeting: Bun.env.APP_GREETING ?? null, // operator [env] / host -e
         });
+      case "/config": // READ lode's config (read-only): its path + the raw lode.toml
+        return json({ path: configPath() ?? null, toml: readConfig() ?? null });
       case "/upgrade": // UPGRADE (active): ask lode to pull latest
         return ask((l) => l.requestUpdate("latest"), "requested update to latest");
       case "/restart": // UPGRADE (active): restart this version

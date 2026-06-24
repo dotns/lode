@@ -365,6 +365,24 @@ export function workdir(): string | undefined {
   return env.LODE_WORKDIR || undefined;
 }
 
+/** Path to lode's config file (`LODE_CONFIG`), or undefined when not under lode / file-less. */
+export function configPath(): string | undefined {
+  return env.LODE_CONFIG || undefined;
+}
+
+/** Read lode's config file (`lode.toml`) as raw text — READ-ONLY (never write it; it's the
+ *  operator's file). Undefined when there's no config path or it can't be read. Parse with
+ *  your own TOML library if you need individual fields. */
+export function readConfig(): string | undefined {
+  const p = configPath();
+  if (!p) return undefined;
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /** This launch's instance id ({pid}-{nanoid}), or "". */
 export function instanceId(): string {
   return env.LODE_INSTANCE ?? "";

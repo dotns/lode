@@ -359,6 +359,24 @@ func LodeDir() string { return os.Getenv("LODE_DIR") }
 // Workdir is lode's runtime dir for this app — its cwd (LODE_WORKDIR).
 func Workdir() string { return os.Getenv("LODE_WORKDIR") }
 
+// ConfigPath is lode's config file path (LODE_CONFIG), or "" when not under lode / file-less.
+func ConfigPath() string { return os.Getenv("LODE_CONFIG") }
+
+// ReadConfig reads lode's config file (lode.toml) as raw text — READ-ONLY (never write it;
+// it's the operator's file). Returns ("", nil) when there's no config path. Parse with your
+// own TOML library if you need individual fields.
+func ReadConfig() (string, error) {
+	p := ConfigPath()
+	if p == "" {
+		return "", nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
 // ActiveVersion is the version lode launched (LODE_ACTIVE_VERSION).
 func ActiveVersion() string { return os.Getenv("LODE_ACTIVE_VERSION") }
 

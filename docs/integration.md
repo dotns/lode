@@ -77,8 +77,9 @@ What *your app* implements. Any language — read/write one JSON file and handle
 
 **Environment lode injects:** `LODE_ACTIVE_VERSION` (current version), `LODE_DIR`
 (lode's dir — `state.json` lives at `$LODE_DIR/state.json`), `LODE_WORKDIR` (the app's
-run dir, i.e. its cwd), `LODE_INSTANCE` (unique id for this launch — write it to
-`state.ready`), `LODE_READINESS` (`none`|`state`). The host env (e.g. `PORT`) passes
+run dir, i.e. its cwd), `LODE_CONFIG` (path to the `lode.toml` lode loaded — read it
+read-only to see lode's config), `LODE_INSTANCE` (unique id for this launch — write it
+to `state.ready`), `LODE_READINESS` (`none`|`state`). The host env (e.g. `PORT`) passes
 through; internal `LODE_*` are stripped. The operator can add more via the `[env]`
 table — those are **defaults**: an inherited host env var of the same name (e.g. a
 per-deploy `-e PORT`) wins over them, and lode's injected vars always win over everything.
@@ -114,6 +115,7 @@ Implement these (all but `SIGTERM` are optional, but recommended):
 - **Self-report version** (e.g. `GET /version`) matching `LODE_ACTIVE_VERSION`.
 - **Request an update/restart (optional):** atomically patch `state.json` — set `target` (a version or `"latest"`) or bump `restart_nonce`. lode polls the file's mtime (~1s) and acts; the file *is* the notification.
 - **Hold off a (re)start (optional):** set `hold = true` to tell lode **not** to (re)start the process — for planned maintenance that must finish before the app comes up (e.g. a DB migration needing CLI intervention). lode reports `status = "held"` and waits — at boot, after the child exits, and across `restart_nonce`/`target` requests — until you set `hold = false`. A hold gates a *start*, not a running child: lode never kills the current process, so to take the app down for maintenance set `hold = true` then `exit(0)` yourself (lode then holds instead of respawning). An operator can drive this the same way (`hold` is just a `state.json` field).
+- **Read lode's config (optional, read-only):** `$LODE_CONFIG` is the path to the `lode.toml` lode loaded — read it to inspect how lode is configured. It is the **operator's** file: never write it (the app's write channel is `state.json`). SDK: `configPath()` / `readConfig()` (raw text; parse with your own TOML lib for fields).
 - **Apply a `lode.toml`/`[env]` change while running (optional):** lode **never auto-restarts** on a config edit (a running app is never disturbed). When `lode.toml` is edited, lode **bumps `config_generation`** to notify you; apply the change at your own pace by bumping `restart_nonce` — that relaunch **re-reads `lode.toml`** (new `[env]`/config takes effect). Watch `config_generation` if you want to react to operator edits. (Host-process env — `-e`/k8s — still requires restarting lode itself.)
 
 ### Concurrent writes — the `state.json.lock` contract

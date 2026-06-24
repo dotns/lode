@@ -71,6 +71,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 
 **lode 注入的环境变量:** `LODE_ACTIVE_VERSION`(当前版本)、`LODE_DIR`(lode 自己的目录 ——
 `state.json` 在 `$LODE_DIR/state.json`)、`LODE_WORKDIR`(app 的运行目录,即其 cwd)、
+`LODE_CONFIG`(lode 加载的 `lode.toml` 路径 —— 只读它即可看到 lode 的配置)、
 `LODE_INSTANCE`(本次启动唯一号 —— 写入 `state.ready`)、`LODE_READINESS`(`none`|`state`)。
 宿主环境(如 `PORT`)原样透传;内部 `LODE_*` 已剥离。operator 还可用 `[env]` 表追加变量——
 它们是**默认值**:同名的宿主 env(如部署时 `-e PORT`)会覆盖它们,而 lode 注入的变量始终最高。

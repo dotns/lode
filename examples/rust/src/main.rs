@@ -114,6 +114,7 @@ fn handle(req: tiny_http::Request, lode: Option<&Lode>) {
         ("GET", "/healthz") => (200, "text/plain; charset=utf-8", "ok\n".to_string()),
         ("GET", "/version") => (200, "text/plain; charset=utf-8", format!("{}\n", version())),
         ("GET", "/env") => (200, "application/json", env_json()), // READ
+        ("GET", "/config") => (200, "application/json", config_json()), // READ lode's config (read-only)
         ("POST", "/upgrade") => {
             let (c, b) = ask(
                 &|l| l.request_update("latest"),
@@ -152,6 +153,15 @@ fn env_json() -> String {
         "dataDir": env::var("LODE_DIR").ok(),     // where state.json lives
         "port": env::var("PORT").unwrap_or_else(|_| "8080".into()), // host env passthrough
         "greeting": env::var("APP_GREETING").ok(),     // operator [env] / host -e
+    })
+    .to_string()
+}
+
+// READ lode's config (read-only): its path + the raw lode.toml text.
+fn config_json() -> String {
+    json!({
+        "path": lode::config_path(),
+        "toml": lode::read_config(),
     })
     .to_string()
 }

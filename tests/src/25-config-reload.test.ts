@@ -61,6 +61,8 @@ health_grace = 60
   });
   // Started once, with the initial env marker; no config generation yet.
   expect(lode.countMatches(/\[app\] starting .*marker=one/)).toBe(1);
+  // lode injects LODE_CONFIG = the resolved lode.toml path (read-only for the app).
+  expect(lode.countMatches(new RegExp(`config=${cfgPath.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\\b`))).toBe(1);
   expect(lode.readState()?.config_generation ?? 0).toBe(0);
 
   // --- B: edit lode.toml while the app RUNS -> notify only, never auto-restart ---

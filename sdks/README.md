@@ -41,6 +41,7 @@ RMW, which lode also tolerates). Plain reads need no lock.
 |---|---|
 | `LODE_DIR` | lode's own dir, holding `state.json` (presence ⇒ "supervised by lode") |
 | `LODE_WORKDIR` | the app's run dir under lode (its cwd) |
+| `LODE_CONFIG` | path to the `lode.toml` lode loaded (read it read-only to see lode's config) |
 | `LODE_INSTANCE` | this launch's unique id `{pid}-{nanoid}` (needed for readiness) |
 | `LODE_ACTIVE_VERSION` | the version lode launched |
 | `LODE_READINESS` | `none` or `state` (whether the `ready` handshake is in force) |
@@ -68,7 +69,8 @@ Your **app** keeps its own directory convention (works with or without lode): se
 
 Plus free helpers: `isSupervised()`, `activeVersion()`, `instanceId()`,
 `readiness()`, the directory helpers `dataDir()` (resolves `DATA_DIR` > `LODE_DIR` >
-`ROOT_DIR`) / `rootDir()` / `lodeDir()` / `workdir()`, and a graceful-stop handler
+`ROOT_DIR`) / `rootDir()` / `lodeDir()` / `workdir()`, read-only config access
+`configPath()` / `readConfig()` (raw `lode.toml` text), and a graceful-stop handler
 (`onTerminate` in TS/Go; `install_term_handler()` + `terminating()` in Rust).
 
 ## The lode ↔ app channel

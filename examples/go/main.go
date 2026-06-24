@@ -95,6 +95,12 @@ func main() {
 			"greeting": os.Getenv("APP_GREETING"), // operator [env] / host -e
 		})
 	})
+	// READ lode's config (read-only): its path + the raw lode.toml.
+	mux.HandleFunc("/config", func(w http.ResponseWriter, _ *http.Request) {
+		toml, _ := lode.ReadConfig()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"path": lode.ConfigPath(), "toml": toml})
+	})
 	// UPGRADE (active) + maintenance.
 	mux.HandleFunc("/upgrade", func(w http.ResponseWriter, _ *http.Request) {
 		ask(w, func(c *lode.Client) error { return c.RequestUpdate("latest") }, "requested update to latest")

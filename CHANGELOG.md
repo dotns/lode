@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.10] - 2026-06-24
+
+### Added
+
+- **lode injects `LODE_CONFIG`** — the path to the `lode.toml` it loaded — so the app can read
+  lode's config **read-only** (it's the operator's file; the app's write channel stays
+  `state.json`). Not injected when running file-less (no config). Joins `LODE_DIR` /
+  `LODE_WORKDIR` / `LODE_ACTIVE_VERSION` / `LODE_INSTANCE` / `LODE_READINESS`.
+- **SDKs gain read-only config access**: `configPath()` (the path) and `readConfig()` (raw
+  `lode.toml` text — parse with your own TOML lib if you need fields; keeps the Go SDK
+  stdlib-only and the others dependency-light). The demo apps add a `GET /config` endpoint
+  returning the path + raw config.
+
 ## [0.0.9] - 2026-06-24
 
 ### Changed (breaking)
