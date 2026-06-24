@@ -69,7 +69,7 @@ pub(crate) fn install(
     verify_integrity(asset, computed_sha)?;
     verify_identity(cfg, version, asset, computed_sha)?;
 
-    let versions_dir = cfg.global.data_dir.join("versions");
+    let versions_dir = cfg.global.dir.join("versions");
     fs::create_dir_all(&versions_dir)?;
     let staging = versions_dir.join(format!("{version}.tmp"));
     let _ = fs::remove_dir_all(&staging);
@@ -130,7 +130,7 @@ pub(crate) fn seed_local(cfg: &Config, version: &str, source: &Path, activate: b
         auth: false,
     };
 
-    let versions_dir = cfg.global.data_dir.join("versions");
+    let versions_dir = cfg.global.dir.join("versions");
     fs::create_dir_all(&versions_dir)?;
     let staging = versions_dir.join(format!("{version}.tmp"));
     let _ = fs::remove_dir_all(&staging);
@@ -149,7 +149,7 @@ pub(crate) fn seed_local(cfg: &Config, version: &str, source: &Path, activate: b
 
     if activate {
         switch_current(cfg, version)?;
-        let path = cfg.global.data_dir.join("state.json");
+        let path = cfg.global.dir.join("state.json");
         // Strict read on purpose: seeding is CLI-only (`lode-cli seed` is its sole
         // caller — never reached from the supervisor), and CLI commands fail loudly
         // on a corrupt state.json instead of quarantining it (the lenient
@@ -210,15 +210,15 @@ fn chmod_command_targets(cfg: &Config, asset: &Asset, dir: &Path) -> Result<()> 
 /// The link target is relative (`versions/<ver>`) so the data dir stays movable.
 #[cfg(unix)]
 pub(crate) fn switch_current(cfg: &Config, version: &str) -> Result<()> {
-    let data_dir = &cfg.global.data_dir;
-    let version_dir = data_dir.join("versions").join(version);
+    let dir = &cfg.global.dir;
+    let version_dir = dir.join("versions").join(version);
     if !version_dir.is_dir() {
         return Err(Error::Install(format!(
             "cannot activate {version}: versions/{version} is not installed"
         )));
     }
-    let current = data_dir.join("current");
-    let tmp = data_dir.join(format!(".current.{}.tmp", std::process::id()));
+    let current = dir.join("current");
+    let tmp = dir.join(format!(".current.{}.tmp", std::process::id()));
     let _ = fs::remove_file(&tmp);
     let target = Path::new("versions").join(version);
     std::os::unix::fs::symlink(&target, &tmp)
@@ -241,8 +241,8 @@ pub(crate) fn switch_current(_cfg: &Config, _version: &str) -> Result<()> {
 /// (downloaded but not — or no longer — extracted) is pruned too unless it is in the
 /// keep set, so a failed install's artifact does not accumulate indefinitely.
 pub(crate) fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>) -> Result<()> {
-    let data_dir = &cfg.global.data_dir;
-    let versions_dir = data_dir.join("versions");
+    let dir = &cfg.global.dir;
+    let versions_dir = dir.join("versions");
     let installed = collect_version_dirs(&versions_dir)?;
     let keep_n = usize::try_from(cfg.update.keep_versions).unwrap_or(usize::MAX);
 
@@ -268,9 +268,9 @@ pub(crate) fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>
     // Reclaim cached downloads for any version not in the keep set (including
     // download-only versions that never extracted). The runtime cache is exempt — it
     // is keyed by name, not version, and managed by the runtime path.
-    for cached in cached_download_versions(&data_dir.join("downloads")) {
+    for cached in cached_download_versions(&dir.join("downloads")) {
         if cached != "runtime" && !keep.contains(cached.as_str()) {
-            let dir = data_dir.join("downloads").join(&cached);
+            let dir = dir.join("downloads").join(&cached);
             fs::remove_dir_all(&dir)
                 .map_err(|e| Error::Install(format!("prune {}: {e}", dir.display())))?;
         }
@@ -307,8 +307,8 @@ fn cached_download_versions(downloads_dir: &Path) -> Vec<String> {
 // alongside other fallible setup), even though GC itself swallows I/O errors.
 #[allow(clippy::unnecessary_wraps)]
 pub(crate) fn gc(cfg: &Config) -> Result<()> {
-    let data_dir = &cfg.global.data_dir;
-    if let Ok(entries) = fs::read_dir(data_dir.join("downloads")) {
+    let dir = &cfg.global.dir;
+    if let Ok(entries) = fs::read_dir(dir.join("downloads")) {
         for entry in entries.flatten() {
             let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
             if is_dir {
@@ -326,7 +326,7 @@ pub(crate) fn gc(cfg: &Config) -> Result<()> {
             }
         }
     }
-    if let Ok(entries) = fs::read_dir(data_dir.join("versions")) {
+    if let Ok(entries) = fs::read_dir(dir.join("versions")) {
         for entry in entries.flatten() {
             if entry.file_name().to_string_lossy().ends_with(".tmp") {
                 let _ = fs::remove_dir_all(entry.path());
@@ -343,7 +343,7 @@ pub(crate) fn gc(cfg: &Config) -> Result<()> {
 pub(crate) fn marker(cfg: &Config, version: &str) -> Result<Marker> {
     let path = cfg
         .global
-        .data_dir
+        .dir
         .join("versions")
         .join(version)
         .join(".lode.json");
@@ -1007,14 +1007,14 @@ mod tests {
     }
 
     fn cfg_for(
-        data_dir: PathBuf,
+        dir: PathBuf,
         require_signature: RequireSignature,
         trusted_keys: Vec<String>,
     ) -> Config {
         Config {
             global: Global {
                 app: "myapp".to_owned(),
-                data_dir,
+                dir,
                 log_level: "info".to_owned(),
             },
             update: Update {
@@ -1041,7 +1041,7 @@ mod tests {
             command: Command {
                 run: None,
                 exec: None,
-                workdir: "{dir}".to_owned(),
+                workdir: crate::config::DEFAULT_WORKDIR_PLACEHOLDER.to_owned(),
             },
             runtime: Runtime {
                 runtime: None,
@@ -1073,7 +1073,7 @@ mod tests {
 
     /// Write `bytes` to `downloads/<ver>.part` and return (path, sha256).
     fn stage_download(cfg: &Config, version: &str, bytes: &[u8]) -> (PathBuf, String) {
-        let downloads = cfg.global.data_dir.join("downloads");
+        let downloads = cfg.global.dir.join("downloads");
         fs::create_dir_all(&downloads).unwrap();
         let temp = downloads.join(format!("{version}.part"));
         fs::write(&temp, bytes).unwrap();

@@ -52,7 +52,7 @@ require_signature = "enforce"
 ```
 
 > If `/srv/lode/lode.toml` is missing on first run, lode scaffolds a starter there and tells
-> you to fill in the source. Override the base dir with `LODE_DATA_DIR`. No config file needed
+> you to fill in the source. Override the base dir with `LODE_DIR`. No config file needed
 > if you pass `--manifest`/`--github` (or `LODE_*`) instead.
 
 To build your own app image, layer lode onto any base:
@@ -75,7 +75,7 @@ zzci/ubase         ────► │  lode  (static Rust binary)         │
                                              │  (remote; never stored locally)
                             pick platform ──┤── download → verify sha256 + ed25519
                                              ▼
-                    $DATA_DIR/versions/<ver>  ──(atomic rename)──► current
+                    $LODE_DIR/versions/<ver>  ──(atomic rename)──► current
                                              │
                                              ▼
               lode            → runs `run`  (supervised service: auto-update + rollback)

@@ -13,11 +13,11 @@ is just a new release artifact + a `lode.toml` — no `docker build`.
 ## The idea: download the runtime once, cache it
 
 The base image carries only **lode** (and a libc). On first boot lode downloads the
-runtime named in `[runtime]` into its cache at `$DATA_DIR/runtime/<name>`; on every
+runtime named in `[runtime]` into its cache at `$LODE_DIR/runtime/<name>`; on every
 later boot it finds the cached binary and **reuses it — no network**. So make
-`$DATA_DIR` a persistent volume and the runtime download is a one-time cost.
+`$LODE_DIR` a persistent volume and the runtime download is a one-time cost.
 
-> To upgrade or change the runtime, delete `$DATA_DIR/runtime/<name>` (or the whole
+> To upgrade or change the runtime, delete `$LODE_DIR/runtime/<name>` (or the whole
 > `runtime/` dir) — the next boot re-downloads it.
 
 A runtime already on `PATH` always wins over the cache, so the same recipe also works
@@ -78,7 +78,7 @@ version       = "1.3.14"      # require `bun --version` to report this
 
 - A cached or PATH runtime of the **wrong** version is bypassed and the configured
   `download` is fetched instead — so bumping `version` (and `download`) rolls the
-  runtime forward with no manual `rm $DATA_DIR/runtime/<name>`.
+  runtime forward with no manual `rm $LODE_DIR/runtime/<name>`.
 - A freshly downloaded runtime whose version still doesn't match is a **hard error**
   (the URL served the wrong version, or `version`/`version_check` is misconfigured).
 - Substring match, so `1.3.14` matches bun's `1.3.14`, node's `v26.3.1` matches
@@ -107,8 +107,8 @@ A worked single-file Bun example (artifact + build script + the app contract —
 
 For safe zero-rollback updates with `readiness = "state"`, the app must, once it can
 serve, atomically write `state.ready = $LODE_INSTANCE` into
-`$LODE_DATA_DIR/state.json`, and handle `SIGTERM` by draining and `exit(0)` within
-`stop_timeout`. lode injects `LODE_ACTIVE_VERSION`, `LODE_DATA_DIR`, `LODE_INSTANCE`;
+`$LODE_DIR/state.json`, and handle `SIGTERM` by draining and `exit(0)` within
+`stop_timeout`. lode injects `LODE_ACTIVE_VERSION`, `LODE_DIR`, `LODE_INSTANCE`;
 host env (e.g. `PORT`) passes through. Full details: [integration §2](../integration.md).
 No readiness handshake? Set `readiness = "none"` and lean on `health_grace`.
 

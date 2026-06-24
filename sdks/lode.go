@@ -60,31 +60,31 @@ type State struct {
 // Client is a handle on one lode data directory. FromEnv for the supervised app;
 // New(dir, "") for an external tool.
 type Client struct {
-	dataDir  string
+	lodeDir  string
 	instance string
 }
 
 // New returns a Client for an explicit data dir and instance id. instance may be
 // "" when you only issue requests (target / restart) and never report readiness.
-func New(dataDir, instance string) *Client { return &Client{dataDir: dataDir, instance: instance} }
+func New(lodeDir, instance string) *Client { return &Client{lodeDir: lodeDir, instance: instance} }
 
-// FromEnv builds a Client from the injected env (LODE_DATA_DIR / LODE_INSTANCE).
+// FromEnv builds a Client from the injected env (LODE_DIR / LODE_INSTANCE).
 func FromEnv() (*Client, error) {
-	dir := os.Getenv("LODE_DATA_DIR")
+	dir := os.Getenv("LODE_DIR")
 	if dir == "" {
-		return nil, errors.New("lode: LODE_DATA_DIR not set — run under lode, or use lode.New")
+		return nil, errors.New("lode: LODE_DIR not set — run under lode, or use lode.New")
 	}
-	return &Client{dataDir: dir, instance: os.Getenv("LODE_INSTANCE")}, nil
+	return &Client{lodeDir: dir, instance: os.Getenv("LODE_INSTANCE")}, nil
 }
 
-// DataDir reports the data directory this Client targets.
-func (c *Client) DataDir() string { return c.dataDir }
+// LodeDir reports lode's directory this Client targets (where state.json lives).
+func (c *Client) LodeDir() string { return c.lodeDir }
 
 // Instance reports this launch's unique id (empty when not supervised).
 func (c *Client) Instance() string { return c.instance }
 
-func (c *Client) statePath() string { return filepath.Join(c.dataDir, "state.json") }
-func (c *Client) lockPath() string  { return filepath.Join(c.dataDir, "state.json.lock") }
+func (c *Client) statePath() string { return filepath.Join(c.lodeDir, "state.json") }
+func (c *Client) lockPath() string  { return filepath.Join(c.lodeDir, "state.json.lock") }
 
 // Read parses state.json. Returns (nil, nil) when absent. Lock-free — atomic
 // rename guarantees a whole snapshot.
@@ -335,8 +335,29 @@ func (c *Client) Watch(stop <-chan struct{}, interval time.Duration, h Handlers)
 	}
 }
 
-// IsSupervised reports whether this process is supervised by lode (LODE_DATA_DIR set).
-func IsSupervised() bool { return os.Getenv("LODE_DATA_DIR") != "" }
+// IsSupervised reports whether this process is supervised by lode (LODE_DIR set).
+func IsSupervised() bool { return os.Getenv("LODE_DIR") != "" }
+
+// DataDir is your app's persistent data dir, resolved DATA_DIR > LODE_DIR > ROOT_DIR
+// (works with or without lode: set ROOT_DIR standalone, lode provides LODE_DIR, or
+// set DATA_DIR to override). Empty if none are set.
+func DataDir() string {
+	for _, v := range []string{os.Getenv("DATA_DIR"), os.Getenv("LODE_DIR"), os.Getenv("ROOT_DIR")} {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// RootDir is your app's root/run dir convention (ROOT_DIR).
+func RootDir() string { return os.Getenv("ROOT_DIR") }
+
+// LodeDir is lode's own dir, where state.json lives (LODE_DIR).
+func LodeDir() string { return os.Getenv("LODE_DIR") }
+
+// Workdir is lode's runtime dir for this app — its cwd (LODE_WORKDIR).
+func Workdir() string { return os.Getenv("LODE_WORKDIR") }
 
 // ActiveVersion is the version lode launched (LODE_ACTIVE_VERSION).
 func ActiveVersion() string { return os.Getenv("LODE_ACTIVE_VERSION") }

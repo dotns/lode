@@ -13,12 +13,12 @@
 //!     runs the web-bun app contract (the same contract as `tests/apps/web-bun`):
 //!       - `GET /version` -> the app's version (`LODE_ACTIVE_VERSION` wins, else the
 //!         script's baked `BUILD_VERSION`); `GET /healthz` -> `200 ok`
-//!       - readiness: when `LODE_DATA_DIR` is set, atomically writes `state.json`
+//!       - readiness: when `LODE_DIR` is set, atomically writes `state.json`
 //!         field `ready = $LODE_INSTANCE` (preserving lode's fields)
 //!       - graceful stop: SIGTERM/SIGINT -> drain + `exit(0)` sub-second
 //!       - bad mode: script `BUILD_BAD="1"` or env `LODE_APP_BAD=1` -> `exit(1)` on
 //!         startup (the crashing-v0.0.3 rollback artifact)
-//!       - update-by-app-exit: when `$LODE_DATA_DIR/please_exit_update` appears, the
+//!       - update-by-app-exit: when `$LODE_DIR/please_exit_update` appears, the
 //!         app writes `state.target=<its contents>` and `exit(0)` — exercising
 //!         lode's "child wrote a target then exited -> relaunch the new version"
 //!         path inside the container.
@@ -298,7 +298,7 @@ fn run_app(args: &[String]) {
     }
 
     let instance = env::var("LODE_INSTANCE").unwrap_or_else(|_| "none".to_string());
-    let data_dir = env::var("LODE_DATA_DIR").unwrap_or_else(|_| "unset".to_string());
+    let data_dir = env::var("LODE_DIR").unwrap_or_else(|_| "unset".to_string());
     println!(
         "[bun] starting version={version} pid={} instance={instance} data_dir={data_dir} addr={addr}",
         process::id()
@@ -385,11 +385,11 @@ fn baked_value(script_text: &str, name: &str) -> Option<String> {
 }
 
 /// The version named by the update-by-app-exit trigger file, if present. The test
-/// drops `$LODE_DATA_DIR/please_exit_update` containing the desired version; the
+/// drops `$LODE_DIR/please_exit_update` containing the desired version; the
 /// app then writes `state.target` and exits, the same as a real app deciding to
 /// upgrade itself.
 fn update_on_exit_target() -> Option<String> {
-    let dir = env::var("LODE_DATA_DIR").ok().filter(|d| !d.is_empty())?;
+    let dir = env::var("LODE_DIR").ok().filter(|d| !d.is_empty())?;
     let path = Path::new(&dir).join("please_exit_update");
     let v = fs::read_to_string(&path).ok()?;
     // One-shot: remove the trigger so the version lode relaunches us on does not
@@ -407,22 +407,22 @@ fn update_on_exit_target() -> Option<String> {
 }
 
 /// Readiness handshake: write `state.json` field `ready = $LODE_INSTANCE` when
-/// `LODE_DATA_DIR` is set, so `supervise.readiness = "state"` works.
+/// `LODE_DIR` is set, so `supervise.readiness = "state"` works.
 fn announce_ready() {
     let Some(inst) = env::var("LODE_INSTANCE").ok() else {
         return;
     };
-    if env::var("LODE_DATA_DIR").ok().filter(|d| !d.is_empty()).is_some() {
+    if env::var("LODE_DIR").ok().filter(|d| !d.is_empty()).is_some() {
         set_state_field("ready", &inst);
         println!("[bun] ready: wrote state.ready={inst}");
     }
 }
 
-/// Atomically set a string field in `$LODE_DATA_DIR/state.json`, preserving lode's
+/// Atomically set a string field in `$LODE_DIR/state.json`, preserving lode's
 /// own fields (replace the value if the key exists, else insert after `{`, else
-/// write a minimal object), via temp + rename. No-op if `LODE_DATA_DIR` is unset.
+/// write a minimal object), via temp + rename. No-op if `LODE_DIR` is unset.
 fn set_state_field(key: &str, value: &str) {
-    let Some(dir) = env::var("LODE_DATA_DIR").ok().filter(|d| !d.is_empty()) else {
+    let Some(dir) = env::var("LODE_DIR").ok().filter(|d| !d.is_empty()) else {
         return;
     };
     let state_path = Path::new(&dir).join("state.json");

@@ -1,6 +1,6 @@
 //! Streaming artifact download with a persistent per-version cache: the body is
-//! streamed to `$DATA_DIR/downloads/<ver>/<asset>.part` (bounded memory) and, once
-//! fully written, promoted to `$DATA_DIR/downloads/<ver>/<asset>`. The sha256 is
+//! streamed to `$LODE_DIR/downloads/<ver>/<asset>.part` (bounded memory) and, once
+//! fully written, promoted to `$LODE_DIR/downloads/<ver>/<asset>`. The sha256 is
 //! taken over the downloaded file (pre-unpack, design §4/§6) via the shared
 //! [`crate::verify::sha256_hex_file`] — reusing the audited hashing path rather than
 //! re-implementing it.
@@ -28,7 +28,7 @@ use crate::manifest::Asset;
 const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 /// Ensure `asset` (for `version`) is present and verified at
-/// `$DATA_DIR/downloads/<version>/<asset>`, returning that path and the lowercase-hex
+/// `$LODE_DIR/downloads/<version>/<asset>`, returning that path and the lowercase-hex
 /// sha256 of the file.
 ///
 /// A previously-downloaded artifact whose digest still matches `asset.sha256` is
@@ -56,7 +56,7 @@ pub(crate) fn fetch_artifact(
     // passes "runtime"/the runtime name, both valid ids).
     validate_id("version", version)?;
     validate_id("asset", &asset.name)?;
-    let cache_dir = cfg.global.data_dir.join("downloads").join(version);
+    let cache_dir = cfg.global.dir.join("downloads").join(version);
     let cache_path = cache_dir.join(&asset.name);
 
     if let Some(hit) = reusable_cache(&cache_path, &asset.sha256) {

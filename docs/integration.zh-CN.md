@@ -7,7 +7,7 @@
 | 文件 | 位置 | 谁写 | 作用 |
 |---|---|---|---|
 | **`lode.toml`** | 本地 | 运维 | lode 如何拉取并运行你的应用 |
-| **`state.json`** | 本地(`$DATA_DIR`) | lode **与** 应用 | 运行时通信(状态 ↔ 请求) |
+| **`state.json`** | 本地(`$LODE_DIR`) | lode **与** 应用 | 运行时通信(状态 ↔ 请求) |
 | **发布源** | 远程 | 发布方 | 已签名的资产清单 —— 原生 `manifest.json` **或** GitHub Releases |
 
 下面三步 —— **配置 → 运行 → 发布** —— 就是完整的接入。运维点名要装哪个资产
@@ -22,12 +22,12 @@
 
 运维的文件:*如何拉取与运行你的应用*。应用从不写它。优先级
 `CLI > 环境变量(LODE_*) > lode.toml > 默认值`;默认 lode 读取 `/srv/lode/lode.toml`
-(用 `LODE_DATA_DIR` 改基目录),首次运行会在那里生成一份起始配置。
+(用 `LODE_DIR` 改基目录),首次运行会在那里生成一份起始配置。
 
 ```toml
 [global]
 app      = "myapp"          # 必须与 manifest 的 "name" 一致
-data_dir = "/srv/lode"      # 存放 lode.toml + versions/ + state.json + lode.pid + runtime/
+dir = "/srv/lode"      # 存放 lode.toml + versions/ + state.json + lode.pid + runtime/
 
 [update]
 github   = "owner/myapp"                                        # GitHub Releases ……
@@ -67,10 +67,14 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 
 *你的应用*要实现的部分。任意语言 —— 读写一个 JSON 文件 + 处理 `SIGTERM`。
 
-**lode 注入的环境变量:** `LODE_ACTIVE_VERSION`(当前版本)、`LODE_DATA_DIR`
-(`state.json` 在 `$LODE_DATA_DIR/state.json`)、`LODE_INSTANCE`(本次启动唯一号 —— 写入
-`state.ready`)。宿主环境(如 `PORT`)原样透传;内部 `LODE_*` 已剥离。operator 还可用 `[env]`
-表追加变量——它们是**默认值**:同名的宿主 env(如部署时 `-e PORT`)会覆盖它们,而 lode 上述三个变量始终最高。
+> **优先用 SDK。** [`../sdks`](../sdks) 下有单文件客户端(TypeScript / Go / Rust),封装了整个契约 —— 读状态;请求升级 / 重启 / 回退;维护用 `hold`/`release`;上报就绪;`watch` 监听 lode 的通知 —— 且写入都是原子、经 `state.json.lock` 串行化的。下面的原始契约正是它们的实现(也是你移植到其它语言所需的全部)。
+
+**lode 注入的环境变量:** `LODE_ACTIVE_VERSION`(当前版本)、`LODE_DIR`(lode 自己的目录 ——
+`state.json` 在 `$LODE_DIR/state.json`)、`LODE_WORKDIR`(app 的运行目录,即其 cwd)、
+`LODE_INSTANCE`(本次启动唯一号 —— 写入 `state.ready`)、`LODE_READINESS`(`none`|`state`)。
+宿主环境(如 `PORT`)原样透传;内部 `LODE_*` 已剥离。operator 还可用 `[env]` 表追加变量——
+它们是**默认值**:同名的宿主 env(如部署时 `-e PORT`)会覆盖它们,而 lode 注入的变量始终最高。
+`LODE_DIR`/`LODE_WORKDIR` 与 app 自有的 `ROOT_DIR`/`DATA_DIR` 的关系见[数据目录与持久化](#数据目录与持久化)。
 
 **state.json** —— lode 写状态、应用写请求,字段不重叠:
 
@@ -103,7 +107,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 - **阻止(重新)启动(可选):** 设 `hold = true` 告诉 lode **不要**(重新)启动进程 —— 用于必须在 app 起来之前完成的计划维护(如需要 CLI 介入的 DB 迁移)。lode 报告 `status = "held"` 并等待 —— 开机时、子进程退出后、以及 `restart_nonce`/`target` 请求期间都不启动 —— 直到你设 `hold = false`。hold 只挡"启动",不杀正在运行的子进程:想为维护停掉 app,自己先 `exit(0)`(lode 随即转入 held 而非重拉)。运维也可同样方式驱动(`hold` 就是 `state.json` 的一个字段)。
 - **运行中应用 `lode.toml`/`[env]` 改动(可选):** lode **绝不**因配置编辑自动重启(运行中的 app 不被打扰)。`lode.toml` 被编辑时,lode **递增 `config_generation`** 通知你;你自定时机递增 `restart_nonce` 来应用 —— 那次重启会**重读 `lode.toml`**(新 `[env]`/配置生效)。想响应运维改动就监听 `config_generation`。(宿主进程 env —— `-e`/k8s —— 仍需重启 lode 自身。)
 
-> 可运行的 Rust + Bun 示例见 [`../tests/apps`](../tests/apps)。
+> 推荐:使用 [SDK](../sdks)(并参考 [`../examples`](../examples),它们都经由 SDK 接入)。一对零依赖、不用 SDK 的 Rust + Bun 手写示例见 [`../tests/apps`](../tests/apps),作为从零实现的参考。
 
 ---
 
@@ -203,3 +207,39 @@ manifest 形状 + 逐资产字段表见 [source-adapters.zh-CN.md §6](source-ad
 - [ ] github:签名设为资产 **`label`**。native:`sig` 内嵌或 `.sig` sidecar,且最后一次改目录后重新 `manifest-sign`。
 - [ ] `channels.<c>.latest` 指向真实版本(native),或 tag/latest 可解析(github)。
 - [ ] 私钥离线;运维只持公开的 `trusted_keys` 并设 `require_signature = enforce`。
+
+---
+
+## 数据目录与持久化
+
+两类目录,各自命名,互不混淆。
+
+**lode 提供** —— lode 注入,app 读取:
+
+| 环境变量 | 是什么 | 生命周期 |
+|---|---|---|
+| `LODE_DIR` | lode 自己的目录 —— `lode.toml`、`versions/<ver>/`、`state.json`(及 `.lock`)、`lode.pid`、`runtime/`、`downloads/` | **持久** —— 挂卷(`-v lode-data:/srv/lode`) |
+| `LODE_WORKDIR` | app 在 lode 下的运行目录(其 cwd;默认 = 当前版本目录) | **随版本轮换** —— 被 `keep_versions` 回收 |
+
+(`lode` 二进制本身随镜像发布、不存状态。operator 配置:`[global].dir` / `--dir` 设 `LODE_DIR`;子进程 cwd 默认是版本目录,可在 `lode.toml` 的 `[command].workdir` 覆盖(无 CLI flag)—— lode 随后把解析出的目录注入为 `LODE_WORKDIR`。)
+
+**app 自行实现** —— app 自己的目录约定,让*同一个二进制不依赖 lode 也能用*。**lode 从不读取或设置它们 —— 原样透传给子进程**(用宿主 env / `-e` / `[env]` 表设置);下面的回退完全是你的 app(或 SDK)的事:
+
+| 环境变量 | 是什么 |
+|---|---|
+| `ROOT_DIR` | app 的根/运行目录 —— 独立运行时唯一需要设的 |
+| `DATA_DIR` | app 的持久化数据目录 |
+
+按 **`DATA_DIR` > `LODE_DIR` > `ROOT_DIR`** 解析你的数据目录,这样你*只需*设 `ROOT_DIR`:
+
+- 独立运行:只设 `ROOT_DIR`,其余都回退到它;
+- 在 lode 下:自动用 `LODE_DIR`(持久卷);
+- 设 `DATA_DIR` 显式覆盖(如另挂一个卷)。
+
+```ts
+const dataDir = process.env.DATA_DIR ?? process.env.LODE_DIR ?? process.env.ROOT_DIR;
+```
+
+SDK 直接给出:`dataDir()`(上面的回退链),外加 `rootDir()` / `lodeDir()` / `workdir()`。
+
+> **别把持久数据写进 cwd。** `LODE_WORKDIR` 默认是每版本目录,lode 每次更新都替换它、并按 `keep_versions` 回收。app 要保留的状态放到你解析出的 `DATA_DIR`(持久位置),绝不要放版本目录。

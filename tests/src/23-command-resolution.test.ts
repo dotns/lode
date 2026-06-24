@@ -25,7 +25,7 @@ function configWithoutCommand(extraSupervise = ""): string {
   return `
 [global]
 app = "${h.server.name}"
-data_dir = "${h.dataDir}"
+dir = "${h.dataDir}"
 
 [update]
 manifest = "${h.server.manifestUrl}"

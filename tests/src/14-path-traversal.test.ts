@@ -106,7 +106,7 @@ test("lode-cli update refuses a traversal version; current + data dir untouched"
   const malArgs = [
     "--app",
     h.server.name,
-    "--data-dir",
+    "--dir",
     h.dataDir,
     "--manifest",
     mal.manifestUrl,
@@ -146,7 +146,7 @@ test("bare-lode bootstrap refuses a traversal channel-latest (no leak)", async (
     [
       "--app",
       APP_NAME,
-      "--data-dir",
+      "--dir",
       dataDir,
       "--manifest",
       mal.manifestUrl,

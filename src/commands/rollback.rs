@@ -17,7 +17,7 @@ use crate::state;
 /// report it. Writes through a locked stdout handle (the `println!` macro is
 /// denied workspace-wide).
 pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
-    let target = set_target(&cfg.global.data_dir, version)?;
+    let target = set_target(&cfg.global.dir, version)?;
 
     let mut out = std::io::stdout().lock();
     writeln!(out, "lode rollback: target set to {target}")?;
@@ -33,8 +33,8 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
 /// inside the locked edit so the fallback is read under the same lock as the
 /// write; an [`Error::State`] is returned when neither is available (the
 /// unchanged state rewritten in that case is a harmless no-op).
-fn set_target(data_dir: &Path, version: Option<&str>) -> Result<String> {
-    let path = data_dir.join("state.json");
+fn set_target(dir: &Path, version: Option<&str>) -> Result<String> {
+    let path = dir.join("state.json");
     let mut chosen: Option<String> = None;
     state::locked_update(&path, |st| {
         let target = match version {

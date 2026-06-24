@@ -20,7 +20,7 @@ afterEach(async () => {
 
 test("prepare_timeout forces the cut-over when the app never acks the prepare prompt", async () => {
   h = await Harness.start();
-  // v0.0.1 gates its prepare ack on $LODE_DATA_DIR/prepare_ok — which this test
+  // v0.0.1 gates its prepare ack on $LODE_DIR/prepare_ok — which this test
   // never creates, so it never acks. Its serving (-0) is immediate.
   await h.publish("0.0.1", { mode: "service", latest: true, preGate: true });
 
@@ -30,7 +30,7 @@ test("prepare_timeout forces the cut-over when the app never acks the prepare pr
     `
 [global]
 app = "${h.server.name}"
-data_dir = "${h.dataDir}"
+dir = "${h.dataDir}"
 
 [update]
 manifest = "${h.server.manifestUrl}"

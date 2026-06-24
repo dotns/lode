@@ -29,7 +29,7 @@ test("an uninstallable recovery target keeps lode paused; lode.toml edit still r
   const config = (run: string) => `
 [global]
 app = "${h.server.name}"
-data_dir = "${h.dataDir}"
+dir = "${h.dataDir}"
 
 [update]
 manifest = "${h.server.manifestUrl}"

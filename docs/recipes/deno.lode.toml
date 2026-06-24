@@ -1,7 +1,7 @@
 # deno.lode.toml — run a Deno app under lode without building a per-app image.
 #
 # Model: a generic base image (e.g. zzci/ubase) carries only lode; lode downloads
-# `deno` ONCE into its runtime cache ($DATA_DIR/runtime/deno) and reuses it on every
+# `deno` ONCE into its runtime cache ($LODE_DIR/runtime/deno) and reuses it on every
 # later boot. Each app ships only this lode.toml + a release artifact. Deno runs
 # TypeScript and remote/`npm:` imports natively, so usually no bundling is needed.
 #
@@ -16,7 +16,7 @@
 
 [global]
 app      = "myapp"
-data_dir = "/srv/lode"    # MUST be a persistent volume so the runtime cache survives restarts
+dir = "/srv/lode"    # MUST be a persistent volume so the runtime cache survives restarts
 
 [update]
 github = "owner/myapp"
@@ -38,7 +38,7 @@ run     = "deno run -A main.ts"
 exec    = "deno"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 
-# lode downloads deno if absent from PATH, caches it at $DATA_DIR/runtime/deno, and
+# lode downloads deno if absent from PATH, caches it at $LODE_DIR/runtime/deno, and
 # reuses it next boot (delete that file to force a re-download / version bump).
 # Runtime downloads are UNVERIFIED — pin the version (swap arch for arm64).
 [runtime]

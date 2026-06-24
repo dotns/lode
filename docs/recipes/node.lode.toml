@@ -1,7 +1,7 @@
 # node.lode.toml — run a Node.js app under lode without building a per-app image.
 #
 # Model: a generic base image (e.g. zzci/ubase) carries only lode; lode downloads
-# `node` ONCE into its runtime cache ($DATA_DIR/runtime/node) and reuses it on every
+# `node` ONCE into its runtime cache ($LODE_DIR/runtime/node) and reuses it on every
 # later boot. Each app ships only this lode.toml + a release artifact.
 #
 # IMPORTANT: lode runs your artifact directly — there is no `npm install` step.
@@ -17,7 +17,7 @@
 
 [global]
 app      = "myapp"
-data_dir = "/srv/lode"    # MUST be a persistent volume so the runtime cache survives restarts
+dir = "/srv/lode"    # MUST be a persistent volume so the runtime cache survives restarts
 
 [update]
 github = "owner/myapp"
@@ -39,7 +39,7 @@ run     = "node app.mjs"  # TS on Node >= 22: run = "node --experimental-strip-t
 exec    = "node"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 
-# lode downloads node if absent from PATH, caches it at $DATA_DIR/runtime/node, and
+# lode downloads node if absent from PATH, caches it at $LODE_DIR/runtime/node, and
 # reuses it next boot. The official .tar.gz works directly — lode hoists `node` out
 # of the nested node-vX/bin/ dir to runtime/node (npm/npx aren't needed at run time).
 # Use the .tar.gz, not .tar.xz (lode doesn't do xz). Runtime downloads are UNVERIFIED

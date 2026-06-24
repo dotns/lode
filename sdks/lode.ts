@@ -122,8 +122,8 @@ function withLock<T>(lockPath: string, fn: () => T): T {
 }
 
 export interface LodeOptions {
-  /** Defaults to $LODE_DATA_DIR. */
-  dataDir?: string;
+  /** lode's dir (where state.json lives). Defaults to $LODE_DIR. */
+  lodeDir?: string;
   /** Defaults to $LODE_INSTANCE (needed for readiness). */
   instance?: string;
 }
@@ -149,23 +149,23 @@ export interface WatchOptions {
   onState?: (state: State) => void;
 }
 
-/** A handle on one lode data dir. {@link Lode.fromEnv} for the supervised app; `new Lode({ dataDir })` for an external tool. */
+/** A handle on lode's dir (where state.json lives). {@link Lode.fromEnv} for the supervised app; `new Lode({ lodeDir })` for an external tool. */
 export class Lode {
-  readonly dataDir: string;
+  readonly lodeDir: string;
   readonly instance: string;
   readonly statePath: string;
   readonly lockPath: string;
 
   constructor(opts: LodeOptions = {}) {
-    const dir = opts.dataDir ?? env.LODE_DATA_DIR;
-    if (!dir) throw new Error("lode: no data dir — set LODE_DATA_DIR or pass { dataDir }");
-    this.dataDir = dir;
+    const dir = opts.lodeDir ?? env.LODE_DIR;
+    if (!dir) throw new Error("lode: no lode dir — set LODE_DIR (run under lode) or pass { lodeDir }");
+    this.lodeDir = dir;
     this.instance = opts.instance ?? env.LODE_INSTANCE ?? "";
     this.statePath = join(dir, "state.json");
     this.lockPath = join(dir, "state.json.lock");
   }
 
-  /** From the injected env (LODE_DATA_DIR / LODE_INSTANCE). */
+  /** From the injected env (LODE_DIR / LODE_INSTANCE). */
   static fromEnv(): Lode {
     return new Lode();
   }
@@ -343,9 +343,26 @@ export class Lode {
   }
 }
 
-/** The injected data dir, or undefined when not under lode. */
+/** Your app's persistent data dir, resolved `DATA_DIR` > `LODE_DIR` > `ROOT_DIR`
+ *  (works with or without lode: set `ROOT_DIR` standalone, lode provides `LODE_DIR`,
+ *  or set `DATA_DIR` to override). Undefined if none are set. */
 export function dataDir(): string | undefined {
-  return env.LODE_DATA_DIR || undefined;
+  return env.DATA_DIR || env.LODE_DIR || env.ROOT_DIR || undefined;
+}
+
+/** Your app's root/run dir convention (`ROOT_DIR`), or undefined. */
+export function rootDir(): string | undefined {
+  return env.ROOT_DIR || undefined;
+}
+
+/** lode's own dir, where state.json lives (`LODE_DIR`), or undefined when not under lode. */
+export function lodeDir(): string | undefined {
+  return env.LODE_DIR || undefined;
+}
+
+/** lode's runtime dir for this app — its cwd (`LODE_WORKDIR`), or undefined. */
+export function workdir(): string | undefined {
+  return env.LODE_WORKDIR || undefined;
 }
 
 /** This launch's instance id ({pid}-{nanoid}), or "". */
@@ -364,9 +381,9 @@ export function readiness(): "none" | "state" | undefined {
   return v === "none" || v === "state" ? v : undefined;
 }
 
-/** True when supervised by lode (LODE_DATA_DIR set). */
+/** True when supervised by lode (LODE_DIR set). */
 export function isSupervised(): boolean {
-  return !!env.LODE_DATA_DIR;
+  return !!env.LODE_DIR;
 }
 
 /** Required graceful-stop handler: on SIGTERM/SIGINT run handler, then exit(0). */

@@ -4,7 +4,7 @@
 
 [global]
 app      = "demo-rust"
-data_dir = "/srv/lode"    # MUST be a persistent volume for the version cache + state.json
+dir = "/srv/lode"    # MUST be a persistent volume for the version cache + state.json
 
 [update]
 github = "owner/demo-rust"          # GitHub Releases … (or: manifest = "https://…/manifest.json")

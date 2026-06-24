@@ -20,9 +20,9 @@ use crate::error::{Error, Result};
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_APP: &str = "app";
 /// Default base / run directory. Holds `lode.toml`, `versions/`, `state.json`,
-/// `lode.pid` and `runtime/`. Change the whole location with `--data-dir` /
-/// `LODE_DATA_DIR` (config is then searched at `$DATA_DIR/lode.toml`).
-const DEFAULT_DATA_DIR: &str = "/srv/lode";
+/// `lode.pid` and `runtime/`. Change the whole location with `--dir` /
+/// `LODE_DIR` (config is then searched at `$LODE_DIR/lode.toml`).
+const DEFAULT_DIR: &str = "/srv/lode";
 
 /// Minimal starter `lode.toml` scaffolded on first run when none exists (also
 /// what `lode-cli init` writes). Deliberately small — the complete documented
@@ -30,7 +30,7 @@ const DEFAULT_DATA_DIR: &str = "/srv/lode";
 pub(crate) const STARTER_TOML: &str = include_str!("../docs/lode.starter.toml");
 const DEFAULT_GITHUB_API: &str = "https://api.github.com";
 const DEFAULT_CHANNEL: &str = "stable";
-const DEFAULT_WORKDIR_PLACEHOLDER: &str = "{dir}";
+pub(crate) const DEFAULT_WORKDIR_PLACEHOLDER: &str = "{dir}";
 
 // --- typed enums (shared by the CLI and TOML layers) -----------------------
 
@@ -125,7 +125,7 @@ pub(crate) struct Config {
 #[derive(Debug, Clone)]
 pub(crate) struct Global {
     pub(crate) app: String,
-    pub(crate) data_dir: PathBuf,
+    pub(crate) dir: PathBuf,
     pub(crate) log_level: String,
 }
 
@@ -264,7 +264,7 @@ struct TomlConfig {
 #[serde(deny_unknown_fields)]
 struct TomlGlobal {
     app: Option<String>,
-    data_dir: Option<String>,
+    dir: Option<String>,
     log_level: Option<String>,
 }
 
@@ -351,14 +351,14 @@ pub(crate) fn resolve(cli: &Globals) -> Result<Config> {
 }
 
 /// Write a minimal **sourceless** `lode.toml` (no update source, `policy=off`) at
-/// `$DATA_DIR/lode.toml` when one is absent, so a `seed`-prepared data dir runs
+/// `$LODE_DIR/lode.toml` when one is absent, so a `seed`-prepared data dir runs
 /// offline with bare `lode`. Never clobbers an existing config. Used by
 /// `lode-cli seed` before it resolves, so seeding "just works" on a fresh dir
 /// without tripping the source-requiring starter scaffold. `seed_source` is the
 /// file being seeded — its name derives the scaffolded `[command]` launch command.
 pub(crate) fn ensure_sourceless_toml(cli: &Globals, seed_source: &Path) -> Result<()> {
-    let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
-    let path = Path::new(data_dir).join("lode.toml");
+    let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
+    let path = Path::new(dir).join("lode.toml");
     if path.exists() {
         return Ok(());
     }
@@ -406,14 +406,14 @@ fn seed_run_command(seed_source: &Path, app: &str) -> String {
 
 /// Locate `lode.toml` without reading it: an explicit `--config`/`LODE_CONFIG`
 /// always wins (even if the file is missing — the read will report it);
-/// otherwise search `$DATA_DIR/lode.toml`, then `./lode.toml`. Shared by
+/// otherwise search `$LODE_DIR/lode.toml`, then `./lode.toml`. Shared by
 /// [`load_toml`] and [`peek_log_level`] so both see the same file.
 fn find_config_path(cli: &Globals) -> Option<PathBuf> {
     if let Some(path) = cli.config.as_ref() {
         return Some(PathBuf::from(path));
     }
-    let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
-    let in_data = Path::new(data_dir).join("lode.toml");
+    let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
+    let in_data = Path::new(dir).join("lode.toml");
     if in_data.is_file() {
         return Some(in_data);
     }
@@ -433,20 +433,18 @@ pub(crate) fn peek_log_level(cli: &Globals) -> Option<String> {
 }
 
 /// Locate and parse `lode.toml`. An explicit `--config`/`LODE_CONFIG` must exist;
-/// otherwise the default search (`$DATA_DIR/lode.toml`, then `./lode.toml`) is
+/// otherwise the default search (`$LODE_DIR/lode.toml`, then `./lode.toml`) is
 /// best-effort and a missing file yields the all-defaults config (design §15).
 fn load_toml(cli: &Globals) -> Result<(TomlConfig, Option<PathBuf>)> {
     let Some(path) = find_config_path(cli) else {
         // No lode.toml anywhere. A source given via env/CLI lets us run file-less;
-        // otherwise scaffold a starter at `$DATA_DIR/lode.toml` and guide the
+        // otherwise scaffold a starter at `$LODE_DIR/lode.toml` and guide the
         // operator to fill it in (design §15).
         if cli.manifest.is_some() || cli.github.is_some() {
             return Ok((TomlConfig::default(), None));
         }
-        let data_dir = cli.data_dir.as_deref().unwrap_or(DEFAULT_DATA_DIR);
-        return Err(scaffold_starter_config(
-            &Path::new(data_dir).join("lode.toml"),
-        ));
+        let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
+        return Err(scaffold_starter_config(&Path::new(dir).join("lode.toml")));
     };
     let text = std::fs::read_to_string(&path)
         .map_err(|e| Error::Config(format!("read config {}: {e}", path.display())))?;
@@ -504,11 +502,11 @@ fn merge_global(cli: &Globals, t: &TomlGlobal) -> Global {
             .clone()
             .or_else(|| t.app.clone())
             .unwrap_or_else(|| DEFAULT_APP.to_owned()),
-        data_dir: cli
-            .data_dir
+        dir: cli
+            .dir
             .clone()
-            .or_else(|| t.data_dir.clone())
-            .map_or_else(|| PathBuf::from(DEFAULT_DATA_DIR), PathBuf::from),
+            .or_else(|| t.dir.clone())
+            .map_or_else(|| PathBuf::from(DEFAULT_DIR), PathBuf::from),
         log_level: cli
             .log_level
             .clone()
@@ -585,10 +583,11 @@ fn merge_command(cli: &Globals, t: &TomlCommand) -> Command {
     Command {
         run: cli.run.clone().or_else(|| t.run.clone()),
         exec: cli.exec.clone().or_else(|| t.exec.clone()),
-        workdir: cli
+        // No CLI flag: the child's working dir defaults to the version dir
+        // (`{dir}`) and is overridable only via `[command].workdir` in lode.toml.
+        workdir: t
             .workdir
             .clone()
-            .or_else(|| t.workdir.clone())
             .unwrap_or_else(|| DEFAULT_WORKDIR_PLACEHOLDER.to_owned()),
     }
 }
@@ -710,7 +709,7 @@ mod tests {
             log_level: None,
             config: None,
             app: None,
-            data_dir: None,
+            dir: None,
             manifest: None,
             github: None,
             github_api: None,
@@ -728,7 +727,6 @@ mod tests {
             trusted_keys_file: None,
             run: None,
             exec: None,
-            workdir: None,
             runtime: None,
             runtime_download: None,
             runtime_version: None,
@@ -752,7 +750,7 @@ mod tests {
     fn default_fallback() {
         let cfg = merge(&blank_cli(), &TomlConfig::default());
         assert_eq!(cfg.global.app, "app");
-        assert_eq!(cfg.global.data_dir, PathBuf::from("/srv/lode"));
+        assert_eq!(cfg.global.dir, PathBuf::from("/srv/lode"));
         assert_eq!(cfg.global.log_level, "info");
         assert_eq!(cfg.update.policy, Policy::Check);
         assert_eq!(cfg.update.check_interval, 300);

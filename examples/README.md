@@ -7,7 +7,7 @@ does under lode:
 | # | Concern | What the demo shows |
 |---|---|---|
 | 1 | **START** (启动) | bind `$PORT` and serve — lode runs the app as its child |
-| 2 | **READ** (读取变量) | read `LODE_ACTIVE_VERSION` / `LODE_DATA_DIR` / `LODE_INSTANCE` + host env (`PORT`, operator `[env]`) → `GET /env` |
+| 2 | **READ** (读取变量) | read `LODE_ACTIVE_VERSION` / `LODE_DIR` / `LODE_INSTANCE` + host env (`PORT`, operator `[env]`) → `GET /env` |
 | 3 | **UPGRADE** (升级) | *passive*: readiness + `SIGTERM` so lode's update/rollback is seamless · *active*: `POST /upgrade`, `POST /restart` · *maintenance*: `POST /hold` / `/release` (set `state.hold` → lode won't (re)start the app) · *reload*: an operator editing `lode.toml` while the app runs does **not** auto-restart it — lode bumps `state.config_generation`; the app applies it at its own pace |
 
 Each demo integrates through the single-file **SDK** in [`../sdks`](../sdks), so it
@@ -81,7 +81,7 @@ APP_GREETING="hi" PORT=8080 bun run bun/app.ts   # show an operator [env]-style 
 
 curl localhost:8080/version      # -> 0.0.0-dev   (no LODE_ACTIVE_VERSION standalone)
 curl localhost:8080/env          # -> {"version":"0.0.0-dev","instance":"","dataDir":null,"port":"8080","greeting":"hi"}
-curl -XPOST localhost:8080/upgrade   # -> "not running under lode (LODE_DATA_DIR unset)"  (expected standalone)
+curl -XPOST localhost:8080/upgrade   # -> "not running under lode (LODE_DIR unset)"  (expected standalone)
 ```
 
 Standalone, the env lode would inject is empty and the state.json steps no-op —

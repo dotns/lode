@@ -6,7 +6,7 @@
 # This is the APPLICATION ARTIFACT under test, NOT a test runner — every bit of
 # e2e orchestration is bun+TypeScript. Pure POSIX sh, no jq/python/etc.
 #
-# lode injects (design §10): LODE_ACTIVE_VERSION, LODE_DATA_DIR, LODE_INSTANCE,
+# lode injects (design §10): LODE_ACTIVE_VERSION, LODE_DIR, LODE_INSTANCE,
 # LODE_READINESS. errexit is intentionally NOT used (a trap-driven supervise loop
 # must survive the signal-interrupted `wait`); `set -u` catches unset-var typos.
 set -u
@@ -16,8 +16,8 @@ BUILD_VERSION="0.0.0-dev"
 BUILD_MODE="service"      # service | exit | update-on-exit
 BUILD_EXIT_CODE="0"       # process exit code for BUILD_MODE=exit
 BUILD_TARGET=""           # version to request for BUILD_MODE=update-on-exit
-BUILD_GATE="0"            # service + readiness=state: defer serving ready (-0) until $LODE_DATA_DIR/ready_ok exists
-BUILD_PREPARE_GATE="0"    # service + readiness=state: defer the prepare ack (-2) until $LODE_DATA_DIR/prepare_ok exists
+BUILD_GATE="0"            # service + readiness=state: defer serving ready (-0) until $LODE_DIR/ready_ok exists
+BUILD_PREPARE_GATE="0"    # service + readiness=state: defer the prepare ack (-2) until $LODE_DIR/prepare_ok exists
 
 # When run under lode, LODE_ACTIVE_VERSION (injected) wins, so the self-reported
 # version always matches what lode installed.
@@ -57,10 +57,10 @@ trap on_term TERM INT
 # then temp+rename (atomic). String values only; values here (instance ids,
 # versions) contain no '/' so the sed delimiter is safe.
 set_state_field() {
-  [ -n "${LODE_DATA_DIR:-}" ] || return 0
+  [ -n "${LODE_DIR:-}" ] || return 0
   _k="$1"
   _v="$2"
-  _s="$LODE_DATA_DIR/state.json"
+  _s="$LODE_DIR/state.json"
   _t="$_s.$_k.$$"
   if [ -f "$_s" ] && grep -q "\"$_k\"" "$_s"; then
     sed 's/"'"$_k"'"[[:space:]]*:[^,}]*/"'"$_k"'": "'"$_v"'"/' "$_s" > "$_t"
@@ -84,7 +84,7 @@ write_ready() {
 # Extract the current state.ready value (empty if absent); used to spot lode's "-1"
 # staged-update prompt. Pure sed — "ready" appears only as this one field.
 read_ready() {
-  _s="${LODE_DATA_DIR:-}/state.json"
+  _s="${LODE_DIR:-}/state.json"
   [ -f "$_s" ] || return 0
   sed -n 's/.*"ready"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_s" | head -n1
 }
@@ -104,13 +104,13 @@ case "$BUILD_MODE" in
 esac
 
 # --- service mode (long-running) ------------------------------------------
-log "starting version=$VERSION pid=$$ instance=${LODE_INSTANCE:-none} data_dir=${LODE_DATA_DIR:-unset} marker=${RELOAD_MARKER:-none}"
+log "starting version=$VERSION pid=$$ instance=${LODE_INSTANCE:-none} data_dir=${LODE_DIR:-unset} marker=${RELOAD_MARKER:-none}"
 
 if [ "$BUILD_GATE" = "1" ]; then
   # Announce serving readiness (-0) only once the test drops the gate file — this
   # lets the e2e observe lode WAITING for the readiness handshake post-cut-over.
   while [ "$running" -eq 1 ]; do
-    if [ -f "${LODE_DATA_DIR:-}/ready_ok" ]; then
+    if [ -f "${LODE_DIR:-}/ready_ok" ]; then
       write_ready 0
       break
     fi
@@ -132,7 +132,7 @@ while [ "$running" -eq 1 ]; do
     [ "$(read_ready)" = "${LODE_INSTANCE:-}-1" ]; then
     log "prepare: lode prompted a staged update — preparing for cut-over"
     if [ "$BUILD_PREPARE_GATE" = "1" ]; then
-      while [ "$running" -eq 1 ] && [ ! -f "${LODE_DATA_DIR:-}/prepare_ok" ]; do
+      while [ "$running" -eq 1 ] && [ ! -f "${LODE_DIR:-}/prepare_ok" ]; do
         sleep 0.2 &
         wait "$!" 2>/dev/null || true
       done

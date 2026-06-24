@@ -36,8 +36,8 @@ pub(crate) struct Globals {
     #[arg(long = "app", env = "LODE_APP_NAME", global = true)]
     pub(crate) app: Option<String>,
     /// Data directory holding versions/, `state.json` and the PID lock.
-    #[arg(long = "data-dir", env = "LODE_DATA_DIR", global = true)]
-    pub(crate) data_dir: Option<String>,
+    #[arg(long = "dir", env = "LODE_DIR", global = true)]
+    pub(crate) dir: Option<String>,
 
     // --- [update] ---
     /// Native source: lode/v1 manifest URL (mutually exclusive with `--github`).
@@ -114,7 +114,7 @@ pub(crate) struct Globals {
     pub(crate) trusted_keys_file: Option<String>,
 
     // --- [command] ---
-    /// Bare-run launch command (literal, whitespace-split, cwd = workdir; a
+    /// Bare-run launch command (literal, whitespace-split, cwd = `workdir`; a
     /// manifest asset `run` overrides it).
     #[arg(long = "run", env = "LODE_RUN", global = true)]
     pub(crate) run: Option<String>,
@@ -122,9 +122,9 @@ pub(crate) struct Globals {
     /// `exec` overrides it).
     #[arg(long = "exec", env = "LODE_EXEC", global = true)]
     pub(crate) exec: Option<String>,
-    /// Child working directory (`{dir}` or an absolute path).
-    #[arg(long = "workdir", env = "LODE_WORKDIR", global = true)]
-    pub(crate) workdir: Option<String>,
+    // The child's working directory is auto-set to the running version dir and
+    // exposed to the app as `LODE_WORKDIR`; override (rarely) via `[command].workdir`
+    // in lode.toml — no CLI flag.
 
     // --- [runtime] ---
     /// Runtime executable name used by run/exec.

@@ -1,6 +1,6 @@
 //! `lode versions` — list locally installed versions, marking the active one.
 //!
-//! Purely local: enumerate the directories under `$DATA_DIR/versions/` (design
+//! Purely local: enumerate the directories under `$LODE_DIR/versions/` (design
 //! §15), resolve the `current` symlink to flag the active version, sort
 //! semver-descending and print one per line. No network and no `state.json`
 //! writes — read-only over the data dir.
@@ -16,9 +16,9 @@ use crate::error::Result;
 /// Writes through a locked stdout handle (the `println!` macro is denied
 /// workspace-wide).
 pub(crate) fn run(cfg: &Config) -> Result<()> {
-    let data_dir = &cfg.global.data_dir;
-    let versions = collect(data_dir)?;
-    let current = current_version(data_dir);
+    let dir = &cfg.global.dir;
+    let versions = collect(dir)?;
+    let current = current_version(dir);
 
     let mut out = std::io::stdout().lock();
     if versions.is_empty() {
@@ -38,10 +38,10 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
     Ok(())
 }
 
-/// Directory names under `$DATA_DIR/versions/`, sorted semver-descending. An
+/// Directory names under `$LODE_DIR/versions/`, sorted semver-descending. An
 /// absent `versions/` dir yields an empty list (nothing installed yet).
-fn collect(data_dir: &Path) -> Result<Vec<String>> {
-    let dir = data_dir.join("versions");
+fn collect(dir: &Path) -> Result<Vec<String>> {
+    let dir = dir.join("versions");
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -63,8 +63,8 @@ fn collect(data_dir: &Path) -> Result<Vec<String>> {
 
 /// Resolve the `current` symlink to the version it points at, if any. Returns
 /// `None` when the link is absent or not a symlink.
-fn current_version(data_dir: &Path) -> Option<String> {
-    let target = std::fs::read_link(data_dir.join("current")).ok()?;
+fn current_version(dir: &Path) -> Option<String> {
+    let target = std::fs::read_link(dir.join("current")).ok()?;
     target
         .file_name()
         .and_then(|n| n.to_str())

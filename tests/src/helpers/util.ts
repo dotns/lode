@@ -40,7 +40,7 @@ export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeou
 /**
  * The environment handed to spawned lode processes: the host env with every
  * `LODE_*` variable stripped (so the harness drives lode purely via CLI flags and
- * a stray `LODE_DATA_DIR`/`LODE_MANIFEST`/etc. from the outer shell can never leak
+ * a stray `LODE_DIR`/`LODE_MANIFEST`/etc. from the outer shell can never leak
  * in). `LODE_BIN` is not a lode config var, so dropping it is harmless.
  */
 export function baseEnv(): Record<string, string> {

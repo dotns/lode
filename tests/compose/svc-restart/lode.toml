@@ -14,7 +14,7 @@
 
 [global]
 app      = "crash"
-data_dir = "/data"
+dir = "/data"
 
 [update]
 manifest = "http://10.123.231.2:8080/crash/manifest.json"

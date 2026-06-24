@@ -68,7 +68,7 @@ test("editing lode.toml recovers a paused app (config-fix)", async () => {
   const config = (run: string) => `
 [global]
 app = "${h.server.name}"
-data_dir = "${h.dataDir}"
+dir = "${h.dataDir}"
 
 [update]
 manifest = "${h.server.manifestUrl}"

@@ -11,7 +11,7 @@
 
 [global]
 app      = "web-rust"
-data_dir = "/data"
+dir = "/data"
 
 [update]
 manifest       = "http://10.123.231.2:8080/web-rust/manifest.json"

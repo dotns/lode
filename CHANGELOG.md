@@ -5,6 +5,29 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.0.9] - 2026-06-24
+
+### Changed (breaking)
+
+- **Directory variables renamed for a clear app-vs-lode split.** lode's own directory is
+  now `[global].dir` / `--dir` / **`LODE_DIR`** (was `data_dir` / `--data-dir` /
+  `LODE_DATA_DIR`), and the app's run directory is `[command].workdir` / `--app-dir` /
+  **`LODE_WORKDIR`** (was `workdir` / `--workdir` / `LODE_WORKDIR`). Update `lode.toml`
+  (`[global].dir`, `[command].workdir`) and any `LODE_DATA_DIR` / `LODE_WORKDIR` env or
+  `--data-dir` / `--workdir` flags. No silent aliases — old names are rejected.
+
+### Added
+
+- **lode now injects `LODE_WORKDIR`** (the app's run dir, i.e. its cwd) into the child,
+  alongside `LODE_DIR` / `LODE_ACTIVE_VERSION` / `LODE_INSTANCE` / `LODE_READINESS`.
+- **App directory convention (docs + SDKs).** Recommended split: lode provides `LODE_DIR`
+  (its persistent dir, where state.json/versions/runtime live) and `LODE_WORKDIR` (the run
+  dir); your **app** implements its own `ROOT_DIR` / `DATA_DIR`, resolving its data dir
+  **`DATA_DIR` > `LODE_DIR` > `ROOT_DIR`** so the same binary works with or without lode
+  (set only `ROOT_DIR` standalone; lode supplies `LODE_DIR` automatically). The SDKs gain
+  `dataDir()` (the resolution), `rootDir()`, `lodeDir()`, `workdir()`; the `Lode` handle now
+  keys off `LODE_DIR`. See docs/integration.md → "Data directories & persistence".
+
 ## [0.0.8] - 2026-06-23
 
 ### Added

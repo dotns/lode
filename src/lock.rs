@@ -1,4 +1,4 @@
-//! Single-instance PID lock at `$DATA_DIR/lode.pid` (design §9).
+//! Single-instance PID lock at `$LODE_DIR/lode.pid` (design §9).
 //!
 //! The lock is created with `O_EXCL` ([`File::create_new`]) so two lode instances
 //! sharing a data dir can never both hold it. The file records the holder's pid
@@ -35,14 +35,14 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire the single-instance lock for `app` under `data_dir`.
+/// Acquire the single-instance lock for `app` under `dir`.
 ///
 /// Returns [`Error::Lock`] when another live lode already holds it. A stale lock
 /// (holder dead, file corrupt, or recording our own pid) is reclaimed
 /// transparently.
-pub(crate) fn acquire(data_dir: &Path, app: &str) -> Result<LockGuard> {
-    fs::create_dir_all(data_dir)?;
-    let path = data_dir.join("lode.pid");
+pub(crate) fn acquire(dir: &Path, app: &str) -> Result<LockGuard> {
+    fs::create_dir_all(dir)?;
+    let path = dir.join("lode.pid");
 
     // Two passes at most: the second only runs after we remove a stale lock, so a
     // genuinely contended lock fails fast rather than spinning.
@@ -69,13 +69,13 @@ pub(crate) fn acquire(data_dir: &Path, app: &str) -> Result<LockGuard> {
 }
 
 /// Read-only liveness probe for CLI paths (P2-15): the pid of a live *other*
-/// lode instance currently holding the single-instance lock under `data_dir`,
+/// lode instance currently holding the single-instance lock under `dir`,
 /// if any. Applies [`acquire`]'s staleness rules without reclaiming anything:
 /// an absent or unparsable file, a dead holder, or a file recording our OWN
 /// pid (we don't hold the lock — a previous holder died and we inherited its
 /// pid, see module docs) all mean "no live supervisor" (`None`).
-pub(crate) fn live_holder(data_dir: &Path) -> Option<u32> {
-    let pid = read_pid(&data_dir.join("lode.pid"))?;
+pub(crate) fn live_holder(dir: &Path) -> Option<u32> {
+    let pid = read_pid(&dir.join("lode.pid"))?;
     if Some(pid.as_raw()) == own_pid() || !process_alive(pid) {
         return None;
     }

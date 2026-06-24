@@ -7,7 +7,7 @@ Integration spans three files, each with one owner:
 | File | Where | Who writes it | Purpose |
 |---|---|---|---|
 | **`lode.toml`** | local | the operator | how lode fetches & runs your app |
-| **`state.json`** | local (`$DATA_DIR`) | lode **and** the app | runtime comms (status ↔ requests) |
+| **`state.json`** | local (`$LODE_DIR`) | lode **and** the app | runtime comms (status ↔ requests) |
 | **release feed** | remote | the publisher | the signed asset listing — a native `manifest.json` **or** GitHub Releases |
 
 The three steps below — **configure → run → publish** — are the whole integration. The
@@ -23,13 +23,13 @@ the deep design is in [architecture](architecture.md).
 
 The operator's file: *how to fetch and run your app*. The app never writes it.
 Precedence is `CLI > env (LODE_*) > lode.toml > defaults`; by default lode reads
-`/srv/lode/lode.toml` (override the base dir with `LODE_DATA_DIR`) and scaffolds a
+`/srv/lode/lode.toml` (override the base dir with `LODE_DIR`) and scaffolds a
 starter there on first run.
 
 ```toml
 [global]
 app      = "myapp"          # must match the manifest "name"
-data_dir = "/srv/lode"      # holds lode.toml + versions/ + state.json + lode.pid + runtime/
+dir = "/srv/lode"      # holds lode.toml + versions/ + state.json + lode.pid + runtime/
 
 [update]
 github   = "owner/myapp"                                        # GitHub Releases …
@@ -69,12 +69,21 @@ See [`lode.example.toml`](lode.example.toml) for every option and `[runtime]`/`[
 
 What *your app* implements. Any language — read/write one JSON file and handle `SIGTERM`.
 
-**Environment lode injects:** `LODE_ACTIVE_VERSION` (current version), `LODE_DATA_DIR`
-(`state.json` lives at `$LODE_DATA_DIR/state.json`), `LODE_INSTANCE` (unique id for this
-launch — write it to `state.ready`). The host env (e.g. `PORT`) passes through; internal
-`LODE_*` are stripped. The operator can add more via the `[env]` table — those are
-**defaults**: an inherited host env var of the same name (e.g. a per-deploy `-e PORT`)
-wins over them, and lode's three vars above always win over everything.
+> **Prefer the SDKs.** Single-file clients in [`../sdks`](../sdks) (TypeScript / Go /
+> Rust) wrap this whole contract — read status; request upgrade / restart / rollback;
+> `hold`/`release` for maintenance; report readiness; `watch` lode's notifications —
+> with the correct atomic, `state.json.lock`-serialised writes. The raw contract below
+> is exactly what they implement (and all you need to port it to any other language).
+
+**Environment lode injects:** `LODE_ACTIVE_VERSION` (current version), `LODE_DIR`
+(lode's dir — `state.json` lives at `$LODE_DIR/state.json`), `LODE_WORKDIR` (the app's
+run dir, i.e. its cwd), `LODE_INSTANCE` (unique id for this launch — write it to
+`state.ready`), `LODE_READINESS` (`none`|`state`). The host env (e.g. `PORT`) passes
+through; internal `LODE_*` are stripped. The operator can add more via the `[env]`
+table — those are **defaults**: an inherited host env var of the same name (e.g. a
+per-deploy `-e PORT`) wins over them, and lode's injected vars always win over everything.
+See [Data directories & persistence](#data-directories--persistence) for the
+`LODE_DIR`/`LODE_WORKDIR` vs app-owned `ROOT_DIR`/`DATA_DIR` model.
 
 **state.json** — lode writes status, the app writes requests; the field sets don't overlap:
 
@@ -112,7 +121,7 @@ Implement these (all but `SIGTERM` are optional, but recommended):
 `state.json` has two writers (lode and your app), and a read-modify-write —
 read, patch your fields, write back — can silently lose the other side's
 concurrent update. lode serialises **all of its own RMWs** with an exclusive
-`flock(2)` on the sibling file `$LODE_DATA_DIR/state.json.lock` (created on
+`flock(2)` on the sibling file `$LODE_DIR/state.json.lock` (created on
 demand, never deleted; the lock lives on a sibling because `state.json` itself
 is replaced by temp-file + rename on every write).
 
@@ -124,7 +133,9 @@ is replaced by temp-file + rename on every write).
 - **Plain reads need no lock:** the temp + rename replacement is atomic, so
   any read of `state.json` always sees a complete, consistent snapshot.
 
-> A worked Rust + Bun pair lives in [`../tests/apps`](../tests/apps).
+> Recommended: use the [SDKs](../sdks) (and see the [`../examples`](../examples), which
+> integrate through them). A hand-rolled, zero-dependency Rust + Bun pair (no SDK) lives
+> in [`../tests/apps`](../tests/apps) as the from-scratch reference.
 
 ---
 
@@ -233,3 +244,39 @@ entirely.
 - [ ] github: signature set as the asset **`label`**. native: `sig` inline or a `.sig` sidecar, and the catalog re-signed (`manifest-sign`) after the final edit.
 - [ ] `channels.<c>.latest` points at a real version (native), or tag/latest resolves (github).
 - [ ] private key offline; operators hold only the public `trusted_keys` with `require_signature = enforce`.
+
+---
+
+## Data directories & persistence
+
+Two kinds of directory, named so they never collide.
+
+**lode-provided** — lode injects these; your app reads them:
+
+| env | what it is | lifetime |
+|---|---|---|
+| `LODE_DIR` | lode's own dir — `lode.toml`, `versions/<ver>/`, `state.json` (+`.lock`), `lode.pid`, `runtime/`, `downloads/` | **persistent** — give it a volume (`-v lode-data:/srv/lode`) |
+| `LODE_WORKDIR` | the app's run dir under lode (its cwd; default = the active version dir) | **rotates per version** — pruned by `keep_versions` |
+
+(The `lode` binary itself ships in the image and holds no state. Operator config: `[global].dir` / `--dir` sets `LODE_DIR`; the child's cwd defaults to the version dir and is overridable via `[command].workdir` in `lode.toml` (no CLI flag) — lode then injects the resolved dir as `LODE_WORKDIR`.)
+
+**app-implemented** — your app's own directory convention, so the *same binary works with or without lode*. **lode never reads or sets these — it passes them through to the child untouched** (set them via the host env / `-e` / the `[env]` table); the resolution below is entirely your app's (or the SDK's) doing:
+
+| env | what it is |
+|---|---|
+| `ROOT_DIR` | your app's root/run dir — the only one you need standalone |
+| `DATA_DIR` | your app's persistent data dir |
+
+Resolve your data dir as **`DATA_DIR` > `LODE_DIR` > `ROOT_DIR`**, so you only ever *need* `ROOT_DIR`:
+
+- standalone, set just `ROOT_DIR` and everything falls back to it;
+- under lode, `LODE_DIR` (a persistent volume) is used automatically;
+- set `DATA_DIR` to override (e.g. a separate volume).
+
+```ts
+const dataDir = process.env.DATA_DIR ?? process.env.LODE_DIR ?? process.env.ROOT_DIR;
+```
+
+The SDKs expose this directly — `dataDir()` (the resolution above), plus `rootDir()` / `lodeDir()` / `workdir()`.
+
+> **Don't write persistent data to the cwd.** `LODE_WORKDIR` defaults to the per-version directory, which lode replaces on every update and prunes by `keep_versions`. Keep app state under your resolved `DATA_DIR` (a persistent location), never the version dir.

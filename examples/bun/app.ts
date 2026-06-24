@@ -23,7 +23,7 @@ const baked = typeof BUILD_VERSION === "string" ? BUILD_VERSION : "0.0.0-dev";
 const version = activeVersion() ?? baked;
 const port = Number(Bun.env.PORT ?? "8080");
 
-// The SDK handle — null when run standalone (no lode / LODE_DATA_DIR unset).
+// The SDK handle — null when run standalone (no lode / LODE_DIR unset).
 const lode = isSupervised() ? Lode.fromEnv() : null;
 
 const log = (m: string): void => console.log(`[demo-bun] ${m}`);
@@ -41,7 +41,7 @@ const json = (body: unknown): Response =>
 
 // Run an SDK request, or 503 when not supervised by lode.
 const ask = (fn: (l: Lode) => void, ok: string): Response =>
-  lode ? (fn(lode), text(`${ok}\n`)) : text("not running under lode (LODE_DATA_DIR unset)\n", 503);
+  lode ? (fn(lode), text(`${ok}\n`)) : text("not running under lode (LODE_DIR unset)\n", 503);
 
 const server = Bun.serve({
   port,

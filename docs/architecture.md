@@ -51,7 +51,7 @@ zzci/ubase                        │  lode (static Rust binary, a few MB) │
                        ▼
             lode spawns and manages as a child process:  <lode.toml [command].run/exec>  (start/stop/restart/hot-update/rollback/optional zero-downtime)
                        │                        ▲
-            $DATA_DIR/state.json (written by lode+app) │ poll state.json mtime
+            $LODE_DIR/state.json (written by lode+app) │ poll state.json mtime
                        └────────► app ◄───────────┘ app reads state.available as a hint / writes state.target|restart_nonce to trigger
 ```
 
@@ -103,13 +103,13 @@ Division of labor: **landing is delegated to the manifest's `format`, running is
 
 ### Runtime download (`[runtime]`, optional)
 
-When `run`/`exec` depends on a runtime (such as `bun`), it can be declared in the `[runtime]` section of `lode.toml`. Resolution order is **PATH → cache → download**: lode first checks PATH; otherwise it reuses a previously downloaded runtime from `$DATA_DIR/runtime/<name>`; otherwise it downloads `download`. A self-contained binary omits this table.
+When `run`/`exec` depends on a runtime (such as `bun`), it can be declared in the `[runtime]` section of `lode.toml`. Resolution order is **PATH → cache → download**: lode first checks PATH; otherwise it reuses a previously downloaded runtime from `$LODE_DIR/runtime/<name>`; otherwise it downloads `download`. A self-contained binary omits this table.
 
 - **Format / hoist**: the `format` is inferred from the URL extension (`raw`/`gz`/`zip`/`tar.gz`); after extraction the named binary is hoisted to `runtime/<name>`, so nested official archives work (bun's `bun-linux-x64/bun`, node's `node-vX/bin/node`) as well as flat ones (deno) and single files.
-- **Cache**: the placed `runtime/<name>` is reused on later boots — with a persistent `$DATA_DIR` the download is a one-time cost. Delete the file to force a re-download.
+- **Cache**: the placed `runtime/<name>` is reused on later boots — with a persistent `$LODE_DIR` the download is a one-time cost. Delete the file to force a re-download.
 - **Unverified**: unlike an app artifact, a runtime download carries **no `sha256`/`sig`** and is **not** integrity/identity-checked. Pin a version, host on a trusted origin, and add its host to `[http].credential_hosts` if it needs credentials.
 - **Version pin** (`version` + `version_check`): when `version` is set, lode probes the runtime it's about to use (PATH/cache/downloaded) by running it with `version_check` (default `--version`) and requires the output to **contain** `version`. A wrong-version PATH/cache entry is bypassed for a fresh download; a downloaded mismatch is a hard error.
-- lode then **prepends `$DATA_DIR/runtime/` to the child's PATH**.
+- lode then **prepends `$LODE_DIR/runtime/` to the child's PATH**.
 
 ```toml
 [runtime]
@@ -170,7 +170,7 @@ Zero-downtime (reuseport-overlap / socket-activation): start the new process fir
 `lode` startup (service mode) runs a cleanup pass before determining the version:
 
 - **Orphan child processes**: a previous lode crash may have left an app child process still running. After taking over the stale lock, read `state.json.pid`, and if that process is still alive → terminate it gracefully (SIGTERM → SIGKILL on timeout) before starting a new one, avoiding port/resource conflicts and dual instances.
-- **Garbage collection**: clean up interrupted `downloads/<v>/*.part` and `versions/<v>.tmp` half-finished artifacts left by interruptions (the verified per-version download cache is kept); per `keep_versions`, retain current + last_good + the most recent N versions, deleting the rest of the version directories **and their `downloads/<v>/` caches**; `$DATA_DIR/runtime/` likewise keeps only what's in use.
+- **Garbage collection**: clean up interrupted `downloads/<v>/*.part` and `versions/<v>.tmp` half-finished artifacts left by interruptions (the verified per-version download cache is kept); per `keep_versions`, retain current + last_good + the most recent N versions, deleting the rest of the version directories **and their `downloads/<v>/` caches**; `$LODE_DIR/runtime/` likewise keeps only what's in use.
 - **Verify on-disk consistency**: if the version the `current` symlink points to is missing/corrupted → fall back to last_good or re-bootstrap.
 
 ---
@@ -243,7 +243,7 @@ All communication goes through **`state.json`** (bidirectional, each side writin
 
 > `lode.toml` is pure configuration, **the app does not write it** (only the lode side/operator writes it); to lock a version, use `pin` in it. For a complete `lode.toml`, see `docs/lode.example.toml`.
 
-### `$DATA_DIR/state.json` (written by lode+app)
+### `$LODE_DIR/state.json` (written by lode+app)
 
 ```json
 {
@@ -338,7 +338,7 @@ After lode sends `SIGTERM`, it **absolutely will not SIGKILL within `stop_timeou
 
 ## 9. PID protection
 
-- `$DATA_DIR/lode.pid`, atomically created with O_EXCL (`create_new`), containing the lode pid + the application name.
+- `$LODE_DIR/lode.pid`, atomically created with O_EXCL (`create_new`), containing the lode pid + the application name.
 - Already exists → probe liveness (`nix::sys::signal::kill(pid, None)` / `kill -0`): alive → the current process exits (single instance); `ESRCH` → delete the stale lock and take over.
 - Delete the lock on normal exit/signal receipt.
 
@@ -355,7 +355,7 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_CONFIG` | `--config <path>` | — | `lode.toml` | path to the lode.toml config file (TOML) |
 | **`[global]`** | | | | |
 | `LODE_APP_NAME` | `--app <name>` | `global.app` | `app` | application name (names the data directory/lock; must match the manifest `name`) |
-| `LODE_DATA_DIR` | `--data-dir <path>` | `global.data_dir` | `/srv/lode` | runtime/base directory: `lode.toml` + versions/state/lock + `runtime/`; by default `lode.toml` is also looked up here, and if missing a starter config is auto-generated |
+| `LODE_DIR` | `--dir <path>` | `global.dir` | `/srv/lode` | runtime/base directory: `lode.toml` + versions/state/lock + `runtime/`; by default `lode.toml` is also looked up here, and if missing a starter config is auto-generated |
 | `LODE_LOG_LEVEL` | `--log-level <lvl>` | `global.log_level` | `info` | trace/debug/info/warn/error |
 | **`[update]` — source + upgrade strategy** | | | | |
 | `LODE_MANIFEST` | `--manifest <url>` | `update.manifest` | — | **native source**: lode/v1 manifest URL (mutually exclusive with `github`) |
@@ -378,7 +378,7 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | **`[command]` — how to run** | | | | |
 | `LODE_RUN` | `--run <cmd>` | `command.run` | — | **literal bare-run launch command** (whitespace-split; only `{dir}` expands); manifest asset may override, see §4 |
 | `LODE_EXEC` | `--exec <cmd>` | `command.exec` | — | **literal CLI passthrough base command** (`lode <args>` appended after it); manifest asset may override, see §4 |
-| `LODE_WORKDIR` | `--workdir <path>` | `command.workdir` | `{dir}` | child process cwd (version directory or absolute path), see §4 |
+| `LODE_WORKDIR` (injected) | — (no flag) | `command.workdir` | `{dir}` | child process cwd (version dir by default, or an absolute path via `[command].workdir`); lode **injects** the resolved value as `LODE_WORKDIR`, see §4 |
 | **`[env]` — extra child env** (config-file only; no CLI/env override) | | | | |
 | — | — | `[env]` (table) | — | extra env vars for the child, as **defaults** — an inherited host env var of the same name wins (lode's own `LODE_*` win over all), see §4 |
 | **`[runtime]` — optional runtime** | | | | |
@@ -401,7 +401,7 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_FORWARD_SIGNALS` | `--forward-signals <list>` | `signals.forward` | (standard set) | the set of signals forwarded to the child process, §8 |
 | `LODE_RESTART_SIGNAL` | `--restart-signal <sig>` | `signals.restart` | — | the signal that triggers a graceful restart (unset by default), §8 |
 
-Child-process environment: pass through the host environment and **strip configuration-class `LODE_*`**; apply the operator's `[env]` table as **defaults** (only for keys the host env doesn't already set); prepend the runtime dir to PATH; then inject the read-only introspection variables `LODE_ACTIVE_VERSION`, `LODE_DATA_DIR`, `LODE_INSTANCE` (`{pid}-{nanoid}`, the unique id for this startup that the app suffixes with the handshake phase, §8). Precedence low→high: `[env]` defaults < inherited host env < runtime PATH-prepend < injected `LODE_*`.
+Child-process environment: pass through the host environment and **strip configuration-class `LODE_*`**; apply the operator's `[env]` table as **defaults** (only for keys the host env doesn't already set); prepend the runtime dir to PATH; then inject the read-only introspection variables `LODE_ACTIVE_VERSION`, `LODE_DIR`, `LODE_INSTANCE` (`{pid}-{nanoid}`, the unique id for this startup that the app suffixes with the handshake phase, §8). Precedence low→high: `[env]` defaults < inherited host env < runtime PATH-prepend < injected `LODE_*`.
 
 ---
 
@@ -582,7 +582,7 @@ src/
 ## 15. Data directory layout
 
 ```
-$DATA_DIR/
+$LODE_DIR/
   lode.toml                # local config (operator writes, app doesn't; can also be placed elsewhere and pointed to with --config)
   lode.pid                 # PID lock
   state.json                 # actual state (auto-generated by lode, read-only for the app)

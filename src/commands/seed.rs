@@ -1,6 +1,6 @@
 //! `lode-cli seed <app-bin>` — dev/testing: install a LOCAL executable (or archive)
 //! as a version without a manifest, download, or verification, and (by default)
-//! activate it. After seeding, bare `lode --data-dir <dir>` supervises it fully
+//! activate it. After seeding, bare `lode --dir <dir>` supervises it fully
 //! offline. This deliberately bypasses the sha256 + signature checks of the real
 //! install path: you are placing trusted bytes yourself. Not for production.
 
@@ -32,8 +32,8 @@ pub(crate) fn run(cfg: &Config, app_bin: &str, version: &str, activate: bool) ->
     }
     writeln!(
         out,
-        "  run it: lode --data-dir {} (offline, no source needed)",
-        cfg.global.data_dir.display()
+        "  run it: lode --dir {} (offline, no source needed)",
+        cfg.global.dir.display()
     )?;
     Ok(())
 }

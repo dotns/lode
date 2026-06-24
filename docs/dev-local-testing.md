@@ -14,10 +14,10 @@ signature, no download.
 
 ```bash
 # install ./myapp as a version into a throwaway data dir, and activate it
-lode-cli --data-dir /tmp/lode-dev seed ./myapp --version 1.0.0
+lode-cli --dir /tmp/lode-dev seed ./myapp --version 1.0.0
 
 # run it — bare `lode`, fully offline, no source configured
-lode --data-dir /tmp/lode-dev
+lode --dir /tmp/lode-dev
 ```
 
 `seed` activates the version by default and, on a fresh dir, scaffolds a sourceless
@@ -32,7 +32,7 @@ lode --data-dir /tmp/lode-dev
 ## `lode-cli seed`
 
 ```
-lode-cli [--data-dir DIR] [--app NAME] seed <APP_BIN> [options]
+lode-cli [--dir DIR] [--app NAME] seed <APP_BIN> [options]
 
   <APP_BIN>        a local executable, or a .tar.gz / .zip / .gz archive
   --version VER    version id (default: 0.0.0-dev); keys versions/<VER>. Use semver so
@@ -55,7 +55,7 @@ binary nested at e.g. `bin/myapp`, set `[command].run = "./bin/myapp"` in `lode.
 
 ```bash
 # myapp-1.0.0.tar.gz contains  bin/myapp  (+ other files)
-lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
+lode-cli --dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
     --version 1.0.0
 ```
 
@@ -101,11 +101,11 @@ set, lode just logs "no update source configured" and runs what is installed.
 Seed once per version against the same data dir, then drive `lode-cli`:
 
 ```bash
-lode-cli --data-dir /tmp/lode-dev seed ./myapp-v1 --version 1.0.0
-lode-cli --data-dir /tmp/lode-dev seed ./myapp-v2 --version 1.1.0 --no-activate
+lode-cli --dir /tmp/lode-dev seed ./myapp-v1 --version 1.0.0
+lode-cli --dir /tmp/lode-dev seed ./myapp-v2 --version 1.1.0 --no-activate
 
-lode-cli --data-dir /tmp/lode-dev versions          # both listed; * marks current
-lode-cli --data-dir /tmp/lode-dev rollback --version 1.0.0   # deliberate downgrade, local, no fetch
+lode-cli --dir /tmp/lode-dev versions          # both listed; * marks current
+lode-cli --dir /tmp/lode-dev rollback --version 1.0.0   # deliberate downgrade, local, no fetch
 ```
 
 ## Notes

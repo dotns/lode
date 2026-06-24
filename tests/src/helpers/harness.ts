@@ -117,7 +117,7 @@ export class Harness {
     return [
       "--app",
       this.server.name,
-      "--data-dir",
+      "--dir",
       this.dataDir,
       "--manifest",
       this.server.manifestUrl,

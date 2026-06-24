@@ -16,7 +16,7 @@ port of the same API.
 
 ## What the SDK does — and doesn't
 
-lode and your app share **one JSON file**, `$LODE_DATA_DIR/state.json`. lode writes
+lode and your app share **one JSON file**, `$LODE_DIR/state.json`. lode writes
 status (`current`/`last_good`/`status`/…); your app writes **requests**
 (`target`/`restart_nonce`) and **readiness** (`ready`). The SDK wraps that whole
 contract — see [docs/integration.md §2](../docs/integration.md) for the spec and
@@ -39,10 +39,16 @@ RMW, which lode also tolerates). Plain reads need no lock.
 
 | Var | Meaning |
 |---|---|
-| `LODE_DATA_DIR` | dir holding `state.json` (presence ⇒ "supervised by lode") |
+| `LODE_DIR` | lode's own dir, holding `state.json` (presence ⇒ "supervised by lode") |
+| `LODE_WORKDIR` | the app's run dir under lode (its cwd) |
 | `LODE_INSTANCE` | this launch's unique id `{pid}-{nanoid}` (needed for readiness) |
 | `LODE_ACTIVE_VERSION` | the version lode launched |
 | `LODE_READINESS` | `none` or `state` (whether the `ready` handshake is in force) |
+
+Your **app** keeps its own directory convention (works with or without lode): set
+`ROOT_DIR` (and optionally `DATA_DIR`); resolve your data dir `DATA_DIR` > `LODE_DIR`
+> `ROOT_DIR` via the `dataDir()` helper. See
+[docs/integration.md → Data directories & persistence](../docs/integration.md#data-directories--persistence).
 
 ## API (same shape in all three)
 
@@ -61,8 +67,9 @@ RMW, which lode also tolerates). Plain reads need no lock.
 | `watch(...)` | poll loop with a change callback for every notification (config / version / status / available / error / prepare) |
 
 Plus free helpers: `isSupervised()`, `activeVersion()`, `instanceId()`,
-`readiness()`, and a graceful-stop handler (`onTerminate` in TS/Go;
-`install_term_handler()` + `terminating()` in Rust).
+`readiness()`, the directory helpers `dataDir()` (resolves `DATA_DIR` > `LODE_DIR` >
+`ROOT_DIR`) / `rootDir()` / `lodeDir()` / `workdir()`, and a graceful-stop handler
+(`onTerminate` in TS/Go; `install_term_handler()` + `terminating()` in Rust).
 
 ## The lode ↔ app channel
 
@@ -136,7 +143,7 @@ lode.release();           // lode starts the app again
 ```
 
 An external operator/CLI can do the same against any data dir
-(`new Lode({ dataDir }).hold()` — readiness needs the child's instance id, but
+(`new Lode({ lodeDir }).hold()` — readiness needs the child's instance id, but
 hold/release don't).
 
 ## Quickstart
@@ -146,7 +153,7 @@ hold/release don't).
 ```ts
 import { Lode, onTerminate, isSupervised } from "./lode.ts";
 
-const lode = Lode.fromEnv();        // reads LODE_DATA_DIR / LODE_INSTANCE
+const lode = Lode.fromEnv();        // reads LODE_DIR / LODE_INSTANCE
 
 onTerminate(async () => { await drain(); });   // SIGTERM → drain → exit(0)
 
@@ -221,7 +228,7 @@ lode.watch(std::time::Duration::from_secs(1), &stop, lode::Handlers {
   helpers (`markServing` / `ackPrepared`) only if you opt into the staged-update
   prepare handshake; otherwise a single `markReady()` is enough.
 - **External ops tools** that aren't the supervised child can construct a client
-  for any data dir (`new Lode({ dataDir })` / `lode.New(dir, "")` / `Lode::new`)
+  for any data dir (`new Lode({ lodeDir })` / `lode.New(dir, "")` / `Lode::new`)
   and issue `requestUpdate` / `reboot` / `rollback` — they just can't
   report readiness (that needs the child's `LODE_INSTANCE`).
 - **Unix only** for Go/Rust (lode runs as PID 1). The TS SDK loads on any platform

@@ -17,7 +17,7 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
 
     writeln!(out, "[global]")?;
     writeln!(out, "  app:        {}", cfg.global.app)?;
-    writeln!(out, "  data_dir:   {}", cfg.global.data_dir.display())?;
+    writeln!(out, "  dir:   {}", cfg.global.dir.display())?;
     writeln!(out, "  log_level:  {}", cfg.global.log_level)?;
 
     writeln!(out, "[update]")?;
@@ -129,7 +129,7 @@ fn write_remote(out: &mut impl Write, cfg: &Config) -> Result<()> {
 
 /// Read and print `state.json`, or note its absence.
 fn write_state(out: &mut impl Write, cfg: &Config) -> Result<()> {
-    let path = cfg.global.data_dir.join("state.json");
+    let path = cfg.global.dir.join("state.json");
     writeln!(out, "[state] {}", path.display())?;
     match state::read(&path)? {
         Some(s) => writeln!(out, "{}", serde_json::to_string_pretty(&s)?)?,

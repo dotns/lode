@@ -92,33 +92,33 @@ pub struct State {
 /// A handle on one lode data directory. [`Lode::from_env`] for the supervised app;
 /// [`Lode::new`] for an external tool.
 pub struct Lode {
-    data_dir: PathBuf,
+    lode_dir: PathBuf,
     instance: String,
 }
 
 impl Lode {
     /// For an explicit data dir and instance id. `instance` may be empty when you
     /// only issue requests (target / restart) and never report readiness.
-    pub fn new(data_dir: impl Into<PathBuf>, instance: impl Into<String>) -> Self {
+    pub fn new(lode_dir: impl Into<PathBuf>, instance: impl Into<String>) -> Self {
         Self {
-            data_dir: data_dir.into(),
+            lode_dir: lode_dir.into(),
             instance: instance.into(),
         }
     }
 
-    /// From the injected env (`LODE_DATA_DIR` / `LODE_INSTANCE`).
+    /// From the injected env (`LODE_DIR` / `LODE_INSTANCE`).
     pub fn from_env() -> Result<Self> {
-        let dir = std::env::var_os("LODE_DATA_DIR")
-            .ok_or("lode: LODE_DATA_DIR not set — run under lode, or use Lode::new")?;
+        let dir = std::env::var_os("LODE_DIR")
+            .ok_or("lode: LODE_DIR not set — run under lode, or use Lode::new")?;
         Ok(Self {
-            data_dir: PathBuf::from(dir),
+            lode_dir: PathBuf::from(dir),
             instance: std::env::var("LODE_INSTANCE").unwrap_or_default(),
         })
     }
 
-    /// The data directory this handle targets.
-    pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+    /// lode's directory this handle targets (where state.json lives).
+    pub fn lode_dir(&self) -> &Path {
+        &self.lode_dir
     }
 
     /// This launch's unique id (empty when not supervised).
@@ -127,11 +127,11 @@ impl Lode {
     }
 
     fn state_path(&self) -> PathBuf {
-        self.data_dir.join("state.json")
+        self.lode_dir.join("state.json")
     }
 
     fn lock_path(&self) -> PathBuf {
-        self.data_dir.join("state.json.lock")
+        self.lode_dir.join("state.json.lock")
     }
 
     /// Parse `state.json` (`Ok(None)` when absent). Lock-free — atomic rename
@@ -349,7 +349,7 @@ impl Lode {
     }
 
     fn temp_path(&self) -> PathBuf {
-        self.data_dir
+        self.lode_dir
             .join(format!("state.json.{}.tmp", std::process::id()))
     }
 }
@@ -400,9 +400,33 @@ impl Drop for LockGuard {
     }
 }
 
-/// True when this process is supervised by lode (`LODE_DATA_DIR` is set).
+/// True when this process is supervised by lode (`LODE_DIR` is set).
 pub fn is_supervised() -> bool {
-    std::env::var_os("LODE_DATA_DIR").is_some()
+    std::env::var_os("LODE_DIR").is_some()
+}
+
+/// Your app's persistent data dir, resolved `DATA_DIR` > `LODE_DIR` > `ROOT_DIR`
+/// (works with or without lode: set `ROOT_DIR` standalone, lode provides `LODE_DIR`,
+/// or set `DATA_DIR` to override). `None` if none are set.
+pub fn data_dir() -> Option<String> {
+    ["DATA_DIR", "LODE_DIR", "ROOT_DIR"]
+        .into_iter()
+        .find_map(|k| std::env::var(k).ok().filter(|s| !s.is_empty()))
+}
+
+/// Your app's root/run dir convention (`ROOT_DIR`).
+pub fn root_dir() -> Option<String> {
+    std::env::var("ROOT_DIR").ok().filter(|s| !s.is_empty())
+}
+
+/// lode's own dir, where state.json lives (`LODE_DIR`).
+pub fn lode_dir() -> Option<String> {
+    std::env::var("LODE_DIR").ok().filter(|s| !s.is_empty())
+}
+
+/// lode's runtime dir for this app — its cwd (`LODE_WORKDIR`).
+pub fn workdir() -> Option<String> {
+    std::env::var("LODE_WORKDIR").ok().filter(|s| !s.is_empty())
 }
 
 /// The version lode launched (`LODE_ACTIVE_VERSION`).

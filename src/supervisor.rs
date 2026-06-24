@@ -130,15 +130,16 @@ pub(crate) fn exec_passthrough(cfg: &Config, args: &[String]) -> Result<Infallib
     let dir = target.dir.to_string_lossy();
     let exec = effective_command(target.exec.as_deref(), cfg.command.exec.as_deref(), "exec")?;
     let command_line = build_exec_argv(&exec, &dir, args)?;
-    let env = child_env(
+    let mut env = child_env(
         std::env::vars(),
         &cfg.env,
         &target.version,
-        &cfg.global.data_dir,
+        &cfg.global.dir,
         &instance,
         runtime_dir.as_deref(),
     );
     let workdir = PathBuf::from(expand_token(&cfg.command.workdir, &dir));
+    set_env(&mut env, "LODE_WORKDIR", &workdir.display().to_string());
 
     let (program, rest) = command_line
         .split_first()
@@ -179,7 +180,7 @@ fn locate(cfg: &Config, version: &str) -> Result<Target> {
     // `versions/<version>` here too — re-check before the join.
     idval::validate_id("version", version)?;
     let m = install::marker(cfg, version)?;
-    let dir = cfg.global.data_dir.join("versions").join(version);
+    let dir = cfg.global.dir.join("versions").join(version);
     Ok(Target {
         version: version.to_owned(),
         dir,
@@ -204,7 +205,7 @@ fn determine_version(cfg: &Config) -> Result<String> {
 
     // Lenient: this is the BOOT read — a corrupt state.json on the volume must
     // degrade to "no recorded current" (warn + quarantine), never a crash-loop.
-    let state_path = cfg.global.data_dir.join("state.json");
+    let state_path = cfg.global.dir.join("state.json");
     if let Some(st) = state::read_lenient(&state_path)
         && let Some(cur) = st.current.as_deref()
         && version_installed(cfg, cur)
@@ -223,7 +224,7 @@ fn determine_version(cfg: &Config) -> Result<String> {
 /// writes it last, atomically).
 fn version_installed(cfg: &Config, version: &str) -> bool {
     cfg.global
-        .data_dir
+        .dir
         .join("versions")
         .join(version)
         .join(".lode.json")
@@ -232,7 +233,7 @@ fn version_installed(cfg: &Config, version: &str) -> bool {
 
 /// The newest installed version (semver-descending), or `None` if none.
 fn newest_installed(cfg: &Config) -> Result<Option<String>> {
-    let versions_dir = cfg.global.data_dir.join("versions");
+    let versions_dir = cfg.global.dir.join("versions");
     let entries = match std::fs::read_dir(&versions_dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -282,7 +283,7 @@ fn bootstrap(cfg: &Config, requested: Option<&str>) -> Result<String> {
     // never blocks the first install); it only gates a `latest`-following resolution.
     // Lenient: a boot path (reached directly when pinned) — a corrupt state.json
     // just means no floor, never a failed bootstrap.
-    let prior = state::read_lenient(&cfg.global.data_dir.join("state.json")).unwrap_or_default();
+    let prior = state::read_lenient(&cfg.global.dir.join("state.json")).unwrap_or_default();
     let floor = install::version_floor(prior.current.as_deref(), prior.last_good.as_deref());
     let target = manifest::resolve_target(
         &manifest,
@@ -322,8 +323,8 @@ enum RuntimePlan {
     NotNeeded,
     /// The runtime is already on PATH — nothing to download.
     AlreadyPresent,
-    /// A prior download left the runtime in `$DATA_DIR/runtime/` — reuse it (no
-    /// network). When `$DATA_DIR` is a persistent volume this makes the download a
+    /// A prior download left the runtime in `$LODE_DIR/runtime/` — reuse it (no
+    /// network). When `$LODE_DIR` is a persistent volume this makes the download a
     /// one-time cost across restarts.
     Cached,
     /// The runtime is missing — download it and prepend its dir to the child PATH.
@@ -352,11 +353,11 @@ fn plan_runtime(
 }
 
 /// Ensure a configured runtime is available for the child, downloading it into
-/// `$DATA_DIR/runtime/` when absent from PATH and not already cached there. Returns
+/// `$LODE_DIR/runtime/` when absent from PATH and not already cached there. Returns
 /// the directory to prepend to the child's PATH, or `None` when no runtime download
 /// is needed. A previously downloaded runtime (a `runtime/<name>` executable from an
 /// earlier launch) is reused without touching the network, so a persistent
-/// `$DATA_DIR` makes the download a one-time cost; delete `runtime/<name>` to force a
+/// `$LODE_DIR` makes the download a one-time cost; delete `runtime/<name>` to force a
 /// re-download (e.g. to change the runtime version).
 fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
     let runtime = cfg.runtime.runtime.as_deref();
@@ -364,7 +365,7 @@ fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
     let expected = cfg.runtime.version.as_deref();
     let probe_args = runtime_probe_args(cfg.runtime.version_check.as_deref());
     let path_var = std::env::var("PATH").unwrap_or_default();
-    let runtime_dir = cfg.global.data_dir.join("runtime");
+    let runtime_dir = cfg.global.dir.join("runtime");
     // place_runtime lands the binary at `runtime/<name>`; the same path is the cache
     // key on the next launch.
     let cached_bin = runtime.map(|name| runtime_dir.join(name));
@@ -631,7 +632,7 @@ fn child_env(
     host: impl IntoIterator<Item = (String, String)>,
     defined: &BTreeMap<String, String>,
     version: &str,
-    data_dir: &Path,
+    dir: &Path,
     instance: &str,
     runtime_dir: Option<&Path>,
 ) -> Vec<(String, String)> {
@@ -653,7 +654,7 @@ fn child_env(
     // lode's introspection vars always win — set (not push) so a `[env]` entry of
     // the same name can't leave a duplicate behind.
     set_env(&mut env, "LODE_ACTIVE_VERSION", version);
-    set_env(&mut env, "LODE_DATA_DIR", &data_dir.display().to_string());
+    set_env(&mut env, "LODE_DIR", &dir.display().to_string());
     set_env(&mut env, "LODE_INSTANCE", instance);
     env
 }
@@ -809,7 +810,7 @@ fn bootstrap_terminated(signals: &mut Signals, cfg: &Config) -> Option<ExitCode>
     tracing::info!("termination signal received during startup; exiting");
     // Best-effort (lenient read, swallowed write error): never block the
     // graceful exit on state.json (design §8).
-    let path = cfg.global.data_dir.join("state.json");
+    let path = cfg.global.dir.join("state.json");
     let mut st = state::read_lenient(&path).unwrap_or_default();
     st.status = Some(Status::Stopped);
     st.pid = None;
@@ -1292,7 +1293,7 @@ impl<'c> Supervisor<'c> {
         // Seed the serviced nonce from any existing state so a pre-existing
         // `restart_nonce` does not trigger a spurious restart on startup, and the
         // hold flag so a `hold = true` present at boot is honoured before spawning.
-        let seed = state::read_lenient(&cfg.global.data_dir.join("state.json"));
+        let seed = state::read_lenient(&cfg.global.dir.join("state.json"));
         let last_nonce = seed.as_ref().map_or(0, |st| st.restart_nonce);
         let hold = seed.as_ref().is_some_and(|st| st.hold);
         // Schedule the first update check immediately for check/auto (unless
@@ -1458,7 +1459,7 @@ impl<'c> Supervisor<'c> {
             std::env::vars(),
             &self.cfg.env,
             &self.target.version,
-            &self.cfg.global.data_dir,
+            &self.cfg.global.dir,
             &instance,
             self.runtime_dir.as_deref(),
         );
@@ -1470,6 +1471,9 @@ impl<'c> Supervisor<'c> {
             readiness_label(self.cfg.supervise.readiness).to_owned(),
         ));
         let workdir = PathBuf::from(expand_token(&self.cfg.command.workdir, &dir));
+        // The app's run directory (its cwd) — injected so the app can locate itself
+        // (`$LODE_WORKDIR`), the same self-introspection role as the vars above.
+        set_env(&mut env, "LODE_WORKDIR", &workdir.display().to_string());
 
         let pid = spawn_process(&argv, &workdir, &env)?;
         self.child = Some(pid);
@@ -1638,7 +1642,7 @@ impl<'c> Supervisor<'c> {
 
     /// Fresh read of the `hold` flag (best-effort: any read problem is `false`).
     fn hold_requested(&self) -> bool {
-        state::read_lenient(&self.cfg.global.data_dir.join("state.json")).is_some_and(|st| st.hold)
+        state::read_lenient(&self.cfg.global.dir.join("state.json")).is_some_and(|st| st.hold)
     }
 
     /// Resume a paused app: clear the pause, reset the retry count, and respawn
@@ -1800,7 +1804,7 @@ impl<'c> Supervisor<'c> {
     /// and an unresolvable `"latest"` falls through so a cleanly-exiting app is
     /// never paused over a transient manifest error.
     fn pending_update(&self) -> Option<String> {
-        let path = self.cfg.global.data_dir.join("state.json");
+        let path = self.cfg.global.dir.join("state.json");
         let st = state::read_lenient(&path);
         if let Some(target) = st.as_ref().and_then(|s| s.target.as_deref())
             && target != self.target.version
@@ -1989,7 +1993,7 @@ impl<'c> Supervisor<'c> {
     /// design §8) — the supervise loop carries on with its in-memory state. The
     /// strict CLI command paths use [`state::locked_update`] instead.
     fn mutate_state(&self, edit: impl FnOnce(&mut State)) {
-        let path = self.cfg.global.data_dir.join("state.json");
+        let path = self.cfg.global.dir.join("state.json");
         state::locked_update_lenient(&path, edit);
     }
 
@@ -2044,7 +2048,7 @@ impl<'c> Supervisor<'c> {
             return None;
         }
         self.last_state_poll = Some(Instant::now());
-        let path = self.cfg.global.data_dir.join("state.json");
+        let path = self.cfg.global.dir.join("state.json");
         // Best-effort: a probe error (EIO, transient EACCES) skips the tick and
         // retries on the next — never an exit of PID 1 (R2-2).
         let mtime = match state::mtime(&path) {
@@ -2244,7 +2248,7 @@ impl<'c> Supervisor<'c> {
         // P2-11: never auto-RE-apply a version whose last rollout entry is `bad`
         // (it was rolled back) — downgrade to advertise-only. Lenient read: with
         // no readable history there is nothing known-bad.
-        let prior = state::read_lenient(&self.cfg.global.data_dir.join("state.json"));
+        let prior = state::read_lenient(&self.cfg.global.dir.join("state.json"));
         let action = gate_policy_action(action, &prior.unwrap_or_default());
         // `available` advertises a newer version (cleared when up to date);
         // `target` is only set for `auto` and must never clobber an app request.
@@ -2472,7 +2476,7 @@ impl<'c> Supervisor<'c> {
         if self.child.is_none() {
             return false;
         }
-        let path = self.cfg.global.data_dir.join("state.json");
+        let path = self.cfg.global.dir.join("state.json");
         let ready = state::read_lenient(&path).and_then(|st| st.ready);
         ready.as_deref() == Some(ready_token(&self.instance, READY_GO).as_str())
     }
@@ -2504,7 +2508,7 @@ impl<'c> Supervisor<'c> {
         let ready_field = match self.cfg.supervise.readiness {
             Readiness::None => None,
             Readiness::State => {
-                let path = self.cfg.global.data_dir.join("state.json");
+                let path = self.cfg.global.dir.join("state.json");
                 state::read_lenient(&path).and_then(|st| st.ready)
             }
         };
@@ -2666,7 +2670,7 @@ impl<'c> Supervisor<'c> {
 
 /// Acquire the single-instance PID lock (RAII; released on drop).
 fn lock_acquire(cfg: &Config) -> Result<crate::lock::LockGuard> {
-    crate::lock::acquire(&cfg.global.data_dir, &cfg.global.app)
+    crate::lock::acquire(&cfg.global.dir, &cfg.global.app)
 }
 
 /// Become a child subreaper so re-parented grandchildren are reaped by us (PID 1
@@ -2694,7 +2698,7 @@ fn orphan_pid(st_pid: Option<u32>) -> Option<Pid> {
 fn startup_cleanup(cfg: &Config) -> Result<()> {
     // Lenient: boot path — a corrupt state.json means no orphan to reap, not a
     // dead supervisor.
-    let state_path = cfg.global.data_dir.join("state.json");
+    let state_path = cfg.global.dir.join("state.json");
     if let Some(st) = state::read_lenient(&state_path)
         && let Some(st_pid) = st.pid
     {
@@ -2852,7 +2856,7 @@ mod tests {
     fn child_env_strips_lode_and_injects() {
         let host = vec![
             ("LODE_MANIFEST".to_owned(), "https://x".to_owned()),
-            ("LODE_DATA_DIR".to_owned(), "/old".to_owned()),
+            ("LODE_DIR".to_owned(), "/old".to_owned()),
             ("PATH".to_owned(), "/usr/bin".to_owned()),
             ("HOME".to_owned(), "/root".to_owned()),
         ];
@@ -2871,12 +2875,12 @@ mod tests {
         // ...and host env passes through.
         assert_eq!(map.get("PATH").map(String::as_str), Some("/usr/bin"));
         assert_eq!(map.get("HOME").map(String::as_str), Some("/root"));
-        // Introspection vars are injected (LODE_DATA_DIR re-set to the resolved dir).
+        // Introspection vars are injected (LODE_DIR re-set to the resolved dir).
         assert_eq!(
             map.get("LODE_ACTIVE_VERSION").map(String::as_str),
             Some("1.2.3")
         );
-        assert_eq!(map.get("LODE_DATA_DIR").map(String::as_str), Some("/data"));
+        assert_eq!(map.get("LODE_DIR").map(String::as_str), Some("/data"));
         assert_eq!(map.get("LODE_INSTANCE").map(String::as_str), Some("inst-9"));
     }
 
@@ -2889,7 +2893,7 @@ mod tests {
         let defined: BTreeMap<String, String> = [
             ("NODE_ENV".to_owned(), "production".to_owned()), // host has it → host wins
             ("APP_FLAG".to_owned(), "on".to_owned()),         // host lacks it → default applied
-            ("LODE_DATA_DIR".to_owned(), "/hijack".to_owned()), // lode's var still wins below
+            ("LODE_DIR".to_owned(), "/hijack".to_owned()),    // lode's var still wins below
         ]
         .into_iter()
         .collect();
@@ -2897,7 +2901,7 @@ mod tests {
 
         // Exactly one entry per key — defaults fill gaps, they don't duplicate.
         assert_eq!(env.iter().filter(|(k, _)| k == "NODE_ENV").count(), 1);
-        assert_eq!(env.iter().filter(|(k, _)| k == "LODE_DATA_DIR").count(), 1);
+        assert_eq!(env.iter().filter(|(k, _)| k == "LODE_DIR").count(), 1);
 
         let map: std::collections::HashMap<_, _> = env.into_iter().collect();
         // Inherited host env wins over a same-named [env] default (12-factor `-e`).
@@ -2905,7 +2909,7 @@ mod tests {
         // A [env] key the host lacks is applied as the default.
         assert_eq!(map.get("APP_FLAG").map(String::as_str), Some("on"));
         // lode's injected vars still win over any [env] of the same name.
-        assert_eq!(map.get("LODE_DATA_DIR").map(String::as_str), Some("/data"));
+        assert_eq!(map.get("LODE_DIR").map(String::as_str), Some("/data"));
     }
 
     #[test]
@@ -3731,12 +3735,12 @@ mod tests {
 
     // --- PID-1 hardening: best-effort state writes + bootstrap signal handling ---
 
-    /// A minimal config rooted at `data_dir` for supervisor-level tests.
-    fn test_config(data_dir: PathBuf) -> Config {
+    /// A minimal config rooted at `dir` for supervisor-level tests.
+    fn test_config(dir: PathBuf) -> Config {
         Config {
             global: config::Global {
                 app: "myapp".to_owned(),
-                data_dir,
+                dir,
                 log_level: "info".to_owned(),
             },
             update: config::Update {
@@ -3763,7 +3767,7 @@ mod tests {
             command: config::Command {
                 run: Some("./app".to_owned()),
                 exec: Some("./app".to_owned()),
-                workdir: "{dir}".to_owned(),
+                workdir: crate::config::DEFAULT_WORKDIR_PLACEHOLDER.to_owned(),
             },
             runtime: config::Runtime {
                 runtime: None,
@@ -3807,11 +3811,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lode-badstate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        // data_dir is a regular FILE, so every state.json read/write under it fails
+        // dir is a regular FILE, so every state.json read/write under it fails
         // (ENOTDIR) — unlike a chmod-only read-only dir, this fails for root too.
-        let data_dir = dir.join("notadir");
-        std::fs::write(&data_dir, b"not a directory").unwrap();
-        let cfg = test_config(data_dir);
+        let bad = dir.join("notadir");
+        std::fs::write(&bad, b"not a directory").unwrap();
+        let cfg = test_config(bad);
         let mut sup = Supervisor::new(&cfg, test_target(&dir), None);
 
         // Best-effort: a failing read+write logs and returns — never an Err/panic.
@@ -3903,14 +3907,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("lode-badmtime-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let data_dir = dir.join("notadir");
-        std::fs::write(&data_dir, b"not a directory").unwrap();
-        let mut cfg = test_config(data_dir.clone());
-        cfg.config_path = Some(data_dir.join("lode.toml"));
+        let bad = dir.join("notadir");
+        std::fs::write(&bad, b"not a directory").unwrap();
+        let mut cfg = test_config(bad.clone());
+        cfg.config_path = Some(bad.join("lode.toml"));
         let mut sup = Supervisor::new(&cfg, test_target(&dir), None);
 
         // The probe itself errors (precondition for the regression).
-        assert!(state::mtime(&data_dir.join("state.json")).is_err());
+        assert!(state::mtime(&bad.join("state.json")).is_err());
 
         assert!(sup.poll_state().is_none(), "poll_state must skip the tick");
         assert!(

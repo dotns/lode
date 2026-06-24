@@ -3,7 +3,7 @@
 
 [global]
 app      = "demo-go"
-data_dir = "/srv/lode"    # MUST be a persistent volume for the version cache + state.json
+dir = "/srv/lode"    # MUST be a persistent volume for the version cache + state.json
 
 [update]
 github = "owner/demo-go"            # GitHub Releases … (or: manifest = "https://…/manifest.json")

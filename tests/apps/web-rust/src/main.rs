@@ -9,7 +9,7 @@
 //!     else the baked `BUILD_VERSION` (see build.rs)
 //!   * graceful stop: on SIGTERM / SIGINT it drains and `exit(0)` sub-second,
 //!     well within `supervise.stop_timeout` (design §8)
-//!   * optional readiness handshake: when `LODE_DATA_DIR` is set it atomically
+//!   * optional readiness handshake: when `LODE_DIR` is set it atomically
 //!     (temp + rename) writes `state.json` field `ready = $LODE_INSTANCE`,
 //!     preserving lode's own fields — this is what makes `readiness = "state"`
 //!     work (design §7/§8, integration §2)
@@ -115,7 +115,7 @@ fn main() {
     }
 
     let instance = env::var("LODE_INSTANCE").unwrap_or_else(|_| "none".to_string());
-    let data_dir = env::var("LODE_DATA_DIR").unwrap_or_else(|_| "unset".to_string());
+    let data_dir = env::var("LODE_DIR").unwrap_or_else(|_| "unset".to_string());
     log(&format!(
         "starting version={version} pid={} instance={instance} data_dir={data_dir} addr={addr}",
         process::id()
@@ -181,9 +181,9 @@ fn handle(mut stream: TcpStream, version: &str) {
 /// When `supervise.readiness = "state"`, lode marks us running/good only after
 /// we self-report ready. We atomically (temp + rename) set `state.json` field
 /// `ready = $LODE_INSTANCE`, preserving lode's own fields. No-op when
-/// `LODE_DATA_DIR` is unset (standalone runs).
+/// `LODE_DIR` is unset (standalone runs).
 fn announce_ready() {
-    let data_dir = match env::var("LODE_DATA_DIR") {
+    let data_dir = match env::var("LODE_DIR") {
         Ok(d) if !d.is_empty() => d,
         _ => return,
     };

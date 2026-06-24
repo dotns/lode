@@ -51,7 +51,7 @@ require_signature = "enforce"
 ```
 
 > 首次运行若 `/srv/lode/lode.toml` 不存在,lode 会在那里生成一份起始配置并提示你填写来源。
-> 用 `LODE_DATA_DIR` 改基目录。若改用 `--manifest`/`--github`(或 `LODE_*`)则无需配置文件。
+> 用 `LODE_DIR` 改基目录。若改用 `--manifest`/`--github`(或 `LODE_*`)则无需配置文件。
 
 要构建你自己的应用镜像,把 lode 叠到任意基础镜像上:
 
@@ -73,7 +73,7 @@ zzci/ubase         ────► │  lode  (静态 Rust 二进制)           
                                              │  (远程;从不落本地)
                               选择平台 ──────┤── 下载 → 校验 sha256 + ed25519
                                              ▼
-                    $DATA_DIR/versions/<ver>  ──(原子 rename)──► current
+                    $LODE_DIR/versions/<ver>  ──(原子 rename)──► current
                                              │
                                              ▼
               lode            → 执行 `run`  (受监督服务:自动更新 + 回滚)

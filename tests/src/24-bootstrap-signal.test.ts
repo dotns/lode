@@ -123,7 +123,7 @@ test("SIGTERM during the bootstrap download is honored (handler installed before
   const lode = h.runLodeRaw([
     "--app",
     APP_NAME,
-    "--data-dir",
+    "--dir",
     h.dataDir,
     "--manifest",
     `${base}/manifest.json`,

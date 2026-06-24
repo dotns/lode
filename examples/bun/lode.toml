@@ -3,7 +3,7 @@
 
 [global]
 app      = "demo-bun"
-data_dir = "/srv/lode"    # MUST be a persistent volume (runtime cache + versions + state.json)
+dir = "/srv/lode"    # MUST be a persistent volume (runtime cache + versions + state.json)
 
 [update]
 github = "owner/demo-bun"           # GitHub Releases … (or: manifest = "https://…/manifest.json")

@@ -18,7 +18,7 @@ lode's root cargo gate never builds it.
 | `GET /healthz` | `200 ok` |
 | Version source | `LODE_ACTIVE_VERSION` (injected by lode) wins; else baked `BUILD_VERSION` |
 | Graceful stop | traps `SIGTERM`/`SIGINT`, drains, `exit(0)` sub-second (≤ ~50 ms) — well inside `supervise.stop_timeout` |
-| Readiness | when `LODE_DATA_DIR` is set, atomically writes `state.json` field `ready = $LODE_INSTANCE` (temp + rename, preserving lode's fields) → makes `readiness = "state"` work |
+| Readiness | when `LODE_DIR` is set, atomically writes `state.json` field `ready = $LODE_INSTANCE` (temp + rename, preserving lode's fields) → makes `readiness = "state"` work |
 | Bad mode | baked `BUILD_BAD=1` **or** runtime `LODE_APP_BAD=1` → `exit(1)` immediately on startup (crash within `health_grace`) |
 
 ## Build & run standalone
@@ -34,7 +34,7 @@ curl -s localhost:8080/healthz   # -> ok
 ./target/release/web-rust version
 
 # exercise the readiness write (writes ./state.json field "ready")
-LODE_DATA_DIR=. LODE_INSTANCE=demo-1 ./target/release/web-rust
+LODE_DIR=. LODE_INSTANCE=demo-1 ./target/release/web-rust
 ```
 
 ## Producing v0.0.1 / v0.0.2 / a crashing v0.0.3

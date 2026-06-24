@@ -36,7 +36,7 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
     // only the channel-`latest`-following resolution, so a tampered or replayed
     // catalog cannot silently roll us back; an explicit `--version` or `pin` is the
     // operator's deliberate choice and is never blocked.
-    let state_path = cfg.global.data_dir.join("state.json");
+    let state_path = cfg.global.dir.join("state.json");
     let prior = state::read(&state_path)?.unwrap_or_default();
     let floor = install::version_floor(prior.current.as_deref(), prior.last_good.as_deref());
 
@@ -78,7 +78,7 @@ pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
     // instead of having `current` flipped under them. The RMWs below re-read
     // under the shared `state.json.lock` flock (P2-14), so a concurrent
     // supervisor/app write is never clobbered.
-    let holder = lock::live_holder(&cfg.global.data_dir);
+    let holder = lock::live_holder(&cfg.global.dir);
     let st = state::read(&state_path)?.unwrap_or_default();
     let st = if supervisor_running(&st, holder) {
         // Hand off to the running supervisor via the app-owned request channel

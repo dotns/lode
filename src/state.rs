@@ -49,7 +49,7 @@ pub(crate) struct HistoryEntry {
     pub(crate) result: HistoryResult,
 }
 
-/// Contents of `$DATA_DIR/state.json`. Fields default to empty so a partial file
+/// Contents of `$LODE_DIR/state.json`. Fields default to empty so a partial file
 /// (or one written only by the app) still deserialises.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct State {

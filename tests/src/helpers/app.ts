@@ -17,9 +17,9 @@ export interface BuildOpts {
   exitCode?: number;
   /** Version to request for mode=update-on-exit. */
   target?: string;
-  /** service + readiness=state: defer the serving ready (-0) until $LODE_DATA_DIR/ready_ok exists. */
+  /** service + readiness=state: defer the serving ready (-0) until $LODE_DIR/ready_ok exists. */
   gate?: boolean;
-  /** service + readiness=state: defer the prepare ack (-2) until $LODE_DATA_DIR/prepare_ok exists. */
+  /** service + readiness=state: defer the prepare ack (-2) until $LODE_DIR/prepare_ok exists. */
   preGate?: boolean;
 }
 

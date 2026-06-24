@@ -15,7 +15,7 @@ use crate::state;
 /// Increment `restart_nonce` in `state.json` and report the new value. Writes
 /// through a locked stdout handle (the `println!` macro is denied workspace-wide).
 pub(crate) fn run(cfg: &Config) -> Result<()> {
-    let nonce = bump_nonce(&cfg.global.data_dir)?;
+    let nonce = bump_nonce(&cfg.global.dir)?;
 
     let mut out = std::io::stdout().lock();
     writeln!(out, "lode restart: requested (restart_nonce={nonce})")?;
@@ -26,8 +26,8 @@ pub(crate) fn run(cfg: &Config) -> Result<()> {
 /// atomically write it back — under the shared `state.json.lock` flock, so a
 /// concurrent supervisor or app RMW can never lose the bump (P2-14). Returns
 /// the new nonce.
-fn bump_nonce(data_dir: &Path) -> Result<u64> {
-    let path = data_dir.join("state.json");
+fn bump_nonce(dir: &Path) -> Result<u64> {
+    let path = dir.join("state.json");
     let state = state::locked_update(&path, |st| {
         st.restart_nonce = st.restart_nonce.saturating_add(1);
     })?;

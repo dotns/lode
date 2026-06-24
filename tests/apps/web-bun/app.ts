@@ -9,7 +9,7 @@
 //   * GET /version -> the app's own version (plain text); GET /healthz -> 200 ok
 //   * version: LODE_ACTIVE_VERSION (injected by lode) wins, else baked BUILD_VERSION
 //   * graceful stop: SIGTERM/SIGINT -> drain + exit(0) sub-second (< stop_timeout)
-//   * readiness: when LODE_DATA_DIR is set, atomically (temp + rename) writes
+//   * readiness: when LODE_DIR is set, atomically (temp + rename) writes
 //     state.json field ready = $LODE_INSTANCE, preserving lode's fields
 //   * bad mode: baked BUILD_BAD=1 or runtime LODE_APP_BAD=1 -> exit(1) on startup
 
@@ -74,16 +74,16 @@ const server = Bun.serve({
 
 log(
   `starting version=${version} pid=${process.pid} instance=${Bun.env.LODE_INSTANCE ?? "none"} ` +
-    `data_dir=${Bun.env.LODE_DATA_DIR ?? "unset"} addr=0.0.0.0:${server.port}`,
+    `data_dir=${Bun.env.LODE_DIR ?? "unset"} addr=0.0.0.0:${server.port}`,
 );
 
 // Readiness handshake (app -> lode). Once the port is bound we can serve, so
 // announce: write state.ready = LODE_INSTANCE atomically, preserving lode's
-// fields. No-op when LODE_DATA_DIR is unset (standalone runs).
+// fields. No-op when LODE_DIR is unset (standalone runs).
 announceReady();
 
 function announceReady(): void {
-  const dataDir = Bun.env.LODE_DATA_DIR;
+  const dataDir = Bun.env.LODE_DIR;
   if (!dataDir) return;
   const inst = Bun.env.LODE_INSTANCE ?? "";
   const statePath = join(dataDir, "state.json");

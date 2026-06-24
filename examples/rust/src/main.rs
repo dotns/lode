@@ -9,7 +9,7 @@
 //!                update/rollback is seamless; (b) ACTIVE: the endpoints below call
 //!                request_update / reboot / hold / release.
 //!
-//! Standalone (no lode): LODE_DATA_DIR is unset, so `Lode::from_env()` is `None`
+//! Standalone (no lode): LODE_DIR is unset, so `Lode::from_env()` is `None`
 //! and the request endpoints reply 503 — you still get a working server.
 
 // The single-file SDK, referenced in place (no copy). It needs serde + serde_json
@@ -59,7 +59,7 @@ fn main() {
         }
     };
 
-    // The SDK handle — None when run standalone (LODE_DATA_DIR unset).
+    // The SDK handle — None when run standalone (LODE_DIR unset).
     let lode = Lode::from_env().ok();
 
     // UPGRADE (passive): graceful stop. The SDK flips a flag on SIGTERM/SIGINT; the
@@ -71,7 +71,7 @@ fn main() {
         version(),
         process::id(),
         lode::instance_id(),
-        env::var("LODE_DATA_DIR").unwrap_or_else(|_| "unset".into()),
+        env::var("LODE_DIR").unwrap_or_else(|_| "unset".into()),
     ));
 
     // UPGRADE (passive): announce readiness so lode (readiness="state") commits us.
@@ -107,7 +107,7 @@ fn handle(req: tiny_http::Request, lode: Option<&Lode>) {
             Ok(()) => (200, format!("{ok}\n")),
             Err(e) => (503, format!("{e}\n")),
         },
-        None => (503, "not running under lode (LODE_DATA_DIR unset)\n".to_string()),
+        None => (503, "not running under lode (LODE_DIR unset)\n".to_string()),
     };
 
     let (code, ctype, body) = match (method.as_str(), path.as_str()) {
@@ -115,7 +115,10 @@ fn handle(req: tiny_http::Request, lode: Option<&Lode>) {
         ("GET", "/version") => (200, "text/plain; charset=utf-8", format!("{}\n", version())),
         ("GET", "/env") => (200, "application/json", env_json()), // READ
         ("POST", "/upgrade") => {
-            let (c, b) = ask(&|l| l.request_update("latest"), "requested update to latest");
+            let (c, b) = ask(
+                &|l| l.request_update("latest"),
+                "requested update to latest",
+            );
             (c, "text/plain; charset=utf-8", b)
         }
         ("POST", "/restart") => {
@@ -133,8 +136,8 @@ fn handle(req: tiny_http::Request, lode: Option<&Lode>) {
         _ => (404, "text/plain; charset=utf-8", "not found\n".to_string()),
     };
 
-    let header =
-        tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes()).expect("static header");
+    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
+        .expect("static header");
     let resp = tiny_http::Response::from_string(body)
         .with_status_code(code)
         .with_header(header);
@@ -146,7 +149,7 @@ fn env_json() -> String {
     json!({
         "version": version(),                          // LODE_ACTIVE_VERSION or baked
         "instance": lode::instance_id(),               // unique id per launch
-        "dataDir": env::var("LODE_DATA_DIR").ok(),     // where state.json lives
+        "dataDir": env::var("LODE_DIR").ok(),     // where state.json lives
         "port": env::var("PORT").unwrap_or_else(|_| "8080".into()), // host env passthrough
         "greeting": env::var("APP_GREETING").ok(),     // operator [env] / host -e
     })

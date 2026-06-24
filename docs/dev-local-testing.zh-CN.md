@@ -12,10 +12,10 @@
 
 ```bash
 # 把 ./myapp 作为一个版本装进临时 data 目录,并激活
-lode-cli --data-dir /tmp/lode-dev seed ./myapp --version 1.0.0
+lode-cli --dir /tmp/lode-dev seed ./myapp --version 1.0.0
 
 # 运行它 —— 裸 lode,完全离线,无需配源
-lode --data-dir /tmp/lode-dev
+lode --dir /tmp/lode-dev
 ```
 
 `seed` 默认激活该版本;在全新目录里还会 scaffold 一份**无源 `lode.toml`**(这样裸 `lode`
@@ -29,7 +29,7 @@ lode --data-dir /tmp/lode-dev
 ## `lode-cli seed`
 
 ```
-lode-cli [--data-dir DIR] [--app NAME] seed <APP_BIN> [选项]
+lode-cli [--dir DIR] [--app NAME] seed <APP_BIN> [选项]
 
   <APP_BIN>        本地可执行文件,或 .tar.gz / .zip / .gz 压缩包
   --version VER    版本 id(默认 0.0.0-dev),用作 versions/<VER> 的键。用 semver,
@@ -49,7 +49,7 @@ seed **不会**去探测归档里哪个是"主程序" —— 要启动嵌套在 
 
 ```bash
 # myapp-1.0.0.tar.gz 里含  bin/myapp  (以及其它文件)
-lode-cli --data-dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
+lode-cli --dir /tmp/lode-dev --app myapp seed ./myapp-1.0.0.tar.gz \
     --version 1.0.0
 ```
 
@@ -93,11 +93,11 @@ lode 只在两个地方联网,这里都被避开了:
 对同一个 data 目录每个版本各 seed 一次,再用 `lode-cli` 驱动:
 
 ```bash
-lode-cli --data-dir /tmp/lode-dev seed ./myapp-v1 --version 1.0.0
-lode-cli --data-dir /tmp/lode-dev seed ./myapp-v2 --version 1.1.0 --no-activate
+lode-cli --dir /tmp/lode-dev seed ./myapp-v1 --version 1.0.0
+lode-cli --dir /tmp/lode-dev seed ./myapp-v2 --version 1.1.0 --no-activate
 
-lode-cli --data-dir /tmp/lode-dev versions          # 两个都列出;* 标记 current
-lode-cli --data-dir /tmp/lode-dev rollback --version 1.0.0   # 刻意降级,纯本地,不 fetch
+lode-cli --dir /tmp/lode-dev versions          # 两个都列出;* 标记 current
+lode-cli --dir /tmp/lode-dev rollback --version 1.0.0   # 刻意降级,纯本地,不 fetch
 ```
 
 ## 注意

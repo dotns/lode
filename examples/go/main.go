@@ -5,14 +5,14 @@
 // under lode:
 //
 //  1. START   — bind $PORT and serve; lode runs this binary as its child.
-//  2. READ    — read the env lode injects (lode.ActiveVersion / LODE_DATA_DIR /
+//  2. READ    — read the env lode injects (lode.ActiveVersion / LODE_DIR /
 //     lode.InstanceID) plus passthrough host env (PORT, operator [env]).
 //  3. UPGRADE — a) PASSIVE: MarkReady() + lode.OnTerminate(), so lode's update/
 //     rollback is seamless;
 //     b) ACTIVE:  the endpoints below call RequestUpdate / Reboot /
 //     Hold / Release.
 //
-// Standalone (no lode): LODE_DATA_DIR is unset, so lode.FromEnv() errors and the
+// Standalone (no lode): LODE_DIR is unset, so lode.FromEnv() errors and the
 // request endpoints reply 503 — you still get a working server.
 package main
 
@@ -65,13 +65,13 @@ func main() {
 	port := env("PORT", "8080")
 	addr := ":" + port
 
-	// The SDK handle — nil when run standalone (LODE_DATA_DIR unset).
+	// The SDK handle — nil when run standalone (LODE_DIR unset).
 	client, _ := lode.FromEnv()
 
 	// ask runs an SDK request, or replies 503 when not supervised by lode.
 	ask := func(w http.ResponseWriter, fn func(*lode.Client) error, ok string) {
 		if client == nil {
-			http.Error(w, "not running under lode (LODE_DATA_DIR unset)", http.StatusServiceUnavailable)
+			http.Error(w, "not running under lode (LODE_DIR unset)", http.StatusServiceUnavailable)
 			return
 		}
 		if err := fn(client); err != nil {
@@ -90,7 +90,7 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"version":  version(),         // LODE_ACTIVE_VERSION or baked
 			"instance": lode.InstanceID(), // unique id per launch
-			"dataDir":  os.Getenv("LODE_DATA_DIR"),
+			"dataDir":  os.Getenv("LODE_DIR"),
 			"port":     port,                      // host env passthrough
 			"greeting": os.Getenv("APP_GREETING"), // operator [env] / host -e
 		})
@@ -118,7 +118,7 @@ func main() {
 		os.Exit(1)
 	}
 	logf("starting version=%s pid=%d instance=%s data_dir=%s addr=%s",
-		version(), os.Getpid(), env("LODE_INSTANCE", "none"), env("LODE_DATA_DIR", "unset"), addr)
+		version(), os.Getpid(), env("LODE_INSTANCE", "none"), env("LODE_DIR", "unset"), addr)
 
 	// UPGRADE (passive): graceful stop — on SIGTERM/SIGINT drain and exit(0) within
 	// supervise.stop_timeout (the SDK calls os.Exit(0) after the handler returns).

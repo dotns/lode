@@ -27,7 +27,7 @@ test("running lode.toml edit notifies the app (config_generation) without restar
   const config = (marker: string) => `
 [global]
 app = "${h.server.name}"
-data_dir = "${h.dataDir}"
+dir = "${h.dataDir}"
 
 [update]
 manifest = "${h.server.manifestUrl}"
