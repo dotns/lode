@@ -9,12 +9,12 @@
 use thiserror::Error;
 
 /// Crate-wide result alias.
-pub(crate) type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// Every fallible operation in lode surfaces as one of these.
 #[derive(Debug, Error)]
 #[allow(dead_code)] // not every domain variant is constructed on all build paths
-pub(crate) enum Error {
+pub enum Error {
     /// Configuration could not be resolved or failed validation.
     #[error("config: {0}")]
     Config(String),

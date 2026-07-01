@@ -104,6 +104,9 @@ pub(crate) fn install(
 /// command comes from `[command]` (the sourceless scaffold derives one from the
 /// same filename). With `activate`, also flips `current` and records
 /// `current`/`last_good` in `state.json`. Backs `lode-cli seed`.
+// cli-only: the offline `seed` command is the sole caller (the `Engine` facade
+// never seeds), so it is gated out of the `--features engine` library.
+#[cfg(feature = "cli")]
 pub(crate) fn seed_local(cfg: &Config, version: &str, source: &Path, activate: bool) -> Result<()> {
     validate_id("version", version)?;
     if !source.is_file() {

@@ -13,22 +13,36 @@
 //! removes the file on drop, so a normal exit (or a `?` unwinding out of
 //! `serve`) releases it.
 
-use std::fs::{self, File};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 
 use nix::errno::Errno;
 use nix::sys::signal::kill;
 use nix::unistd::Pid;
 
+// The acquire half (`acquire` + `LockGuard`) is supervisor-only — bare `lode`'s
+// single-instance lock. Under `--features engine` only the read-only
+// `live_holder` probe is live (it backs `commands/update.rs`'s running-instance
+// detection), so its supervisor-exclusive imports are gated to keep the engine
+// build warning-clean.
+#[cfg(feature = "supervisor")]
+use std::fs::File;
+#[cfg(feature = "supervisor")]
+use std::io::Write as _;
+#[cfg(feature = "supervisor")]
+use std::path::PathBuf;
+
+#[cfg(feature = "supervisor")]
 use crate::error::{Error, Result};
 
 /// RAII handle for the held PID lock; removes `lode.pid` on drop.
+#[cfg(feature = "supervisor")]
 #[derive(Debug)]
 pub(crate) struct LockGuard {
     path: PathBuf,
 }
 
+#[cfg(feature = "supervisor")]
 impl Drop for LockGuard {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -40,6 +54,7 @@ impl Drop for LockGuard {
 /// Returns [`Error::Lock`] when another live lode already holds it. A stale lock
 /// (holder dead, file corrupt, or recording our own pid) is reclaimed
 /// transparently.
+#[cfg(feature = "supervisor")]
 pub(crate) fn acquire(dir: &Path, app: &str) -> Result<LockGuard> {
     fs::create_dir_all(dir)?;
     let path = dir.join("lode.pid");
@@ -88,6 +103,7 @@ pub(crate) fn live_holder(dir: &Path) -> Option<u32> {
 /// is our own: we don't hold the lock yet, so the file can only be a leftover
 /// from a dead holder whose pid we inherited (PID reuse / PID-1 restart), and
 /// probing it with `kill` would always report "alive" because it is us.
+#[cfg(feature = "supervisor")]
 fn reclaim_if_stale(path: &Path) -> Result<bool> {
     match read_pid(path) {
         Some(pid) if Some(pid.as_raw()) == own_pid() => {
@@ -114,6 +130,7 @@ fn reclaim_if_stale(path: &Path) -> Result<bool> {
 }
 
 /// Remove a stale lock file, tolerating a concurrent removal (`NotFound`).
+#[cfg(feature = "supervisor")]
 fn remove_stale(path: &Path) -> Result<bool> {
     match fs::remove_file(path) {
         Ok(()) => Ok(true),
@@ -141,6 +158,7 @@ fn own_pid() -> Option<i32> {
 }
 
 /// Human-readable "already running" message, naming the holder pid when known.
+#[cfg(feature = "supervisor")]
 fn already_held_message(path: &Path) -> String {
     read_pid(path).map_or_else(
         || format!("lock {} is held by another instance", path.display()),

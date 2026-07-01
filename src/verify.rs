@@ -31,6 +31,10 @@ pub(crate) struct Artifact<'a> {
     pub(crate) name: &'a str,
     pub(crate) version: &'a str,
     /// On-disk path to hash (authoring only); not part of the signed message.
+    /// Read only by `authoring` (cli); under `--features engine` the artifact is
+    /// built to verify a download, never to hash a local file, so it is
+    /// constructed-but-unread there.
+    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
     pub(crate) path: &'a str,
     /// Manifest-published bare-run launch override (signed; empty when absent).
     pub(crate) run: Option<&'a str>,

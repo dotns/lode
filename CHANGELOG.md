@@ -5,6 +5,36 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.0] - 2026-07-01
+
+### Added
+
+- **lode is now consumable as a library.** The crate is split behind Cargo features
+  (`default = ["cli"]`, plus `engine`, `supervisor = ["engine"]`, `cli = ["supervisor"]`) so
+  downstream code can depend on lode's internals without pulling in the CLI:
+  - **Layer 0 — opt-in process setup.** The four process-global installs (the rustls crypto
+    provider, core-dump suppression, the tracing subscriber, and the panic hook) now live
+    behind `InitOptions`; a library consumer gets none of them unless it opts in. The `lode`
+    / `lode-cli` binary still installs all four, in the same order, at the same time.
+  - **Layer 1 — `Engine` facade.** A public, clap-free / signal-free `Engine`
+    (`status` / `check` / `install` / `rollback` / `versions` / `restart` /
+    `resolve_target` / `ensure_runtime`) over the version + runtime machinery, moved into a
+    new `src/engine.rs`. Public `Config::from_toml` + `ConfigBuilder` construct configuration
+    without the clap layer. `--features engine` builds with neither clap nor signal-hook.
+  - **Layer 2 — embeddable supervisor.** Public `Supervisor` / `serve_embedded` /
+    `exec_passthrough` plus a `SignalSource` abstraction with **owned** (signal-hook) and
+    **host-owned** (the caller feeds signal events) modes; the subreaper and the
+    single-instance flock are skippable via `SuperviseOptions::host_owned()`, so a host
+    process can embed the supervise loop without lode taking over process-global signal
+    handling.
+
+### Unchanged
+
+- **Zero runtime-behavior change to the `lode` / `lode-cli` binary** — launch, supervise,
+  update, rollback, and signal handling are byte-for-byte identical. Verified across 203 unit
+  tests, 36 e2e scenarios, the docker-compose integration test, and the full `--features`
+  build matrix (`default` / `engine` / `supervisor`).
+
 ## [0.0.10] - 2026-06-24
 
 ### Added

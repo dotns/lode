@@ -12,6 +12,8 @@
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
+// `SystemTime` backs only the supervisor-only `mtime` poll.
+#[cfg(feature = "supervisor")]
 use std::time::SystemTime;
 
 use nix::fcntl::{Flock, FlockArg};
@@ -181,6 +183,9 @@ pub(crate) fn locked_update(path: &Path, edit: impl FnOnce(&mut State)) -> Resul
 /// read-only disk) degrades to the unserialised RMW with a warning, a corrupt
 /// `state.json` is quarantined by [`read_lenient`] and the edit starts from
 /// defaults, and a write failure is logged and swallowed.
+// supervisor-only: the keep-alive supervise loop is the sole caller; the engine
+// layer's command paths use the strict `locked_update` instead.
+#[cfg(feature = "supervisor")]
 pub(crate) fn locked_update_lenient(path: &Path, edit: impl FnOnce(&mut State)) {
     let lock = match lock_exclusive(path) {
         Ok(lock) => Some(lock),
@@ -227,6 +232,8 @@ fn lock_path(path: &Path) -> PathBuf {
 
 /// Last-modified time of `state.json`, or `None` if it is absent. lode polls
 /// this to notice app-written requests without an out-of-band signal (§7).
+// supervisor-only: only the supervise loop's mtime-poll consults it (§7).
+#[cfg(feature = "supervisor")]
 pub(crate) fn mtime(path: &Path) -> Result<Option<SystemTime>> {
     match std::fs::metadata(path) {
         Ok(meta) => Ok(Some(meta.modified()?)),

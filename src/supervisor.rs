@@ -26,7 +26,6 @@
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
-use std::ffi::OsStr;
 use std::os::raw::c_int;
 use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
@@ -39,11 +38,20 @@ use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use signal_hook::iterator::Signals;
 
+#[cfg(feature = "cli")]
 use crate::cli::Globals;
-use crate::config::{self, Config, Policy, Readiness, RestartPolicy};
+// The `config` module alias backs the cli `serve` wrapper's `config::resolve`
+// (and the test fixtures). It is unused on the embeddable `--features supervisor`
+// path, so gate it to keep that build warning-clean.
+#[cfg(any(feature = "cli", test))]
+use crate::config;
+use crate::config::{Config, Policy, Readiness, RestartPolicy};
+use crate::engine::{
+    Target, ensure_runtime, locate, required_asset, resolve_target, version_installed,
+};
 use crate::error::{Error, Result};
 use crate::state::{self, HistoryEntry, HistoryResult, State, Status};
-use crate::{download, idval, install, manifest};
+use crate::{download, install, manifest};
 
 /// Supervise-loop tick. Bounds signal-forwarding and child-exit latency while
 /// leaving headroom for the C2 state-poll / update-observation on the same cadence.
@@ -69,44 +77,140 @@ enum Outcome {
     Reload,
 }
 
-/// Run the app as a supervised service (bare `lode`). Holds the single-instance
-/// lock across config reloads: each run supervises the app until graceful shutdown
-/// (→ return) or a `lode.toml`-change recovery (→ re-resolve config and re-run).
-/// Returns the child's exit code on shutdown.
+/// Ownership knobs for an embedded supervise run ([`serve_embedded`]).
+///
+/// The signal *source* is chosen by which [`SignalSource`] the caller passes;
+/// these two flags decide whether lode takes over the remaining process-global
+/// duties.
+#[derive(Debug, Clone, Copy)]
+pub struct SuperviseOptions {
+    /// Become a child subreaper (PID-1 init duty), so re-parented grandchildren
+    /// are reaped by us. The bare-`lode` binary sets this; a host that is not
+    /// PID 1 / owns its own reaping leaves it off.
+    pub set_subreaper: bool,
+    /// Acquire the single-instance flock lock (`lode.pid`) for the run. The binary
+    /// sets this; a host that owns its own single-instance guarantee leaves it off.
+    pub acquire_lock: bool,
+}
+
+impl SuperviseOptions {
+    /// The bare-`lode` binary defaults: lode sets the subreaper and holds the
+    /// single-instance lock (pair with an [`OwnedSignalSource`]).
+    #[must_use]
+    pub const fn owned() -> Self {
+        Self {
+            set_subreaper: true,
+            acquire_lock: true,
+        }
+    }
+
+    /// Host-owned defaults: the host owns reaping and single-instance (pair with a
+    /// [`ChannelSignalSource`] so the host owns signal dispositions too).
+    #[must_use]
+    pub const fn host_owned() -> Self {
+        Self {
+            set_subreaper: false,
+            acquire_lock: false,
+        }
+    }
+}
+
+/// Run the app as a supervised service (bare `lode`). A thin wrapper over
+/// [`serve_core`]: resolve config from the parsed globals, install the OWNED
+/// (signal-hook) signal source with lode's standard set, and drive the loop with
+/// the binary defaults (subreaper + single-instance lock), re-resolving from the
+/// globals on a `lode.toml`-change reload. Behaviour is identical to the pre-seam
+/// loader: `set_subreaper` + `flock` + `signal_hook` registration + the same loop.
+#[cfg(feature = "cli")]
 pub(crate) fn serve(globals: &Globals) -> Result<ExitCode> {
-    set_subreaper();
-    let mut cfg = config::resolve(globals)?;
-    let _lock = lock_acquire(&cfg)?;
-    // Install the signal handlers ONCE, before any bootstrap work: resolve/install
+    let cfg = config::resolve(globals)?;
+    // Install the signal handlers ONCE (before any bootstrap work): resolve/install
     // and the runtime fetch may download for minutes, and as PID 1 an unhandled
     // SIGTERM is simply ignored — `docker stop` would hang until the SIGKILL.
-    let mut signals = Signals::new(registration_set(
-        &forward_signals(&cfg.signals.forward),
-        cfg.signals.restart.as_deref().and_then(parse_signal),
-    ))
-    .map_err(|e| Error::Process(format!("install signal handlers: {e}")))?;
+    let mut signals = OwnedSignalSource::new(&cfg)?;
+    serve_core(cfg, &mut signals, SuperviseOptions::owned(), |_cfg| {
+        // A paused app whose `lode.toml` was edited: re-resolve from the globals
+        // (CLI/env layer included) so a reload behaves exactly as the loader did.
+        config::resolve(globals)
+    })
+}
+
+/// Embeddable supervise entry (Globals-free).
+///
+/// Drives the same supervise loop the bare-`lode` binary uses, reading signal
+/// events from the injected `signals` source and gating the subreaper /
+/// single-instance lock on `opts`. On a `lode.toml`-change reload it re-reads
+/// `cfg.config_path` via [`Config::from_toml`] (a file-less config keeps the
+/// current one). A host that owns its own process —
+/// pass a [`ChannelSignalSource`] (via [`signal_channel`]) and
+/// [`SuperviseOptions::host_owned`] — gets the full update/rollback/readiness
+/// machinery without lode touching global signals, the subreaper, or the flock.
+///
+/// # Errors
+/// Propagates a single-instance lock failure (when `opts.acquire_lock`) and any
+/// fatal bootstrap error (config resolution, version resolution) — exactly as the
+/// loader path does.
+pub fn serve_embedded(
+    cfg: Config,
+    signals: &mut dyn SignalSource,
+    opts: SuperviseOptions,
+) -> Result<ExitCode> {
+    serve_core(cfg, signals, opts, reload_from_config_path)
+}
+
+/// Reload config for the embeddable path: re-read the `lode.toml` at
+/// `cfg.config_path` (preserving the path so further reloads — and the running-app
+/// `state.config_generation` notification — keep working). A file-less config
+/// (no path) re-attempts with the same config unchanged.
+fn reload_from_config_path(cfg: &Config) -> Result<Config> {
+    let Some(path) = cfg.config_path.as_deref() else {
+        return Ok(cfg.clone());
+    };
+    let text = std::fs::read_to_string(path)?;
+    let mut next = Config::from_toml(&text)?;
+    next.config_path = Some(path.to_path_buf());
+    Ok(next)
+}
+
+/// The shared supervise loop behind both [`serve`] and [`serve_embedded`]. Holds
+/// the single-instance lock (when `opts.acquire_lock`) across config reloads: each
+/// run supervises the app until graceful shutdown (→ return the child's exit code)
+/// or a `lode.toml`-change recovery (→ `reload` the config and re-run). Reads all
+/// signal events from the injected `signals` source; sets the subreaper / acquires
+/// the lock only as `opts` directs.
+fn serve_core(
+    mut cfg: Config,
+    signals: &mut dyn SignalSource,
+    opts: SuperviseOptions,
+    mut reload: impl FnMut(&Config) -> Result<Config>,
+) -> Result<ExitCode> {
+    if opts.set_subreaper {
+        set_subreaper();
+    }
+    // Held for the whole run (across reloads); dropped on return releases the lock.
+    let _lock = opts.acquire_lock.then(|| lock_acquire(&cfg)).transpose()?;
     loop {
         startup_cleanup(&cfg)?;
-        if let Some(code) = bootstrap_terminated(&mut signals, &cfg) {
+        if let Some(code) = bootstrap_terminated(signals, &cfg) {
             return Ok(code);
         }
         let target = resolve_target(&cfg)?;
         install::switch_current(&cfg, &target.version)?;
-        if let Some(code) = bootstrap_terminated(&mut signals, &cfg) {
+        if let Some(code) = bootstrap_terminated(signals, &cfg) {
             return Ok(code);
         }
         let runtime_dir = ensure_runtime(&cfg)?;
-        if let Some(code) = bootstrap_terminated(&mut signals, &cfg) {
+        if let Some(code) = bootstrap_terminated(signals, &cfg) {
             return Ok(code);
         }
 
         let mut supervisor = Supervisor::new(&cfg, target, runtime_dir);
-        match supervisor.run(&mut signals)? {
+        match supervisor.run(signals)? {
             Outcome::Exit(code) => return Ok(code),
-            // A paused app whose `lode.toml` was edited: re-resolve and re-attempt.
+            // A paused app whose `lode.toml` was edited: reload and re-attempt.
             // An invalid edit keeps the previous config (lode stays alive, awaits
             // another edit) rather than taking down PID 1.
-            Outcome::Reload => match config::resolve(globals) {
+            Outcome::Reload => match reload(&cfg) {
                 Ok(next) => {
                     tracing::info!("lode.toml changed; reloaded config, re-attempting app");
                     cfg = next;
@@ -119,10 +223,17 @@ pub(crate) fn serve(globals: &Globals) -> Result<ExitCode> {
     }
 }
 
-/// CLI passthrough (`lode <args>`): validate the version, then `exec`-replace into
-/// `[command].exec` + `args`. On success it never returns (the process image is
-/// replaced); any failure surfaces as [`Error::Process`].
-pub(crate) fn exec_passthrough(cfg: &Config, args: &[String]) -> Result<Infallible> {
+/// CLI passthrough (`lode <args>`): `exec`-replace into `[command].exec` + `args`.
+///
+/// Validates the version, then `exec`-replaces this process. On success it never
+/// returns (the process image is replaced); any failure surfaces as
+/// [`Error::Process`]. Part of the embeddable surface — Globals-free, so a host
+/// can drive the passthrough directly.
+///
+/// # Errors
+/// Returns [`Error::Process`] (or a propagated resolve/runtime error) when the
+/// version cannot be resolved/prepared or the `exec` itself fails.
+pub fn exec_passthrough(cfg: &Config, args: &[String]) -> Result<Infallible> {
     let target = resolve_target(cfg)?;
     let runtime_dir = ensure_runtime(cfg)?;
     let instance = format!("{}-exec", std::process::id());
@@ -153,398 +264,6 @@ pub(crate) fn exec_passthrough(cfg: &Config, args: &[String]) -> Result<Infallib
     // `exec` only returns on failure; on success this process is replaced.
     let err = cmd.exec();
     Err(Error::Process(format!("exec {program}: {err}")))
-}
-
-// --- version resolution (shared by serve + exec) ---
-
-/// A resolved, installed version and what is needed to launch it: its dir plus
-/// the manifest-published `run`/`exec` launch overrides read back from the
-/// version marker (they take precedence over the live `[command]` values).
-struct Target {
-    version: String,
-    dir: PathBuf,
-    run: Option<String>,
-    exec: Option<String>,
-}
-
-/// Decide which version to run and load its launch metadata. Bootstraps the
-/// latest only when nothing usable is installed (design §4: never auto-jump
-/// versions).
-fn resolve_target(cfg: &Config) -> Result<Target> {
-    let version = determine_version(cfg)?;
-    locate(cfg, &version)
-}
-
-/// Build the launch [`Target`] for an already-installed `version` by reading its
-/// `.lode.json` marker (design §15). Errors if the version is not installed.
-/// Used by `serve` and by the C2 hot-update apply path.
-fn locate(cfg: &Config, version: &str) -> Result<Target> {
-    // Defensive: every caller already validated `version`, but it keys
-    // `versions/<version>` here too — re-check before the join.
-    idval::validate_id("version", version)?;
-    let m = install::marker(cfg, version)?;
-    let dir = cfg.global.dir.join("versions").join(version);
-    Ok(Target {
-        version: version.to_owned(),
-        dir,
-        run: m.run,
-        exec: m.exec,
-    })
-}
-
-/// Pick the version to launch: an operator `pin` wins (installing it if needed);
-/// otherwise the recorded `current` if still installed; otherwise the newest
-/// locally installed version; otherwise bootstrap the channel latest.
-fn determine_version(cfg: &Config) -> Result<String> {
-    if let Some(pin) = cfg.update.pin.as_deref() {
-        // A configured pin keys `versions/<pin>`; reject traversal before it is
-        // used to probe the installed set or bootstrap.
-        idval::validate_id("version", pin)?;
-        if version_installed(cfg, pin) {
-            return Ok(pin.to_owned());
-        }
-        return bootstrap(cfg, Some(pin));
-    }
-
-    // Lenient: this is the BOOT read — a corrupt state.json on the volume must
-    // degrade to "no recorded current" (warn + quarantine), never a crash-loop.
-    let state_path = cfg.global.dir.join("state.json");
-    if let Some(st) = state::read_lenient(&state_path)
-        && let Some(cur) = st.current.as_deref()
-        && version_installed(cfg, cur)
-    {
-        return Ok(cur.to_owned());
-    }
-
-    if let Some(v) = newest_installed(cfg)? {
-        return Ok(v);
-    }
-
-    bootstrap(cfg, None)
-}
-
-/// A version counts as installed once its `.lode.json` marker is present (install
-/// writes it last, atomically).
-fn version_installed(cfg: &Config, version: &str) -> bool {
-    cfg.global
-        .dir
-        .join("versions")
-        .join(version)
-        .join(".lode.json")
-        .is_file()
-}
-
-/// The newest installed version (semver-descending), or `None` if none.
-fn newest_installed(cfg: &Config) -> Result<Option<String>> {
-    let versions_dir = cfg.global.dir.join("versions");
-    let entries = match std::fs::read_dir(&versions_dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    let mut installed = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        if let Some(name) = entry.file_name().to_str()
-            && version_installed(cfg, name)
-        {
-            installed.push(name.to_owned());
-        }
-    }
-    installed.sort_by(|a, b| cmp_desc(a, b));
-    Ok(installed.into_iter().next())
-}
-
-/// Newest-first version order (valid semver by precedence ahead of non-semver).
-fn cmp_desc(a: &str, b: &str) -> std::cmp::Ordering {
-    match (semver::Version::parse(a), semver::Version::parse(b)) {
-        (Ok(x), Ok(y)) => y.cmp(&x),
-        (Ok(_), Err(_)) => std::cmp::Ordering::Less,
-        (Err(_), Ok(_)) => std::cmp::Ordering::Greater,
-        (Err(_), Err(_)) => b.cmp(a),
-    }
-}
-
-/// Bootstrap install: fetch the manifest, resolve a target (`requested` > pin >
-/// channel latest), download + verify + install it, and activate it (design §5).
-fn bootstrap(cfg: &Config, requested: Option<&str>) -> Result<String> {
-    install::gc(cfg)?;
-    let manifest = manifest::fetch(cfg)?;
-    if manifest.name != cfg.global.app {
-        return Err(Error::Manifest(format!(
-            "manifest name {:?} does not match configured app {:?}",
-            manifest.name, cfg.global.app
-        )));
-    }
-    // Verify the catalog signature if it carries one (verify-if-present); absence is
-    // fine — the per-artifact check binds each download.
-    install::verify_manifest_identity(cfg, &manifest)?;
-    // Anti-downgrade floor from any prior state (a clean bootstrap has none, so this
-    // never blocks the first install); it only gates a `latest`-following resolution.
-    // Lenient: a boot path (reached directly when pinned) — a corrupt state.json
-    // just means no floor, never a failed bootstrap.
-    let prior = state::read_lenient(&cfg.global.dir.join("state.json")).unwrap_or_default();
-    let floor = install::version_floor(prior.current.as_deref(), prior.last_good.as_deref());
-    let target = manifest::resolve_target(
-        &manifest,
-        &cfg.update.channel,
-        cfg.update.pin.as_deref(),
-        requested,
-        floor.as_deref(),
-    )?;
-    let entry = manifest::version_entry(&manifest, &target)?;
-    let asset = manifest::select_asset(entry, required_asset(cfg)?)?;
-    let (artifact, sha256) =
-        download::fetch_artifact(cfg, asset, &target, &manifest::allowed_hosts(cfg))?;
-    install::install(cfg, &target, asset, &artifact, &sha256)?;
-    install::switch_current(cfg, &target)?;
-    tracing::info!(version = target, "bootstrapped initial version");
-    Ok(target)
-}
-
-/// The operator-selected asset filename (`[update].asset`) — the source-agnostic
-/// selection key for both adapters. There is no platform fallback, so this errors
-/// clearly when unset rather than guessing an asset.
-fn required_asset(cfg: &Config) -> Result<&str> {
-    cfg.update.asset.as_deref().ok_or_else(|| {
-        Error::Config(
-            "no [update].asset configured — set the asset filename to install (source-adapters §3)"
-                .to_owned(),
-        )
-    })
-}
-
-// --- runtime resolution ([runtime], design §4) ---
-
-/// What to do about a configured `[runtime]` before launching the child.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RuntimePlan {
-    /// No `[runtime]` configured (self-contained binary).
-    NotNeeded,
-    /// The runtime is already on PATH — nothing to download.
-    AlreadyPresent,
-    /// A prior download left the runtime in `$LODE_DIR/runtime/` — reuse it (no
-    /// network). When `$LODE_DIR` is a persistent volume this makes the download a
-    /// one-time cost across restarts.
-    Cached,
-    /// The runtime is missing — download it and prepend its dir to the child PATH.
-    Fetch,
-}
-
-/// Decide what to do about the runtime. Precedence: a runtime already on PATH wins
-/// (system runtime), then a cached download is reused, then a fresh download. Errors
-/// only when the runtime is named but absent from PATH and cache with no `download`
-/// URL configured.
-fn plan_runtime(
-    runtime: Option<&str>,
-    download: Option<&str>,
-    present: bool,
-    cached: bool,
-) -> Result<RuntimePlan> {
-    match runtime {
-        None => Ok(RuntimePlan::NotNeeded),
-        Some(_) if present => Ok(RuntimePlan::AlreadyPresent),
-        Some(_) if cached => Ok(RuntimePlan::Cached),
-        Some(_) if download.is_some() => Ok(RuntimePlan::Fetch),
-        Some(name) => Err(Error::Process(format!(
-            "runtime {name:?} not found on PATH or in cache, and no [runtime].download configured"
-        ))),
-    }
-}
-
-/// Ensure a configured runtime is available for the child, downloading it into
-/// `$LODE_DIR/runtime/` when absent from PATH and not already cached there. Returns
-/// the directory to prepend to the child's PATH, or `None` when no runtime download
-/// is needed. A previously downloaded runtime (a `runtime/<name>` executable from an
-/// earlier launch) is reused without touching the network, so a persistent
-/// `$LODE_DIR` makes the download a one-time cost; delete `runtime/<name>` to force a
-/// re-download (e.g. to change the runtime version).
-fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
-    let runtime = cfg.runtime.runtime.as_deref();
-    let download_url = cfg.runtime.download.as_deref();
-    let expected = cfg.runtime.version.as_deref();
-    let probe_args = runtime_probe_args(cfg.runtime.version_check.as_deref());
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    let runtime_dir = cfg.global.dir.join("runtime");
-    // place_runtime lands the binary at `runtime/<name>`; the same path is the cache
-    // key on the next launch.
-    let cached_bin = runtime.map(|name| runtime_dir.join(name));
-
-    // Version-gate PATH and cache: a usable runtime must also report the expected
-    // version (when one is configured). A wrong-version PATH/cache entry is treated
-    // as unusable so we fall through to a fresh download that pins the right version.
-    let present_ok = runtime.is_some_and(|name| {
-        on_path(name, &path_var)
-            && expected.is_none_or(|want| {
-                let ok = runtime_version_ok(OsStr::new(name), &probe_args, want);
-                if !ok {
-                    tracing::warn!(
-                        runtime = name,
-                        want,
-                        "PATH runtime version mismatch; trying cache/download"
-                    );
-                }
-                ok
-            })
-    });
-    let cached_ok = cached_bin.as_deref().is_some_and(|bin| {
-        is_executable_file(bin)
-            && expected.is_none_or(|want| {
-                let ok = runtime_version_ok(bin.as_os_str(), &probe_args, want);
-                if !ok {
-                    tracing::info!(want, "cached runtime version mismatch; re-downloading");
-                }
-                ok
-            })
-    });
-
-    match plan_runtime(runtime, download_url, present_ok, cached_ok)? {
-        RuntimePlan::NotNeeded | RuntimePlan::AlreadyPresent => Ok(None),
-        RuntimePlan::Cached => {
-            tracing::info!(
-                runtime = runtime.unwrap_or_default(),
-                dir = %runtime_dir.display(),
-                "runtime served from cache; skipping download"
-            );
-            Ok(Some(runtime_dir))
-        }
-        RuntimePlan::Fetch => {
-            // Both are `Some` here (guaranteed by `plan_runtime`).
-            let name = runtime.unwrap_or_default();
-            let url = download_url.unwrap_or_default();
-            let format = infer_format(url);
-            tracing::info!(
-                runtime = name,
-                format,
-                "runtime missing from PATH and cache; downloading"
-            );
-            let asset = runtime_asset(url, name);
-            // The runtime download has no manifest origin to be same-origin with,
-            // so credentials ride it only when its host is explicitly allowlisted
-            // via `[http].credential_hosts`; otherwise they are dropped.
-            let (archive, _sha) =
-                download::fetch_artifact(cfg, &asset, "runtime", &cfg.http.credential_hosts)?;
-            install::place_runtime(&runtime_dir, &archive, format, name)?;
-            // The extracted `runtime/<name>` binary is the runtime's (version-checked)
-            // cache; the downloaded archive is redundant, so drop it after placement.
-            let _ = std::fs::remove_file(&archive);
-            if let Some(want) = expected {
-                verify_runtime_version(&runtime_dir.join(name), &probe_args, want)?;
-            }
-            Ok(Some(runtime_dir))
-        }
-    }
-}
-
-/// Args that make a runtime print its version, from `[runtime].version_check`
-/// (whitespace-split), defaulting to `--version`.
-fn runtime_probe_args(version_check: Option<&str>) -> Vec<String> {
-    match version_check {
-        Some(s) if !s.trim().is_empty() => s.split_whitespace().map(str::to_owned).collect(),
-        _ => vec!["--version".to_owned()],
-    }
-}
-
-/// Run `program <args>` and return its combined stdout+stderr, or `None` if the
-/// program can't be executed at all (spawn error). Runtimes print their version to
-/// either stream, so both are captured.
-fn probe_output(program: &OsStr, args: &[String]) -> Option<String> {
-    let out = Command::new(program).args(args).output().ok()?;
-    let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
-    text.push_str(&String::from_utf8_lossy(&out.stderr));
-    Some(text)
-}
-
-/// Does `program`'s version-probe output contain `expected`? A probe that fails to
-/// execute (wrong arch, missing lib, bad path) counts as not-OK.
-fn runtime_version_ok(program: &OsStr, args: &[String], expected: &str) -> bool {
-    probe_output(program, args).is_some_and(|out| out.contains(expected))
-}
-
-/// Confirm a freshly downloaded runtime reports `expected`; a mismatch (or a probe
-/// that won't run) is a hard error — the configured `download` served the wrong
-/// version, or `version`/`version_check` is misconfigured.
-fn verify_runtime_version(bin: &Path, args: &[String], expected: &str) -> Result<()> {
-    match probe_output(bin.as_os_str(), args) {
-        Some(out) if out.contains(expected) => {
-            tracing::info!(version = expected, "downloaded runtime version verified");
-            Ok(())
-        }
-        Some(out) => Err(Error::Process(format!(
-            "downloaded runtime version mismatch: expected {expected:?}, but `{bin} {probe}` reported {got:?}",
-            bin = bin.display(),
-            probe = args.join(" "),
-            got = out.lines().next().unwrap_or("").trim(),
-        ))),
-        None => Err(Error::Process(format!(
-            "could not run `{bin} {probe}` to verify the downloaded runtime version",
-            bin = bin.display(),
-            probe = args.join(" "),
-        ))),
-    }
-}
-
-/// A synthetic [`manifest::Asset`] for a runtime download, so the runtime reuses
-/// the audited [`download`] path. No `sha256`/`size` (the `[runtime]` config carries
-/// none) and no launch overrides (runtimes are placed, not launched, by lode). The
-/// format is determined separately by the caller (from the URL, see
-/// [`infer_format`]) rather than from `name`, since a runtime binary name carries
-/// no packaging suffix.
-fn runtime_asset(url: &str, name: &str) -> manifest::Asset {
-    manifest::Asset {
-        name: name.to_owned(),
-        url: url.to_owned(),
-        sha256: String::new(),
-        sig: None,
-        key_id: None,
-        run: None,
-        exec: None,
-        size: None,
-        auth: true,
-    }
-}
-
-/// Is `name` an executable file in any `path_var` (`:`-separated) directory?
-fn on_path(name: &str, path_var: &str) -> bool {
-    path_var
-        .split(':')
-        .filter(|dir| !dir.is_empty())
-        .any(|dir| is_executable_file(&Path::new(dir).join(name)))
-}
-
-#[cfg(unix)]
-fn is_executable_file(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt as _;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-#[cfg(not(unix))]
-fn is_executable_file(path: &Path) -> bool {
-    path.is_file()
-}
-
-/// Infer a packaging format from a URL suffix (query/fragment stripped). The
-/// suffix checks are case-insensitive (the path is lowercased first), so the
-/// extension-comparison lint does not apply.
-#[allow(clippy::case_sensitive_file_extension_comparisons)]
-fn infer_format(url: &str) -> &'static str {
-    let path = url
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(url)
-        .to_ascii_lowercase();
-    if path.ends_with(".tar.gz") || path.ends_with(".tgz") {
-        "tar.gz"
-    } else if path.ends_with(".zip") {
-        "zip"
-    } else if path.ends_with(".gz") {
-        "gz"
-    } else {
-        "raw"
-    }
 }
 
 // --- argv + environment ---
@@ -691,6 +410,105 @@ const fn readiness_label(mode: Readiness) -> &'static str {
     }
 }
 
+// --- signal source seam ---
+
+/// Source of process-signal events for the supervise loop.
+///
+/// Decouples the loop from process-global signal handling: the bare-`lode` binary
+/// uses the OWNED impl (signal-hook), while a host that owns its own dispositions
+/// feeds events via the channel-backed impl. The loop only ever drains pending
+/// signals and asks to register additional ones — it never constructs `Signals`
+/// itself.
+pub trait SignalSource {
+    /// Non-blocking drain of the signals pending since the last call (raw signal
+    /// numbers).
+    fn poll_signals(&mut self) -> Vec<i32>;
+    /// Register interest in an additional signal. The OWNED impl forwards to
+    /// signal-hook; the host-owned impl is a no-op (the host owns dispositions).
+    ///
+    /// # Errors
+    /// Returns [`Error::Process`] if the underlying registration fails.
+    fn add_signal(&mut self, signum: i32) -> Result<()>;
+}
+
+/// OWNED signal source: lode installs the process-global signal dispositions via
+/// signal-hook. This is the bare-`lode` binary path — identical registration to
+/// the pre-seam loader.
+pub struct OwnedSignalSource(Signals);
+
+impl OwnedSignalSource {
+    /// Install lode's standard supervise set (termination + the config's
+    /// forward/restart sets) via signal-hook, exactly as the loader does.
+    ///
+    /// # Errors
+    /// Returns [`Error::Process`] if signal-hook cannot install the handlers.
+    pub fn new(cfg: &Config) -> Result<Self> {
+        let signals = Signals::new(registration_set(
+            &forward_signals(&cfg.signals.forward),
+            cfg.signals.restart.as_deref().and_then(parse_signal),
+        ))
+        .map_err(|e| Error::Process(format!("install signal handlers: {e}")))?;
+        Ok(Self(signals))
+    }
+}
+
+impl SignalSource for OwnedSignalSource {
+    fn poll_signals(&mut self) -> Vec<i32> {
+        self.0.pending().collect()
+    }
+
+    fn add_signal(&mut self, signum: i32) -> Result<()> {
+        self.0
+            .add_signal(signum)
+            .map_err(|e| Error::Process(format!("install signal handlers: {e}")))
+    }
+}
+
+/// The sender half a host uses to feed signals into a [`ChannelSignalSource`].
+/// Cloneable so several threads (e.g. distinct OS signal handlers) can feed one
+/// supervise loop.
+#[derive(Debug, Clone)]
+pub struct SignalSender(std::sync::mpsc::Sender<i32>);
+
+impl SignalSender {
+    /// Feed one signal (raw number) to the supervise loop.
+    ///
+    /// # Errors
+    /// Returns [`Error::Process`] only if the paired [`ChannelSignalSource`] was
+    /// dropped (the loop has ended).
+    pub fn send(&self, signum: i32) -> Result<()> {
+        self.0
+            .send(signum)
+            .map_err(|e| Error::Process(format!("send signal {signum}: {e}")))
+    }
+}
+
+/// HOST-OWNED signal source: the host feeds signals through a channel.
+///
+/// The host owns the process's signal dispositions. lode registers NO global
+/// handlers and (paired with [`SuperviseOptions::host_owned`]) sets no subreaper
+/// and takes no flock.
+pub struct ChannelSignalSource(std::sync::mpsc::Receiver<i32>);
+
+impl SignalSource for ChannelSignalSource {
+    fn poll_signals(&mut self) -> Vec<i32> {
+        self.0.try_iter().collect()
+    }
+
+    /// No-op: the host owns dispositions, so there is nothing for lode to register.
+    fn add_signal(&mut self, _signum: i32) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// Create a host-owned signal channel: the [`SignalSender`] feeds signals (raw
+/// numbers) and the [`ChannelSignalSource`] drains them inside the supervise loop.
+#[must_use]
+pub fn signal_channel() -> (SignalSender, ChannelSignalSource) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    (SignalSender(tx), ChannelSignalSource(rx))
+}
+
 // --- signals ---
 
 /// What an incoming signal means for the supervisor.
@@ -802,8 +620,8 @@ fn registration_set(forward: &[Signal], restart: Option<Signal>) -> Vec<c_int> {
 /// the terminal `stopped` status best-effort and report the graceful exit code.
 /// `None` => no termination pending, carry on. Restart/forward signals are
 /// dropped here — there is no child yet to cycle or forward to.
-fn bootstrap_terminated(signals: &mut Signals, cfg: &Config) -> Option<ExitCode> {
-    let terminated = signals.pending().any(|raw| {
+fn bootstrap_terminated(signals: &mut dyn SignalSource, cfg: &Config) -> Option<ExitCode> {
+    let terminated = signals.poll_signals().into_iter().any(|raw| {
         Signal::try_from(raw)
             .is_ok_and(|sig| matches!(sig, Signal::SIGTERM | Signal::SIGINT | Signal::SIGQUIT))
     });
@@ -1248,7 +1066,11 @@ struct Observe {
 }
 
 /// Owns the supervise loop state for one served version.
-struct Supervisor<'c> {
+///
+/// Public as part of the embeddable surface; constructed and driven through
+/// [`serve_embedded`] (its `new`/`run` stay crate-internal — the loop body in
+/// [`serve_core`] is the supported way to run it).
+pub struct Supervisor<'c> {
     cfg: &'c Config,
     target: Target,
     runtime_dir: Option<PathBuf>,
@@ -1332,16 +1154,15 @@ impl<'c> Supervisor<'c> {
     /// Run the supervise loop until a graceful shutdown (`Outcome::Exit`) or a
     /// `lode.toml`-change recovery while paused (`Outcome::Reload`). A failing app is
     /// retried then PAUSED (lode stays alive) — it never exits on app failure.
-    fn run(&mut self, signals: &mut Signals) -> Result<Outcome> {
-        // The process-wide signal set was installed at `serve` start (so bootstrap
-        // is interruptible); (re-)add this config's set — a reload may have changed
-        // `[signals]`, and adding an already-registered signal is a no-op. Stale
-        // registrations from a previous config are harmless: [`classify`] ignores
-        // signals outside the current sets.
+    fn run(&mut self, signals: &mut dyn SignalSource) -> Result<Outcome> {
+        // The source's standard set was installed when it was created (so bootstrap
+        // stays interruptible); (re-)register this config's set — a reload may have
+        // changed `[signals]`, and re-registering an already-registered signal is a
+        // no-op. For the host-owned source this is itself a no-op (the host owns
+        // dispositions). Stale registrations from a previous config are harmless:
+        // [`classify`] ignores signals outside the current sets.
         for raw in registration_set(&self.forward, self.restart) {
-            signals
-                .add_signal(raw)
-                .map_err(|e| Error::Process(format!("install signal handlers: {e}")))?;
+            signals.add_signal(raw)?;
         }
 
         // v1 implements `stop-start` fully; the zero-downtime modes are optional /
@@ -1377,7 +1198,7 @@ impl<'c> Supervisor<'c> {
         }
 
         loop {
-            for raw in signals.pending() {
+            for raw in signals.poll_signals() {
                 let Ok(sig) = Signal::try_from(raw) else {
                     continue;
                 };
@@ -3074,115 +2895,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // --- runtime decision + format inference ---
-
-    #[test]
-    fn runtime_plan_decisions() {
-        assert_eq!(
-            plan_runtime(None, None, false, false).unwrap(),
-            RuntimePlan::NotNeeded
-        );
-        // Already on PATH → skip the download (system runtime wins over cache).
-        assert_eq!(
-            plan_runtime(Some("bun"), Some("https://x/bun.zip"), true, true).unwrap(),
-            RuntimePlan::AlreadyPresent
-        );
-        // Off PATH but cached from a prior launch → reuse, no network (even if a
-        // download URL is set).
-        assert_eq!(
-            plan_runtime(Some("bun"), Some("https://x/bun.zip"), false, true).unwrap(),
-            RuntimePlan::Cached
-        );
-        // Off PATH, no cache, no download URL, but cached present → still reused.
-        assert_eq!(
-            plan_runtime(Some("bun"), None, false, true).unwrap(),
-            RuntimePlan::Cached
-        );
-        // Missing + download configured → fetch.
-        assert_eq!(
-            plan_runtime(Some("bun"), Some("https://x/bun.zip"), false, false).unwrap(),
-            RuntimePlan::Fetch
-        );
-        // Missing everywhere + no download → error.
-        assert!(plan_runtime(Some("bun"), None, false, false).is_err());
-    }
-
-    #[test]
-    fn infer_format_from_suffix() {
-        assert_eq!(infer_format("https://x/bun.tar.gz"), "tar.gz");
-        assert_eq!(infer_format("https://x/bun.tgz"), "tar.gz");
-        assert_eq!(infer_format("https://x/bun.zip?token=1"), "zip");
-        assert_eq!(infer_format("https://x/bun.gz"), "gz");
-        assert_eq!(infer_format("https://x/bun"), "raw");
-    }
-
-    #[test]
-    fn on_path_finds_executable() {
-        let dir = std::env::temp_dir().join(format!("lode-onpath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let bin = dir.join("mytool");
-        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-        let path_var = dir.display().to_string();
-        assert!(on_path("mytool", &path_var));
-        assert!(!on_path("absent", &path_var));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn runtime_probe_args_defaults_to_version_flag() {
-        assert_eq!(runtime_probe_args(None), vec!["--version".to_owned()]);
-        assert_eq!(runtime_probe_args(Some("  ")), vec!["--version".to_owned()]);
-        assert_eq!(runtime_probe_args(Some("-v")), vec!["-v".to_owned()]);
-        assert_eq!(
-            runtime_probe_args(Some("eval Bun.version")),
-            vec!["eval".to_owned(), "Bun.version".to_owned()]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn runtime_version_probe_matches_and_rejects() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = std::env::temp_dir().join(format!("lode-rtver-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // A stand-in runtime whose `--version` prints "1.1.38" (like bun's output).
-        let bin = dir.join("fakert");
-        std::fs::write(&bin, b"#!/bin/sh\necho 1.1.38\n").unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let args = runtime_probe_args(None);
-
-        // Substring match handles bare and prefixed (e.g. node's "v22…") forms.
-        assert!(runtime_version_ok(bin.as_os_str(), &args, "1.1.38"));
-        assert!(runtime_version_ok(bin.as_os_str(), &args, "1.1"));
-        assert!(!runtime_version_ok(bin.as_os_str(), &args, "1.2.0"));
-        // A binary that can't be executed → not OK, never a panic.
-        assert!(!runtime_version_ok(
-            dir.join("absent").as_os_str(),
-            &args,
-            "1.1.38"
-        ));
-
-        // verify_runtime_version: ok on match, Err on mismatch / unrunnable.
-        assert!(verify_runtime_version(&bin, &args, "1.1.38").is_ok());
-        assert!(matches!(
-            verify_runtime_version(&bin, &args, "9.9.9"),
-            Err(Error::Process(_))
-        ));
-        assert!(matches!(
-            verify_runtime_version(&dir.join("absent"), &args, "1.1.38"),
-            Err(Error::Process(_))
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     // --- real-child process helpers (specific-pid; CI-safe) ---
 
     #[cfg(unix)]
@@ -3938,7 +3650,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let cfg = test_config(dir.clone());
-        let mut signals = Signals::new(registration_set(&default_forward(), None)).unwrap();
+        let mut signals = OwnedSignalSource::new(&cfg).unwrap();
 
         // No signal pending => carry on with bootstrap.
         assert!(bootstrap_terminated(&mut signals, &cfg).is_none());
@@ -3959,6 +3671,52 @@ mod tests {
         assert_eq!(st.status, Some(Status::Stopped));
         assert_eq!(st.pid, None);
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bootstrap_terminated_reads_an_injected_channel_source() {
+        // The host-owned seam: the supervise loop reads termination from an injected
+        // channel source — no signal_hook registration, no global signal handling.
+        let dir = std::env::temp_dir().join(format!("lode-chansig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = test_config(dir.clone());
+        let (tx, mut src) = signal_channel();
+
+        // Nothing fed yet => bootstrap carries on.
+        assert!(bootstrap_terminated(&mut src, &cfg).is_none());
+
+        // The host feeds SIGTERM through the sender; the loop drains it from the
+        // channel synchronously (no async delivery), so no polling is needed.
+        tx.send(Signal::SIGTERM as i32).unwrap();
+        assert!(
+            bootstrap_terminated(&mut src, &cfg).is_some(),
+            "an injected SIGTERM must terminate bootstrap with no signal_hook"
+        );
+
+        // The terminal status was written via the same best-effort path.
+        let st = state::read(&dir.join("state.json")).unwrap().unwrap();
+        assert_eq!(st.status, Some(Status::Stopped));
+        assert_eq!(st.pid, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_source_add_signal_is_a_noop_owned_registers() {
+        // Host-owned add_signal is an Ok no-op (the host owns dispositions);
+        // the owned source's add_signal forwards to signal-hook successfully.
+        let (_tx, mut src) = signal_channel();
+        assert!(src.add_signal(Signal::SIGHUP as i32).is_ok());
+        assert!(src.poll_signals().is_empty(), "no signals fed yet");
+
+        let dir = std::env::temp_dir().join(format!("lode-ownedadd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = test_config(dir.clone());
+        let mut owned = OwnedSignalSource::new(&cfg).unwrap();
+        assert!(owned.add_signal(Signal::SIGUSR1 as i32).is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

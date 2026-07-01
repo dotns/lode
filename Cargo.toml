@@ -1,6 +1,6 @@
 [package]
 name = "lode"
-version = "0.0.10"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.96.0"
 license = "MIT"
@@ -14,6 +14,23 @@ autoexamples = false
 [[bin]]
 name = "lode"
 path = "src/main.rs"
+# The binary is the CLI: `main.rs` calls `lode::run()`, which only exists under
+# `cli`. Gating it here makes `--features engine` build just the library (the
+# binary target is skipped) instead of failing on the missing entry point.
+required-features = ["cli"]
+
+[features]
+default = ["cli"]
+# `nix` is an engine-layer dep, not supervisor-only: the always-compiled leaf
+# `state.rs` uses it for the flock'd state RMW, and `commands/update.rs` (wrapped
+# by the `Engine` facade) probes the running instance via `lock::live_holder` +
+# `nix::kill`. So the engine layer (and the `lock` module) need it; `signal-hook`
+# stays supervisor-only (only `supervisor.rs` uses it). nix is still optional —
+# absent from a hypothetical featureless build — and the `clap|signal-hook` tree
+# check is unaffected (nix is neither).
+engine = ["dep:nix"]
+supervisor = ["engine", "dep:signal-hook"]
+cli = ["supervisor", "dep:clap"]
 
 [workspace]
 resolver = "3"
@@ -47,8 +64,9 @@ todo = "warn"
 workspace = true
 
 [dependencies]
-# CLI / config
-clap = { version = "4", features = ["derive", "env"] }
+# CLI / config — clap backs only the binary's CLI surface, so it is optional and
+# pulled in by the `cli` feature; the library (`engine`) builds without it.
+clap = { version = "4", features = ["derive", "env"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
@@ -76,9 +94,12 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # lode is a Unix process supervisor (PID-1 subreaper, signal forwarding, exec
 # passthrough, rlimit) — these crates have no Windows equivalent, so the
 # supervisor deps are gated to cfg(unix) and lode targets Linux/macOS only.
+# signal-hook + nix back only the process-supervisor runtime, so they are
+# optional and pulled in by the `supervisor` feature. rlimit stays non-optional:
+# it backs the always-on `InitOptions::suppress_core_dumps`.
 [target.'cfg(unix)'.dependencies]
-signal-hook = "0.3"
-nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs"] }
+signal-hook = { version = "0.3", optional = true }
+nix = { version = "0.30", default-features = false, features = ["signal", "process", "fs"], optional = true }
 rlimit = "0.10"
 
 [profile.release]
