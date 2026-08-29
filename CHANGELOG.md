@@ -5,6 +5,24 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] - 2026-08-29
+
+### Fixed
+
+- **A runtime download is now cached per configured runtime, not per name.** The
+  `[runtime]` cache moved from `$LODE_DIR/runtime/<name>` to
+  `$LODE_DIR/runtime/<key>/<name>`, where `<key>` always carries a 12-hex digest of
+  `[runtime].download`, prefixed by the pinned `[runtime].version` when it is a safe
+  path component (`1.1.38-9f2c0a4b6d18`, else `url-9f2c0a4b6d18`). Repointing
+  `download`/`version` at a new runtime version used to hit the old flat cache: lode
+  logged "runtime served from cache; skipping download" and launched the app with the
+  *previous* runtime (and when a `version` pin did force a re-fetch, the new archive
+  was unpacked over the old tree, whose binary already sat at `runtime/<name>` — so
+  hoisting was a no-op and the stale binary survived, failing the post-download version
+  check). Now a changed `[runtime]` yields a new key, the payload is extracted into a
+  freshly emptied directory, and the other `runtime/` entries — including the flat
+  binary left by an older lode, which is re-downloaded once on upgrade — are reclaimed.
+
 ## [0.1.0] - 2026-07-01
 
 ### Added

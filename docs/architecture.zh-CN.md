@@ -103,10 +103,10 @@ zzci/ubase                 │  lode (Rust 静态二进制, 几 MB)   │
 
 ### 运行时下载(`[runtime]`,可选)
 
-当 `run`/`exec` 依赖某运行时(如 `bun`)时,可在 `lode.toml` 的 `[runtime]` 声明。解析顺序 **PATH → 缓存 → 下载**:先查 PATH;否则复用 `$LODE_DIR/runtime/<name>` 里上次下载的运行时;再否则从 `download` 下载。自包含二进制则省略此表。
+当 `run`/`exec` 依赖某运行时(如 `bun`)时,可在 `lode.toml` 的 `[runtime]` 声明。解析顺序 **PATH → 缓存 → 下载**:先查 PATH;否则复用 `$LODE_DIR/runtime/<key>/<name>` 里上次下载的运行时;再否则从 `download` 下载。自包含二进制则省略此表。
 
-- **format / 摊平**:`format` 由 URL 扩展名推导(`raw`/`gz`/`zip`/`tar.gz`);解包后把目标二进制**摊平到 `runtime/<name>`**,所以官方嵌套包(bun 的 `bun-linux-x64/bun`、node 的 `node-vX/bin/node`)和扁平包(deno)、单文件都能用。
-- **缓存**:落地的 `runtime/<name>` 在后续启动被复用——`$LODE_DIR` 持久化时下载只发生一次;删掉该文件即可强制重下。
+- **format / 摊平**:`format` 由 URL 扩展名推导(`raw`/`gz`/`zip`/`tar.gz`);解包后把目标二进制**摊平到 `runtime/<key>/<name>`**,所以官方嵌套包(bun 的 `bun-linux-x64/bun`、node 的 `node-vX/bin/node`)和扁平包(deno)、单文件都能用。
+- **缓存(按运行时配置分键)**:缓存目录是 `runtime/<key>/`,`<key>` **始终**包含 `download` URL 的 12 位十六进制摘要,锁定且版本串是合法路径分量时再加版本前缀——`1.1.38-9f2c0a4b6d18`,未锁定则是 `url-9f2c0a4b6d18`。摘要保证键的精确性(`version` 不变、只把 `download` 指向别的字节也会失效),前缀保证目录可读。落地的 `runtime/<key>/<name>` 在后续启动被复用——`$LODE_DIR` 持久化时下载只发生一次——但**仅限同一份 `[runtime]` 配置**:改了 `version`/`download` 就换了 key,新运行时会下载到自己的目录,既不会复用旧缓存,也不会解压到旧目录上。当前 key 确定后,`runtime/` 下其余条目会被回收(包括旧版 lode 留下的扁平 `runtime/<name>`,升级后重下一次);删掉 `runtime/<key>/` 即可强制重下。
 - **不校验**:与应用产物不同,运行时下载**不带 `sha256`/`sig`,不做完整性/身份校验**。请锁版本、用可信源,若需凭据把其 host 加入 `[http].credential_hosts`。
 - **版本锁定**(`version` + `version_check`):设了 `version` 后,lode 对即将使用的运行时(PATH/缓存/刚下载)跑 `version_check`(默认 `--version`),要求输出**包含** `version`。PATH/缓存里版本不对会被绕过去重新下载;下载下来还不对则硬报错。
 - 最后把 `$LODE_DIR/runtime/` **前置到子进程 PATH**。
@@ -170,7 +170,7 @@ target ≠ current 且可用(stop-start 模式):
 `lode` 启动(服务模式)在确定版本之前先做一遍清理:
 
 - **孤儿子进程**:上一个 lode 崩溃可能遗留仍在跑的 app 子进程。接管僵尸锁后,读 `state.json.pid`,若该进程还活着 → 优雅终止(SIGTERM→超时 SIGKILL)再起新的,避免端口/资源冲突与双实例。
-- **垃圾回收**:清理中断遗留的 `downloads/<v>/*.part`、`versions/<v>.tmp` 半成品(已校验的按版本下载缓存保留);按 `keep_versions` 保留 current + last_good + 最近 N 个版本,其余版本目录**连同其 `downloads/<v>/` 缓存**一起删除;`$LODE_DIR/runtime/` 同理只留在用的。
+- **垃圾回收**:清理中断遗留的 `downloads/<v>/*.part`、`versions/<v>.tmp` 半成品(已校验的按版本下载缓存保留);按 `keep_versions` 保留 current + last_good + 最近 N 个版本,其余版本目录**连同其 `downloads/<v>/` 缓存**一起删除;`$LODE_DIR/runtime/` 同理只留当前在用的缓存 key。
 - **校验落盘一致性**:`current` 软链指向的版本若缺失/损坏 → 回退到 last_good 或重新引导。
 
 ---
@@ -588,6 +588,7 @@ $LODE_DIR/
   state.json                 # 实际状态(lode 自动生成,app 只读)
   downloads/<ver>/<asset>    # 已校验下载缓存(保留;可重新解压,随版本一起回收)
   downloads/<ver>/<asset>.part  # 下载暂存(进行中)
+  runtime/<key>/<name>       # 已下载的运行时,key = <版本>-<URL 摘要>(未锁版本时为 url-<摘要>)
   versions/<ver>/            # 各版本(raw/gz 落单文件 / tar.gz/zip 解包 / binary chmod)
     .lode.json             #   该版本元数据(run/exec/format 等)供离线运行
   current -> versions/<ver>  # 原子切换的当前软链

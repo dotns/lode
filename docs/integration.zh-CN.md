@@ -56,7 +56,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 常见形态:
 
 - **自带二进制:** `run = "./myapp serve"`、`exec = "./myapp"`(或省略 `[command]`,改为在 manifest 资产里发布 `run`/`exec`)。
-- **脚本 + 运行时:** `run = "bun run"`、`exec = "bun"`,再加 `[runtime]` 段,PATH 上没有 `bun` 时下载它——下载后缓存复用,可用 `version` 锁版本;注意运行时下载**不做签名校验**。
+- **脚本 + 运行时:** `run = "bun run"`、`exec = "bun"`,再加 `[runtime]` 段,PATH 上没有 `bun` 时下载它——下载后按 `runtime/<key>/` 缓存复用(key 跟随 `version`/`download`,改任一项就会重新下载),可用 `version` 锁版本;注意运行时下载**不做签名校验**。
 - **私有源:** 加 `[http].headers = ["Authorization: Bearer ${TOKEN}"]` —— 随 manifest 与产物请求发送,展开 `${ENV}`。
 
 全部选项及 `[runtime]`/`[signals]`/`restart_*` 见 [`lode.example.toml`](lode.example.toml)。

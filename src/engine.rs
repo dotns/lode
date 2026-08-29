@@ -21,7 +21,7 @@ use std::process::Command;
 
 use crate::config::Config;
 use crate::error::{Error, Result};
-use crate::{commands, download, idval, install, manifest, state};
+use crate::{commands, download, idval, install, manifest, state, verify};
 
 // The std Unix permission-bit extension trait (for the executable-bit check) is
 // reached through this alias of `std::os::unix`. Aliasing the platform segment keeps
@@ -208,9 +208,9 @@ enum RuntimePlan {
     NotNeeded,
     /// The runtime is already on PATH — nothing to download.
     AlreadyPresent,
-    /// A prior download left the runtime in `$LODE_DIR/runtime/` — reuse it (no
-    /// network). When `$LODE_DIR` is a persistent volume this makes the download a
-    /// one-time cost across restarts.
+    /// A prior download left the runtime in `$LODE_DIR/runtime/<key>/` for the
+    /// *current* `[runtime]` config — reuse it (no network). When `$LODE_DIR` is a
+    /// persistent volume this makes the download a one-time cost across restarts.
     Cached,
     /// The runtime is missing — download it and prepend its dir to the child PATH.
     Fetch,
@@ -237,22 +237,76 @@ fn plan_runtime(
     }
 }
 
-/// Ensure a configured runtime is available for the child, downloading it into
-/// `$LODE_DIR/runtime/` when absent from PATH and not already cached there. Returns
-/// the directory to prepend to the child's PATH, or `None` when no runtime download
-/// is needed. A previously downloaded runtime (a `runtime/<name>` executable from an
-/// earlier launch) is reused without touching the network, so a persistent
-/// `$LODE_DIR` makes the download a one-time cost; delete `runtime/<name>` to force a
-/// re-download (e.g. to change the runtime version).
+/// The cache-key directory under `$LODE_DIR/runtime/` holding the configured
+/// runtime payload: **always** a digest of the `download` URL, prefixed by the pinned
+/// `[runtime].version` when that version is a safe path component (`1.1.38-<hex>`,
+/// else `url-<hex>`). The digest is what makes the key exact — repointing `download`
+/// at other bytes changes it even when `version` stays put — while the prefix keeps
+/// the directory readable. Any repoint of `[runtime]` therefore lands in a fresh
+/// directory instead of being served from, or extracted on top of, the previous one.
+fn runtime_cache_key(version: Option<&str>, download: Option<&str>) -> String {
+    let digest = verify::sha256_hex(download.unwrap_or_default().as_bytes());
+    let short = &digest[..12];
+    match version.map(str::trim) {
+        // A version that is not a safe path component (`1.2 (canary)`, `../etc`) is
+        // dropped from the name rather than mangled into it; the digest still keys
+        // the cache, just less readably.
+        Some(v) if idval::validate_id("runtime version", v).is_ok() => format!("{v}-{short}"),
+        _ => format!("url-{short}"),
+    }
+}
+
+/// Reclaim every runtime cache under `runtime/` except `keep`: the payload of an
+/// older `[runtime]` config, and the flat `runtime/<name>` binary left by a
+/// pre-cache-key lode. Best-effort — an entry that cannot be removed is a stale
+/// directory, never a launch failure, so it is logged and skipped.
+fn prune_runtime_cache(runtime_root: &Path, keep: &str) {
+    let Ok(entries) = std::fs::read_dir(runtime_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name() == OsStr::new(keep) {
+            continue;
+        }
+        let path = entry.path();
+        // `file_type` does not follow symlinks, so a symlinked entry is unlinked
+        // rather than walked.
+        let removed = match entry.file_type() {
+            Ok(t) if t.is_dir() => std::fs::remove_dir_all(&path),
+            _ => std::fs::remove_file(&path),
+        };
+        match removed {
+            Ok(()) => tracing::info!(path = %path.display(), "dropped a stale runtime cache"),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "could not drop a stale runtime cache");
+            }
+        }
+    }
+}
+
+/// Ensure a configured runtime is available for the child.
+///
+/// It is downloaded into `$LODE_DIR/runtime/<key>/` when absent from PATH and not
+/// already cached there (`<key>` = [`runtime_cache_key`]: the pinned version, else a
+/// digest of the download URL).
+///
+/// Returns the directory to prepend to the child's PATH, or `None` when no
+/// runtime download is needed. A previously downloaded runtime (a
+/// `runtime/<key>/<name>` executable from an earlier launch) is reused without
+/// touching the network, so a persistent `$LODE_DIR` makes the download a one-time
+/// cost — but only for the *same* `[runtime]` config: repointing `version`/`download`
+/// changes the key, which forces a fresh download and reclaims the previous cache.
 pub(crate) fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
     let runtime = cfg.runtime.runtime.as_deref();
     let download_url = cfg.runtime.download.as_deref();
     let expected = cfg.runtime.version.as_deref();
     let probe_args = runtime_probe_args(cfg.runtime.version_check.as_deref());
     let path_var = std::env::var("PATH").unwrap_or_default();
-    let runtime_dir = cfg.global.dir.join("runtime");
-    // place_runtime lands the binary at `runtime/<name>`; the same path is the cache
-    // key on the next launch.
+    let runtime_root = cfg.global.dir.join("runtime");
+    let cache_key = runtime_cache_key(expected, download_url);
+    let runtime_dir = runtime_root.join(&cache_key);
+    // place_runtime lands the binary at `runtime/<key>/<name>`; the same path is the
+    // cache key on the next launch.
     let cached_bin = runtime.map(|name| runtime_dir.join(name));
 
     // Version-gate PATH and cache: a usable runtime must also report the expected
@@ -291,6 +345,7 @@ pub(crate) fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
                 dir = %runtime_dir.display(),
                 "runtime served from cache; skipping download"
             );
+            prune_runtime_cache(&runtime_root, &cache_key);
             Ok(Some(runtime_dir))
         }
         RuntimePlan::Fetch => {
@@ -309,13 +364,27 @@ pub(crate) fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
             // via `[http].credential_hosts`; otherwise they are dropped.
             let (archive, _sha) =
                 download::fetch_artifact(cfg, &asset, "runtime", &cfg.http.credential_hosts)?;
+            // Extract into an empty directory: unpacking over a previous payload
+            // would leave that payload's binary at `runtime/<key>/<name>` (hoisting
+            // is a no-op when the target already exists) and mix the two trees.
+            match std::fs::remove_dir_all(&runtime_dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(Error::Install(format!(
+                        "clear runtime cache {}: {e}",
+                        runtime_dir.display()
+                    )));
+                }
+            }
             install::place_runtime(&runtime_dir, &archive, format, name)?;
-            // The extracted `runtime/<name>` binary is the runtime's (version-checked)
+            // The extracted `runtime/<key>/<name>` binary is the runtime's (version-checked)
             // cache; the downloaded archive is redundant, so drop it after placement.
             let _ = std::fs::remove_file(&archive);
             if let Some(want) = expected {
                 verify_runtime_version(&runtime_dir.join(name), &probe_args, want)?;
             }
+            prune_runtime_cache(&runtime_root, &cache_key);
             Ok(Some(runtime_dir))
         }
     }
@@ -641,6 +710,95 @@ mod tests {
             verify_runtime_version(&dir.join("absent"), &args, "1.1.38"),
             Err(Error::Process(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn runtime_cache_key_tracks_the_version_then_the_url() {
+        // A pinned version prefixes the cache directory, so the operator can see
+        // which runtime a directory holds — followed by the URL digest that actually
+        // keys it.
+        let pinned = runtime_cache_key(Some("1.1.38"), Some("https://x/bun.zip"));
+        assert!(pinned.starts_with("1.1.38-"), "unexpected key {pinned:?}");
+        assert_eq!(pinned.len(), "1.1.38-".len() + 12);
+        // Same pin, different bytes → a different key: the cache never serves a
+        // repointed `download` from the previous URL's extraction.
+        assert_ne!(
+            pinned,
+            runtime_cache_key(Some("1.1.38"), Some("https://x/bun-rebuilt.zip"))
+        );
+        // No pin → the key follows the download URL: repointing it at a new build
+        // yields a different key (the stale extraction is never reused), while the
+        // same URL keeps the cache stable across boots.
+        let a = runtime_cache_key(None, Some("https://x/bun-1.1.38.zip"));
+        let b = runtime_cache_key(None, Some("https://x/bun-1.2.0.zip"));
+        assert_ne!(a, b);
+        assert_eq!(a, runtime_cache_key(None, Some("https://x/bun-1.1.38.zip")));
+        // A version that is not a safe path component is dropped from the name
+        // instead of being mangled into a directory component.
+        assert_eq!(
+            runtime_cache_key(Some("1.2 (canary)"), Some("https://x/bun.zip")),
+            runtime_cache_key(None, Some("https://x/bun.zip"))
+        );
+        assert_eq!(
+            runtime_cache_key(Some("../etc"), Some("https://x/bun.zip")),
+            runtime_cache_key(None, Some("https://x/bun.zip"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_runtime_serves_the_keyed_cache_and_drops_stale_ones() {
+        use unix_ext::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("lode-rtkey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let url = "https://x/lodefakert-1.2.0.zip";
+        let cfg = Config::from_toml(&format!(
+            "[global]\ndir = {dir:?}\n\n[runtime]\nruntime = \"lodefakert\"\n\
+             download = \"{url}\"\nversion = \"1.2.0\"\n"
+        ))
+        .unwrap();
+
+        // The cache for the pinned version, plus what an earlier `[runtime]` config
+        // left behind: another version's directory and the flat `runtime/<name>`
+        // binary of a pre-cache-key lode.
+        let keyed = dir
+            .join("runtime")
+            .join(runtime_cache_key(Some("1.2.0"), Some(url)));
+        std::fs::create_dir_all(&keyed).unwrap();
+        let bin = keyed.join("lodefakert");
+        std::fs::write(&bin, b"#!/bin/sh\necho 1.2.0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let stale_dir = dir.join("runtime").join(runtime_cache_key(
+            Some("1.1.38"),
+            Some("https://x/lodefakert-1.1.38.zip"),
+        ));
+        std::fs::create_dir_all(&stale_dir).unwrap();
+        std::fs::write(stale_dir.join("lodefakert"), b"#!/bin/sh\necho 1.1.38\n").unwrap();
+        let legacy = dir.join("runtime").join("lodefakert");
+        std::fs::write(&legacy, b"#!/bin/sh\necho 1.1.38\n").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The version-keyed cache is what goes on the child PATH — never the flat
+        // legacy file, which would launch the wrong runtime version.
+        assert_eq!(ensure_runtime(&cfg).unwrap().as_ref(), Some(&keyed));
+        assert!(bin.is_file());
+        assert!(!stale_dir.exists(), "another version's cache is reclaimed");
+        assert!(
+            !legacy.exists(),
+            "the pre-cache-key flat binary is reclaimed"
+        );
+
+        // A cache that no longer satisfies the pin is not served: with no reachable
+        // download URL the fetch fails rather than falling back to the stale bytes.
+        let bumped = Config::from_toml(&format!(
+            "[global]\ndir = {dir:?}\n\n[runtime]\nruntime = \"lodefakert\"\n\
+             download = \"https://127.0.0.1:1/lodefakert-9.9.9.zip\"\nversion = \"9.9.9\"\n"
+        ))
+        .unwrap();
+        assert!(ensure_runtime(&bumped).is_err());
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

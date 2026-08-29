@@ -3,8 +3,8 @@
 // just a file write — no caching, no restart. Binds 127.0.0.1:0 (ephemeral port),
 // so the suite never touches the real network.
 
-import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join, normalize, sep } from "node:path";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, normalize, sep } from "node:path";
 
 import { LODE_CLI_BIN, mkTmp, rmTmp } from "./util.ts";
 
@@ -128,6 +128,17 @@ export class ManifestServer {
       this.#manifest.channels.stable = { latest: version };
     }
     this.#writeManifest();
+  }
+
+  /** Serve `contents` at `path` under the www root (executable), returning its URL.
+   *  Used for downloads that are not manifest assets — e.g. a stand-in `[runtime]`
+   *  binary, which lode fetches straight from `[runtime].download`. */
+  serveFile(path: string, contents: string): string {
+    const dest = join(this.#www, path);
+    mkdirSync(dirname(dest), { recursive: true });
+    writeFileSync(dest, contents);
+    chmodSync(dest, 0o755);
+    return `${this.url}/${path}`;
   }
 
   /** Remove a version's served artifact bytes while leaving manifest.json intact, so

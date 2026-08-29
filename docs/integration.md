@@ -58,7 +58,7 @@ restart      = "on-failure" # on-failure (default, keep-alive: retry then pause)
 Common shapes:
 
 - **Self-contained binary:** `run = "./myapp serve"`, `exec = "./myapp"` (or omit `[command]` and publish `run`/`exec` in the manifest asset instead).
-- **Script under a runtime:** `run = "bun run"`, `exec = "bun"`, plus a `[runtime]` block to fetch `bun` if it's not on PATH — cached for reuse, optionally version-pinned (`version`); note a runtime download is **not** signature-verified.
+- **Script under a runtime:** `run = "bun run"`, `exec = "bun"`, plus a `[runtime]` block to fetch `bun` if it's not on PATH — cached for reuse under `runtime/<key>/` (the key follows `version`/`download`, so changing either re-downloads), optionally version-pinned (`version`); note a runtime download is **not** signature-verified.
 - **Private source:** add `[http].headers = ["Authorization: Bearer ${TOKEN}"]` — sent on manifest + artifact fetches, with `${ENV}` expansion.
 
 See [`lode.example.toml`](lode.example.toml) for every option and `[runtime]`/`[signals]`/`restart_*`.
