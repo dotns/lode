@@ -121,8 +121,8 @@ lode's process-global side effects — those are opt-in via `InitOptions`.
 
 ```toml
 [dependencies]
-lode-core = "0.1"        # config + Engine (no clap, no signals)
-lode-supervisor = "0.1"  # + the supervise loop, driven by an injected SignalSource
+lode-core = "0.2"        # config + Engine (no clap, no signals)
+lode-supervisor = "0.2"  # + the supervise loop, driven by an injected SignalSource
 ```
 
 ```bash

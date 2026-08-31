@@ -117,8 +117,8 @@ lode 由三个 crate 组成:**`lode-core`**(不含 clap、不碰信号——配�
 
 ```toml
 [dependencies]
-lode-core = "0.1"        # 配置 + Engine(无 clap、无信号)
-lode-supervisor = "0.1"  # + 监管循环,由注入的 SignalSource 驱动
+lode-core = "0.2"        # 配置 + Engine(无 clap、无信号)
+lode-supervisor = "0.2"  # + 监管循环,由注入的 SignalSource 驱动
 ```
 
 ```bash
