@@ -55,6 +55,17 @@ use lode_core::{Error, Result, download, install, manifest};
 /// leaving headroom for the C2 state-poll / update-observation on the same cadence.
 const POLL_TICK: Duration = Duration::from_millis(200);
 
+/// Consecutive network failures of an *automatic* fetch — the policy update check
+/// and an auto-applied target's download — before `state.last_error` reports it.
+///
+/// The loop re-attempts every `check_interval`, so one failed attempt (a flaky
+/// link, a redirect hop that momentarily failed, a CDN blip) is noise the app must
+/// not consume as "the download is broken"; only a *persistent* inability to fetch
+/// is the app's business (design §7). Failures that will not fix themselves — a
+/// malformed manifest, a bad signature, a full disk — bypass this and are reported
+/// on the first strike.
+const TRANSIENT_FETCH_STRIKES: u32 = 3;
+
 /// Poll granularity while waiting for a child to exit during a graceful stop.
 const STOP_POLL: Duration = Duration::from_millis(50);
 
@@ -1096,6 +1107,13 @@ pub struct Supervisor<'c> {
     last_nonce: u64,
     /// When the next policy update check is due (`None` => no further checks).
     next_check_at: Option<Instant>,
+    /// Consecutive transient fetch failures (see [`TRANSIENT_FETCH_STRIKES`]); reset
+    /// by the first success.
+    fetch_failures: u32,
+    /// The `state.last_error` text this supervisor wrote for a *transient* fetch
+    /// failure, so a later success clears exactly that message and never a
+    /// definitive error someone else recorded.
+    fetch_error: Option<String>,
 }
 
 impl<'c> Supervisor<'c> {
@@ -1133,6 +1151,8 @@ impl<'c> Supervisor<'c> {
             last_state_mtime: None,
             last_nonce,
             next_check_at,
+            fetch_failures: 0,
+            fetch_error: None,
         }
     }
 
@@ -1844,6 +1864,47 @@ impl<'c> Supervisor<'c> {
         self.mutate_state(|st| st.last_error = Some(message));
     }
 
+    /// Route a failed *fetch* to `state.last_error` by kind (design §7).
+    ///
+    /// A network failure is one the next tick simply retries, so it is reported only
+    /// once it has failed [`TRANSIENT_FETCH_STRIKES`] times in a row — an
+    /// intermediate error never reaches the app. Anything else is definitive and
+    /// reported immediately.
+    fn note_fetch_failure(&mut self, message: &str, e: &Error) {
+        if !is_transient_fetch(e) {
+            self.fetch_failures = 0;
+            self.fetch_error = None; // this message is not ours to clear later
+            self.note_error(message);
+            return;
+        }
+        self.fetch_failures = self.fetch_failures.saturating_add(1);
+        if self.fetch_failures < TRANSIENT_FETCH_STRIKES {
+            tracing::info!(
+                error = %e,
+                strikes = self.fetch_failures,
+                "fetch failed; retrying on the next check (not reported to state.json)"
+            );
+            return;
+        }
+        tracing::error!(error = %e, strikes = self.fetch_failures, "fetch keeps failing; reporting to state.json");
+        self.note_error(message);
+        self.fetch_error = Some(message.to_owned());
+    }
+
+    /// A fetch succeeded: reset the strike counter and clear a transient report this
+    /// supervisor made, leaving any other `last_error` untouched.
+    fn note_fetch_success(&mut self) {
+        self.fetch_failures = 0;
+        let Some(reported) = self.fetch_error.take() else {
+            return;
+        };
+        self.mutate_state(move |st| {
+            if st.last_error.as_deref() == Some(reported.as_str()) {
+                st.last_error = None;
+            }
+        });
+    }
+
     /// Clear a consumed `target` request from `state.json`.
     fn clear_target(&self) {
         self.mutate_state(|st| st.target = None);
@@ -2019,15 +2080,17 @@ impl<'c> Supervisor<'c> {
     /// Fetch the manifest and apply the `[update].policy`: `check` advertises a
     /// newer version in `state.available`; `auto` sets `state.target` to apply it
     /// (design §5). Best-effort — network/parse failures are logged, never fatal.
-    fn run_update_check(&self) {
+    fn run_update_check(&mut self) {
         let manifest = match manifest::fetch(self.cfg) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, "update check: manifest fetch failed");
-                self.note_error(&format!("update check: {e}"));
+                self.note_fetch_failure(&format!("update check: {e}"), &e);
                 return;
             }
         };
+        // The source answered: a previous run of transient failures is over.
+        self.note_fetch_success();
         if manifest.name != self.cfg.global.app {
             tracing::warn!(
                 manifest = manifest.name,
@@ -2118,10 +2181,11 @@ impl<'c> Supervisor<'c> {
 
         if let Err(e) = self.ensure_installed(version) {
             tracing::error!(error = %e, version, "cannot install update target; staying on current");
-            self.note_error(&format!("install {version}: {e}"));
+            self.note_fetch_failure(&format!("install {version}: {e}"), &e);
             self.clear_target();
             return None;
         }
+        self.note_fetch_success();
         let new_target = match locate(self.cfg, version) {
             Ok(t) => t,
             Err(e) => {
@@ -2208,10 +2272,11 @@ impl<'c> Supervisor<'c> {
     fn begin_prepare(&mut self, version: &str) {
         if let Err(e) = self.ensure_installed(version) {
             tracing::error!(error = %e, version, "cannot stage update target; staying on current");
-            self.note_error(&format!("install {version}: {e}"));
+            self.note_fetch_failure(&format!("install {version}: {e}"), &e);
             self.clear_target();
             return;
         }
+        self.note_fetch_success();
         let prompt = ready_token(&self.instance, READY_PREPARE);
         tracing::info!(
             version,
@@ -2567,6 +2632,15 @@ fn nanoid() -> String {
         .iter()
         .map(|b| ALPHABET[*b as usize % ALPHABET.len()] as char)
         .collect()
+}
+
+/// Is `e` a network-layer failure the next tick can simply retry?
+///
+/// [`Error::Http`] (connect/TLS/redirect/status) and [`Error::Download`] (a body
+/// that did not arrive intact) are transport problems; every other kind means the
+/// bytes or the environment are wrong, and retrying changes nothing.
+const fn is_transient_fetch(e: &Error) -> bool {
+    matches!(e, Error::Http(_) | Error::Download(_))
 }
 
 #[cfg(test)]
@@ -3508,6 +3582,51 @@ mod tests {
             run: None,
             exec: None,
         }
+    }
+
+    #[test]
+    fn transient_fetch_failures_are_not_synced_until_they_persist() {
+        let dir = std::env::temp_dir().join(format!("lode-transient-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = test_config(dir.clone());
+        let mut sup = Supervisor::new(&cfg, test_target(&dir), None);
+        let path = dir.join("state.json");
+        let last_error = || state::read_lenient(&path).unwrap_or_default().last_error;
+        let blip = Error::Http("GET https://x/app.tar.gz: 301 hop failed".to_owned());
+
+        // A single failed fetch is retried on the next tick, so the app sees
+        // nothing: an intermediate error must never reach state.json.
+        for strike in 1..TRANSIENT_FETCH_STRIKES {
+            sup.note_fetch_failure("update check: transient", &blip);
+            assert_eq!(last_error(), None, "reported after only {strike} strike(s)");
+        }
+
+        // Once it keeps failing it is a real inability to fetch — now report it.
+        sup.note_fetch_failure("update check: persistent", &blip);
+        assert_eq!(last_error().as_deref(), Some("update check: persistent"));
+
+        // …and the next successful fetch clears exactly that report.
+        sup.note_fetch_success();
+        assert_eq!(last_error(), None);
+
+        // A non-network failure is definitive (a tampered artifact is not going to
+        // fix itself): reported on the first strike…
+        let bad = Error::Verify("signature mismatch".to_owned());
+        sup.note_fetch_failure("install 1.2.0: bad signature", &bad);
+        assert_eq!(
+            last_error().as_deref(),
+            Some("install 1.2.0: bad signature")
+        );
+
+        // …and a later fetch success must not clear someone else's error.
+        sup.note_fetch_success();
+        assert_eq!(
+            last_error().as_deref(),
+            Some("install 1.2.0: bad signature")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -231,6 +231,7 @@ lode.manifest.v1
 通信全走 **`state.json`**(双向,各自单写字段 + 原子写 temp+rename;lode 轮询其 mtime):
 
 - **lode 写**:`current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`/`config_generation`。
+  - **`last_error` 只报告持续性失败**:网络层失败(连接/TLS/重定向/状态码,或响应体没收全)下次检查就会重试,因此要**连续失败 3 次**才写入,且下一次拉取成功即清除——单次失败只记日志,不同步给 app。不会自愈的失败(manifest 格式错、签名不对、磁盘满、新版本起不来)第一次就上报。
 - **app 写**(请求):`target`(想升/降到的版本,或 `"latest"`)、`restart_nonce`(递增=请求重启)。
 - **双方共写**(`readiness=state` 握手,§8):`ready` = `{LODE_INSTANCE}-{相位}`。app 用 `-0` 表示"我能服务了";暂存升级时 lode 用 `-1` 提示在跑的 app;app 用 `-2` 应答"已准备好,可以切了"。lode 读 `-0`/`-2`、写 `-1` 提示,并在切换时清空该字段。**向后兼容**:app 也可继续写裸 `{LODE_INSTANCE}`(旧就绪信号)——这等于放弃准备窗口、直接切换。
 - 典型流程(`policy=check`):lode 把发现的新版写进 `available` → **app 读到后,自己决定升级就把 `target` 写成该版本(或 `"latest"`)** → lode 应用并热更。

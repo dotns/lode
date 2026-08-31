@@ -35,6 +35,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A single failed fetch no longer surfaces to the app as `state.last_error`.** The
+  periodic update check (and an auto-applied target's download) wrote `last_error` on
+  every failed attempt, and nothing cleared it on the next success — so one flaky hop
+  left a stale "download failed" in `state.json` for the app to consume indefinitely.
+  Network-layer failures (`Error::Http`/`Error::Download` — connect/TLS/redirect/status,
+  or a body that did not arrive intact) are now reported only after **3 consecutive**
+  failures, and the next successful fetch clears exactly that report. Failures that will
+  not fix themselves (malformed manifest, bad signature, full disk) are still reported on
+  the first strike, and an explicit CLI `update` still reports its own failure directly.
+
 - **`301`/`308` redirect coverage.** The manual redirect loop already followed every
   redirect status; a regression test now pins the permanent ones (a moved download URL),
   asserting the hop is taken and the second hop is a plain `GET` of the `Location` path.
