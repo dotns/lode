@@ -5,6 +5,40 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (breaking, library only)
+
+- **lode is now a three-crate workspace** (`crates/lode-core`, `crates/lode-supervisor`,
+  `crates/lode`) and the Cargo feature gates (`engine`/`supervisor`/`cli`) are retired —
+  the layer split they expressed is now expressed as crates. Migration for library
+  consumers:
+  - `lode` with `--features engine` → depend on **`lode-core`** (clap-free, signal-free:
+    `InitOptions`, the `Engine` facade, `Config::from_toml` / `ConfigBuilder`).
+  - `lode` with `--features supervisor` → depend on **`lode-supervisor`** (embeddable
+    `serve_embedded` / `serve_core` / `exec_passthrough` + `SignalSource`; pulls in
+    `lode-core`).
+  - The `cli` feature is gone — the CLI **is** the `lode` crate, the workspace's only
+    binary. The clap-bound config loaders moved to `lode/src/config_cli.rs`, and the
+    enum-valued flags now use `ValueEnum` mirrors there, so `lode-core` never sees clap.
+  - **Binary users are unaffected**: the same single `lode` / `lode-cli` binary, the same
+    CLI (`--help` is byte-identical), zero behavior change; `cargo build` at the repo root
+    still emits `target/debug/lode` (and `--profile dist` → `target/dist/lode`).
+
+### Added
+
+- **Library usage examples.** `cargo run -p lode-core --example engine` (config built in
+  code + a seeded local version + the read-only `Engine` facade) and
+  `cargo run -p lode-supervisor --example embedded` (the supervise loop embedded in a host
+  process with host-owned signals — no global signal handlers, no subreaper, no flock).
+  Both READMEs gain a "Use as a library" section.
+
+### Fixed
+
+- **`301`/`308` redirect coverage.** The manual redirect loop already followed every
+  redirect status; a regression test now pins the permanent ones (a moved download URL),
+  asserting the hop is taken and the second hop is a plain `GET` of the `Location` path.
+
 ## [0.1.1] - 2026-08-29
 
 ### Fixed

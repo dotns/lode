@@ -1,0 +1,25 @@
+[package]
+name = "lode-supervisor"
+description = "lode's embeddable process supervisor: the supervise loop, readiness/stop handshakes, hot-update and rollback."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lode-core = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+# `semver` orders update candidates; `getrandom` seeds the per-spawn LODE_INSTANCE id.
+semver = { workspace = true }
+getrandom = { workspace = true }
+
+# signal-hook backs only the OWNED signal source; nix backs the subreaper,
+# process-group signalling and exec passthrough.
+[target.'cfg(unix)'.dependencies]
+signal-hook = { workspace = true }
+nix = { workspace = true }

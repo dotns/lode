@@ -10,7 +10,7 @@ use crate::{manifest, state};
 
 /// Print a status summary for `cfg`. Writes through a locked stdout handle so the
 /// `clippy::print_stdout` lint (the `println!` macro is denied) stays satisfied.
-pub(crate) fn run(cfg: &Config) -> Result<()> {
+pub fn run(cfg: &Config) -> Result<()> {
     let mut out = std::io::stdout().lock();
 
     writeln!(out, "lode status")?;

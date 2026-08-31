@@ -1,6 +1,10 @@
-//! Streaming artifact download with a persistent per-version cache: the body is
-//! streamed to `$LODE_DIR/downloads/<ver>/<asset>.part` (bounded memory) and, once
-//! fully written, promoted to `$LODE_DIR/downloads/<ver>/<asset>`. The sha256 is
+//! Streaming artifact download with a persistent per-version cache.
+//!
+//! The body is streamed to `$LODE_DIR/downloads/<ver>/<asset>.part` (bounded
+//! memory) and, once fully written, promoted to
+//! `$LODE_DIR/downloads/<ver>/<asset>`.
+//!
+//! The sha256 is
 //! taken over the downloaded file (pre-unpack, design §4/§6) via the shared
 //! [`crate::verify::sha256_hex_file`] — reusing the audited hashing path rather than
 //! re-implementing it.
@@ -45,7 +49,7 @@ const MAX_DOWNLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// once fully written, atomically renamed into place. The integrity
 /// (`sha256 == asset.sha256`) + signature gate stays the caller's check
 /// ([`crate::install`]).
-pub(crate) fn fetch_artifact(
+pub fn fetch_artifact(
     cfg: &Config,
     asset: &Asset,
     version: &str,
@@ -139,19 +143,23 @@ fn reusable_cache(cache_path: &Path, expected_sha: &str) -> Option<(PathBuf, Str
 }
 
 /// Whether credentials may ride a download to `url`: true only when the URL's
-/// host is in `allowed_hosts` (case-insensitively). Split out from
+/// host is in `allowed_hosts` (case-insensitively).
+///
+/// Split out from
 /// [`fetch_artifact`] so the same-origin gate is unit-testable without a network,
 /// and reused by [`crate::manifest`]'s native `.sig` sidecar fetch (§6) so the
 /// sidecar obeys the identical same-origin credential rule.
-pub(crate) fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
+pub fn host_allowed(url: &str, allowed_hosts: &[String]) -> bool {
     crate::http::url_host(url).is_some_and(|host| host_in(host, allowed_hosts))
 }
 
-/// The host-level form of [`host_allowed`], reused as the per-redirect-hop
-/// attach predicate (see [`crate::http::send`]'s redirect policy): each hop's
-/// host must itself be allowlisted or the custom headers are dropped for that
-/// hop, so a redirecting server can't bounce the credentials to a third host.
-pub(crate) fn host_in(host: &str, allowed_hosts: &[String]) -> bool {
+/// The host-level form of [`host_allowed`].
+///
+/// Reused as the per-redirect-hop attach predicate (see the http module's
+/// redirect policy): each hop's host must itself be allowlisted or the custom
+/// headers are dropped for that hop, so a redirecting server can't bounce the
+/// credentials to a third host.
+pub fn host_in(host: &str, allowed_hosts: &[String]) -> bool {
     allowed_hosts.iter().any(|a| a.eq_ignore_ascii_case(host))
 }
 

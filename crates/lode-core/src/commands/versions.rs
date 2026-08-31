@@ -15,7 +15,7 @@ use crate::error::Result;
 /// Print installed versions newest-first, marking the `current` one with `*`.
 /// Writes through a locked stdout handle (the `println!` macro is denied
 /// workspace-wide).
-pub(crate) fn run(cfg: &Config) -> Result<()> {
+pub fn run(cfg: &Config) -> Result<()> {
     let dir = &cfg.global.dir;
     let versions = collect(dir)?;
     let current = current_version(dir);

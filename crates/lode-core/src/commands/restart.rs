@@ -14,7 +14,7 @@ use crate::state;
 
 /// Increment `restart_nonce` in `state.json` and report the new value. Writes
 /// through a locked stdout handle (the `println!` macro is denied workspace-wide).
-pub(crate) fn run(cfg: &Config) -> Result<()> {
+pub fn run(cfg: &Config) -> Result<()> {
     let nonce = bump_nonce(&cfg.global.dir)?;
 
     let mut out = std::io::stdout().lock();

@@ -15,7 +15,7 @@ use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey};
 use serde_json::{Map, Value, json};
 
-use crate::verify::{
+use lode_core::verify::{
     Artifact, artifact_message, decode_key, key_id, sha256_hex_file, verify_signature,
 };
 
@@ -153,11 +153,11 @@ pub(crate) fn sign(
 /// loader will refuse to load.
 fn validate_overrides(run: Option<&str>, exec: Option<&str>) -> Result<()> {
     if let Some(run) = run {
-        crate::manifest::validate_command_override("run", run)
+        lode_core::manifest::validate_command_override("run", run)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     if let Some(exec) = exec {
-        crate::manifest::validate_command_override("exec", exec)
+        lode_core::manifest::validate_command_override("exec", exec)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
     }
     Ok(())
@@ -320,12 +320,12 @@ pub(crate) fn manifest(
 /// `sig` field), and writes the signer's `key_id` + `sig` back into the file.
 ///
 /// The loader verifies this under `[trust].require_signature` (see
-/// [`crate::install::verify_manifest_identity`]); both sides build the signed bytes
-/// via [`crate::manifest::Manifest::signing_message`], so they always agree.
+/// [`lode_core::install::verify_manifest_identity`]); both sides build the signed bytes
+/// via [`lode_core::manifest::Manifest::signing_message`], so they always agree.
 pub(crate) fn manifest_sign(into: &str, key_path: &str) -> Result<()> {
     let bytes = fs::read(into).with_context(|| format!("read {into}"))?;
     let mut manifest =
-        crate::manifest::parse(&bytes).map_err(|e| anyhow::anyhow!("parse {into}: {e}"))?;
+        lode_core::manifest::parse(&bytes).map_err(|e| anyhow::anyhow!("parse {into}: {e}"))?;
 
     let private_b64 =
         fs::read_to_string(key_path).with_context(|| format!("read key {key_path}"))?;
@@ -355,9 +355,9 @@ pub(crate) fn manifest_sign(into: &str, key_path: &str) -> Result<()> {
 
 /// `init` — write the minimal starter `lode.toml` (the full documented reference
 /// lives in `docs/lode.example.toml`). Shares the same template lode scaffolds on
-/// first run ([`crate::config::STARTER_TOML`]).
+/// first run ([`lode_core::config::STARTER_TOML`]).
 pub(crate) fn init(path: Option<&str>) -> Result<()> {
-    let template = crate::config::STARTER_TOML;
+    let template = lode_core::config::STARTER_TOML;
     match path {
         Some(p) => {
             if Path::new(p).exists() {

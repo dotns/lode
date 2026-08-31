@@ -13,7 +13,6 @@
 use std::fs::File;
 use std::path::{Path, PathBuf};
 // `SystemTime` backs only the supervisor-only `mtime` poll.
-#[cfg(feature = "supervisor")]
 use std::time::SystemTime;
 
 use nix::fcntl::{Flock, FlockArg};
@@ -24,7 +23,7 @@ use crate::error::Result;
 /// Lifecycle status lode reports in `state.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Status {
+pub enum Status {
     Starting,
     Running,
     Held,
@@ -38,59 +37,59 @@ pub(crate) enum Status {
 /// Outcome of a version recorded in the rollout `history`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum HistoryResult {
+pub enum HistoryResult {
     Good,
     Bad,
 }
 
 /// One entry in the rollout history.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct HistoryEntry {
-    pub(crate) version: String,
-    pub(crate) at: String,
-    pub(crate) result: HistoryResult,
+pub struct HistoryEntry {
+    pub version: String,
+    pub at: String,
+    pub result: HistoryResult,
 }
 
 /// Contents of `$LODE_DIR/state.json`. Fields default to empty so a partial file
 /// (or one written only by the app) still deserialises.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub(crate) struct State {
+pub struct State {
     // --- lode-owned ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) current: Option<String>,
+    pub current: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_good: Option<String>,
+    pub last_good: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) available: Option<String>,
+    pub available: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) channel: Option<String>,
+    pub channel: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) status: Option<Status>,
+    pub status: Option<Status>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) pid: Option<u32>,
+    pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_check: Option<String>,
+    pub last_check: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) last_error: Option<String>,
+    pub last_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) history: Vec<HistoryEntry>,
+    pub history: Vec<HistoryEntry>,
     /// Monotonic counter lode bumps each time it detects an edited `lode.toml` while
     /// the app is RUNNING. lode never auto-restarts on a config edit — it only bumps
     /// this so the app learns a restart is needed to apply the change; the app picks
     /// its own moment and requests the restart by bumping [`Self::restart_nonce`]
     /// (which makes lode re-read `lode.toml`). See design §7.
     #[serde(default)]
-    pub(crate) config_generation: u64,
+    pub config_generation: u64,
 
     // --- app-owned (requests) ---
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) target: Option<String>,
+    pub target: Option<String>,
     #[serde(default)]
-    pub(crate) restart_nonce: u64,
+    pub restart_nonce: u64,
     /// App-owned: set `true` to ask lode not to (re)start the process (maintenance);
     /// lode reports `status = held` and waits until it is cleared (design §7).
     #[serde(default)]
-    pub(crate) hold: bool,
+    pub hold: bool,
 
     // --- co-owned staged-update + readiness handshake (§8) ---
     /// The value is `{LODE_INSTANCE}-{phase}`, where the trailing phase digit drives
@@ -99,13 +98,15 @@ pub(crate) struct State {
     /// `-2`. lode reads `-0`/`-2` and writes the `-1` prompt (clearing it at cut-over
     /// so the new spawn's `-0` is unambiguous). Only exercised under `readiness=state`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) ready: Option<String>,
+    pub ready: Option<String>,
 }
 
-/// Read `state.json` if it exists. Returns `Ok(None)` when the file is absent.
+/// Read `state.json` if it exists.
+///
+/// Returns `Ok(None)` when the file is absent.
 /// Strict: a corrupt file is an error — correct for CLI commands, where failing
 /// loudly beats acting on garbage. Supervise-loop paths use [`read_lenient`].
-pub(crate) fn read(path: &Path) -> Result<Option<State>> {
+pub fn read(path: &Path) -> Result<Option<State>> {
     match std::fs::read(path) {
         Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -113,14 +114,17 @@ pub(crate) fn read(path: &Path) -> Result<Option<State>> {
     }
 }
 
-/// Lenient read for supervise-loop / boot paths: lode runs as PID 1, so a
-/// corrupt or torn `state.json` must never propagate an error and kill the
-/// supervisor (the corrupt file survives restarts on the volume, turning one
-/// bad write into a crash-loop). A parse failure logs a warning and quarantines
+/// Lenient read for supervise-loop / boot paths.
+///
+/// lode runs as PID 1, so a corrupt or torn `state.json` must never propagate an
+/// error and kill the supervisor (the corrupt file survives restarts on the
+/// volume, turning one bad write into a crash-loop).
+///
+/// A parse failure logs a warning and quarantines
 /// the file — best-effort rename to `state.json.corrupt` — so the next write
 /// starts clean while the evidence is preserved. An absent file is `None`; any
 /// other I/O error is logged and also yields `None`.
-pub(crate) fn read_lenient(path: &Path) -> Option<State> {
+pub fn read_lenient(path: &Path) -> Option<State> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -154,7 +158,7 @@ fn quarantine_path(path: &Path) -> PathBuf {
 
 /// Atomically write `state.json`: serialise, write a sibling temp file in the
 /// same directory, then rename over the target (rename is atomic within a fs).
-pub(crate) fn write(path: &Path, state: &State) -> Result<()> {
+pub fn write(path: &Path, state: &State) -> Result<()> {
     let json = serde_json::to_vec_pretty(state)?;
     let tmp = temp_path(path);
     std::fs::write(&tmp, &json)?;
@@ -162,14 +166,17 @@ pub(crate) fn write(path: &Path, state: &State) -> Result<()> {
     Ok(())
 }
 
-/// Serialised read-modify-write for strict (CLI) paths: hold an exclusive
-/// advisory `flock(2)` on the sibling `state.json.lock` across the whole
-/// read → `edit` → atomic-write cycle, so concurrent lode RMWs (and any app
-/// honouring the documented contract — docs/integration.md §2) can never lose
-/// each other's field updates. Plain readers stay lock-free: the temp+rename
+/// Serialised read-modify-write for strict (CLI) paths.
+///
+/// Holds an exclusive advisory `flock(2)` on the sibling `state.json.lock` across
+/// the whole read → `edit` → atomic-write cycle, so concurrent lode RMWs (and any
+/// app honouring the documented contract — docs/integration.md §2) can never lose
+/// each other's field updates.
+///
+/// Plain readers stay lock-free: the temp+rename
 /// replacement already guarantees a complete snapshot. Strict like [`read`]
 /// (a corrupt file is an error); returns the state as written.
-pub(crate) fn locked_update(path: &Path, edit: impl FnOnce(&mut State)) -> Result<State> {
+pub fn locked_update(path: &Path, edit: impl FnOnce(&mut State)) -> Result<State> {
     let lock = lock_exclusive(path)?;
     let mut state = read(path)?.unwrap_or_default();
     edit(&mut state);
@@ -179,14 +186,14 @@ pub(crate) fn locked_update(path: &Path, edit: impl FnOnce(&mut State)) -> Resul
 }
 
 /// Best-effort, lenient sibling of [`locked_update`] for supervise-loop / PID-1
-/// paths, where nothing may take down lode (design §8): a lock failure (e.g. a
-/// read-only disk) degrades to the unserialised RMW with a warning, a corrupt
-/// `state.json` is quarantined by [`read_lenient`] and the edit starts from
-/// defaults, and a write failure is logged and swallowed.
+/// paths, where nothing may take down lode (design §8).
+///
+/// A lock failure (e.g. a read-only disk) degrades to the unserialised RMW with a
+/// warning, a corrupt `state.json` is quarantined by [`read_lenient`] and the edit
+/// starts from defaults, and a write failure is logged and swallowed.
 // supervisor-only: the keep-alive supervise loop is the sole caller; the engine
 // layer's command paths use the strict `locked_update` instead.
-#[cfg(feature = "supervisor")]
-pub(crate) fn locked_update_lenient(path: &Path, edit: impl FnOnce(&mut State)) {
+pub fn locked_update_lenient(path: &Path, edit: impl FnOnce(&mut State)) {
     let lock = match lock_exclusive(path) {
         Ok(lock) => Some(lock),
         Err(e) => {
@@ -233,8 +240,7 @@ fn lock_path(path: &Path) -> PathBuf {
 /// Last-modified time of `state.json`, or `None` if it is absent. lode polls
 /// this to notice app-written requests without an out-of-band signal (§7).
 // supervisor-only: only the supervise loop's mtime-poll consults it (§7).
-#[cfg(feature = "supervisor")]
-pub(crate) fn mtime(path: &Path) -> Result<Option<SystemTime>> {
+pub fn mtime(path: &Path) -> Result<Option<SystemTime>> {
     match std::fs::metadata(path) {
         Ok(meta) => Ok(Some(meta.modified()?)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

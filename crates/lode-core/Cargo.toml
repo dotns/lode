@@ -1,0 +1,38 @@
+[package]
+name = "lode-core"
+description = "lode's clap-free, signal-free core: config, manifest resolution, verified download/install, and the Engine facade."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sha2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+semver = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+zip = { workspace = true }
+rustls = { workspace = true }
+ureq = { workspace = true }
+
+# lode is Unix-only (PID-1 subreaper, signal forwarding, exec passthrough, rlimit).
+# `nix` is a core-layer dep: `state.rs` uses it for the flock'd state RMW and
+# `commands/update.rs` probes the running instance via `lock::live_holder`.
+# `rlimit` backs `InitOptions::suppress_core_dumps`.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+rlimit = { workspace = true }

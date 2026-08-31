@@ -111,6 +111,25 @@ shipped alongside it) it is the operator/publisher toolkit.
 - **Trust** — `sha256` + `ed25519`; set `[trust].trusted_keys` + `require_signature = off | auto | enforce`. Note: verification defaults to `auto` (enforced only when trusted keys are configured) — set `require_signature = "enforce"` for production. Signing is the publisher's job — see [Integration §3](docs/integration.md).
 - **Private sources** — `[http].headers` (with `${ENV}` expansion) is sent on every fetch.
 
+## Use as a library
+
+lode is three crates: **`lode-core`** (clap-free, signal-free — config, manifest
+resolution, verified download/install, the `Engine` facade), **`lode-supervisor`**
+(the supervise loop + readiness/stop handshakes, over `lode-core`), and **`lode`**
+(the binary: clap + authoring). Embed either library without inheriting the CLI or
+lode's process-global side effects — those are opt-in via `InitOptions`.
+
+```toml
+[dependencies]
+lode-core = "0.1"        # config + Engine (no clap, no signals)
+lode-supervisor = "0.1"  # + the supervise loop, driven by an injected SignalSource
+```
+
+```bash
+cargo run -p lode-core --example engine        # config in code + read-only Engine
+cargo run -p lode-supervisor --example embedded # host-owned signals, no subreaper/flock
+```
+
 ## Build from source
 
 ```bash

@@ -24,18 +24,20 @@ use crate::idval::validate_id;
 use crate::manifest::{Asset, Manifest, format_from_name, validate_command_override};
 
 /// Per-version metadata written to `versions/<ver>/.lode.json` so a version can
-/// be launched offline without re-consulting the manifest (design §15). Read back
+/// be launched offline without re-consulting the manifest (design §15).
+///
+/// Read back
 /// by the supervisor. `run`/`exec` are the manifest asset's optional launch
 /// overrides, copied at install time so an offline relaunch still applies them
 /// (they take precedence over the live `[command].run`/`exec`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Marker {
-    pub(crate) version: String,
+pub struct Marker {
+    pub version: String,
     #[serde(default)]
-    pub(crate) run: Option<String>,
+    pub run: Option<String>,
     #[serde(default)]
-    pub(crate) exec: Option<String>,
-    pub(crate) format: String,
+    pub exec: Option<String>,
+    pub format: String,
 }
 
 /// Verify and install one version into `versions/<version>`.
@@ -48,7 +50,7 @@ pub(crate) struct Marker {
 /// tree + marker; the artifact itself is **left in place** as a reusable cache (a
 /// later launch can re-extract it without re-downloading — it is reclaimed only by
 /// [`prune`]). On failure no partial version dir is left.
-pub(crate) fn install(
+pub fn install(
     cfg: &Config,
     version: &str,
     asset: &Asset,
@@ -97,7 +99,9 @@ pub(crate) fn install(
 
 /// Dev/testing: install a version from a **local** file, skipping the network, the
 /// sha256 integrity check and the signature check (the caller supplies trusted
-/// bytes). The staging + atomic activation are identical to a real [`install`], so
+/// bytes).
+///
+/// The staging + atomic activation are identical to a real [`install`], so
 /// the resulting `versions/<version>` is indistinguishable from a downloaded one —
 /// it just never consulted a manifest. `source`'s filename selects the packaging
 /// format (§3) and is where a raw/gz file lands inside the version dir; the launch
@@ -106,8 +110,7 @@ pub(crate) fn install(
 /// `current`/`last_good` in `state.json`. Backs `lode-cli seed`.
 // cli-only: the offline `seed` command is the sole caller (the `Engine` facade
 // never seeds), so it is gated out of the `--features engine` library.
-#[cfg(feature = "cli")]
-pub(crate) fn seed_local(cfg: &Config, version: &str, source: &Path, activate: bool) -> Result<()> {
+pub fn seed_local(cfg: &Config, version: &str, source: &Path, activate: bool) -> Result<()> {
     validate_id("version", version)?;
     if !source.is_file() {
         return Err(Error::Install(format!(
@@ -212,7 +215,7 @@ fn chmod_command_targets(cfg: &Config, asset: &Asset, dir: &Path) -> Result<()> 
 /// Atomically point `current` at `versions/<version>` via a temp-symlink rename.
 /// The link target is relative (`versions/<ver>`) so the data dir stays movable.
 #[cfg(unix)]
-pub(crate) fn switch_current(cfg: &Config, version: &str) -> Result<()> {
+pub fn switch_current(cfg: &Config, version: &str) -> Result<()> {
     let dir = &cfg.global.dir;
     let version_dir = dir.join("versions").join(version);
     if !version_dir.is_dir() {
@@ -231,19 +234,21 @@ pub(crate) fn switch_current(cfg: &Config, version: &str) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn switch_current(_cfg: &Config, _version: &str) -> Result<()> {
+pub fn switch_current(_cfg: &Config, _version: &str) -> Result<()> {
     Err(Error::Install(
         "symlink-based current switch is only supported on unix".to_owned(),
     ))
 }
 
 /// Prune installed versions, keeping `current` + `last_good` + the newest
-/// `keep_versions` (by semver). Everything else under `versions/` is removed, and the
+/// `keep_versions` (by semver).
+///
+/// Everything else under `versions/` is removed, and the
 /// matching per-version download cache (`downloads/<v>/`) is reclaimed in lockstep so
 /// the retained artifact set never outlives the version set. A download-only `<v>`
 /// (downloaded but not — or no longer — extracted) is pruned too unless it is in the
 /// keep set, so a failed install's artifact does not accumulate indefinitely.
-pub(crate) fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>) -> Result<()> {
+pub fn prune(cfg: &Config, current: Option<&str>, last_good: Option<&str>) -> Result<()> {
     let dir = &cfg.global.dir;
     let versions_dir = dir.join("versions");
     let installed = collect_version_dirs(&versions_dir)?;
@@ -300,16 +305,20 @@ fn cached_download_versions(downloads_dir: &Path) -> Vec<String> {
     out
 }
 
-/// Startup garbage collection: drop interrupted downloads (`*.part`) and
-/// half-extracted `versions/*.tmp`, while leaving the verified per-version download
-/// cache intact (it is reclaimed by [`prune`], not here). `.part` temps live inside
+/// Startup garbage collection for a previous run's leftovers.
+///
+/// Drops interrupted downloads (`*.part`) and half-extracted `versions/*.tmp`,
+/// while leaving the verified per-version download cache intact (it is reclaimed
+/// by [`prune`], not here).
+///
+/// `.part` temps live inside
 /// the per-version cache dir (`downloads/<v>/<asset>.part`), so the sweep descends one
 /// level; a legacy flat `downloads/*.part` is also reaped. Best-effort — individual
 /// failures are ignored (used by the supervisor at startup, design §5).
 // `Result` is part of the supervisor's startup-sequence contract (it calls `gc`
 // alongside other fallible setup), even though GC itself swallows I/O errors.
 #[allow(clippy::unnecessary_wraps)]
-pub(crate) fn gc(cfg: &Config) -> Result<()> {
+pub fn gc(cfg: &Config) -> Result<()> {
     let dir = &cfg.global.dir;
     if let Ok(entries) = fs::read_dir(dir.join("downloads")) {
         for entry in entries.flatten() {
@@ -341,9 +350,11 @@ pub(crate) fn gc(cfg: &Config) -> Result<()> {
 
 /// Read a version's `.lode.json` marker (written at install time) so the
 /// supervisor can launch it offline — the `run`/`exec` overrides + `format`
-/// without re-fetching the manifest (design §15). Errors if the version is not
+/// without re-fetching the manifest (design §15).
+///
+/// Errors if the version is not
 /// installed.
-pub(crate) fn marker(cfg: &Config, version: &str) -> Result<Marker> {
+pub fn marker(cfg: &Config, version: &str) -> Result<Marker> {
     let path = cfg
         .global
         .dir
@@ -356,18 +367,15 @@ pub(crate) fn marker(cfg: &Config, version: &str) -> Result<Marker> {
 }
 
 /// Place a downloaded runtime payload into `runtime_dir`, reusing the same
-/// per-`format` extraction as a version install (design §4 "[runtime]"). `raw`/`gz`
+/// per-`format` extraction as a version install (design §4 "[runtime]").
+///
+/// `raw`/`gz`
 /// land as `runtime_dir/<name>`; archives are unpacked into `runtime_dir` and the
 /// named binary is hoisted to `runtime_dir/<name>` (see [`hoist_runtime_bin`]) so it
 /// always ends up at the root the supervisor puts on the child PATH — even when the
 /// archive nests it. The placed binary is made executable. No digest/signature check
 /// — the `[runtime]` config carries none.
-pub(crate) fn place_runtime(
-    runtime_dir: &Path,
-    temp_path: &Path,
-    format: &str,
-    name: &str,
-) -> Result<()> {
+pub fn place_runtime(runtime_dir: &Path, temp_path: &Path, format: &str, name: &str) -> Result<()> {
     // `name` keys `runtime/<name>`; reject any traversal before the join.
     validate_id("runtime name", name)?;
     fs::create_dir_all(runtime_dir)?;
@@ -552,7 +560,7 @@ fn check_sig(version: &str, asset: &Asset, sha: &str, sig: &str, keys: &[String]
 /// - `sig` present, no trusted keys => cannot verify; warn and accept.
 ///
 /// Call this right after [`crate::manifest::fetch`], before resolving/downloading.
-pub(crate) fn verify_manifest_identity(cfg: &Config, manifest: &Manifest) -> Result<()> {
+pub fn verify_manifest_identity(cfg: &Config, manifest: &Manifest) -> Result<()> {
     if cfg.trust.require_signature == RequireSignature::Off {
         return Ok(());
     }
@@ -580,11 +588,13 @@ fn check_manifest_sig(manifest: &Manifest, sig: &str, keys: &[String]) -> Result
 }
 
 /// A one-line, secret-free summary of the catalog's effective trust posture for
-/// `status` to surface. The catalog signature is verify-if-present (never required,
+/// `status` to surface.
+///
+/// The catalog signature is verify-if-present (never required,
 /// see [`verify_manifest_identity`]), so an *unsigned* catalog is a normal,
 /// non-failure state — per-artifact signatures (gated by `require_signature`) still
 /// bind every download, and the downgrade floor still guards `latest`.
-pub(crate) fn manifest_trust_posture(cfg: &Config, manifest: &Manifest) -> String {
+pub fn manifest_trust_posture(cfg: &Config, manifest: &Manifest) -> String {
     if cfg.trust.require_signature == RequireSignature::Off {
         return "off (integrity only; signature checks disabled)".to_owned();
     }
@@ -606,10 +616,12 @@ pub(crate) fn manifest_trust_posture(cfg: &Config, manifest: &Manifest) -> Strin
 
 /// Collect trusted keys from `[trust].trusted_keys` plus, if set, the
 /// `trusted_keys_file` (one `key_id base64` per line; `#` comments and blanks
-/// skipped). Entry parsing is handled in [`crate::verify`]. Exposed to
+/// skipped).
+///
+/// Entry parsing is handled in [`crate::verify`]. Exposed to
 /// [`crate::manifest`] so the native `.sig` sidecar fallback (§6) can ask whether a
 /// signature is required (`auto` with keys, or `enforce`) using the same key set.
-pub(crate) fn trusted_keys(cfg: &Config) -> Result<Vec<String>> {
+pub fn trusted_keys(cfg: &Config) -> Result<Vec<String>> {
     let mut keys = cfg.trust.trusted_keys.clone();
     if let Some(path) = cfg.trust.trusted_keys_file.as_deref() {
         let text = fs::read_to_string(path)
@@ -973,14 +985,16 @@ fn cmp_desc(a: &str, b: &str) -> Ordering {
 }
 
 /// The anti-downgrade floor: the highest version this client has committed to — the
-/// semver-max of `current` and `last_good` from `state.json`. Passed to
+/// semver-max of `current` and `last_good` from `state.json`.
+///
+/// Passed to
 /// [`crate::manifest::resolve_target`], which refuses to *follow `latest`* onto
 /// anything below it (rollback protection). `None` when neither is set (a clean
 /// first install has no floor, so bootstrap is never blocked). Reuses [`cmp_desc`]
 /// (semver-descending), so a non-semver id sorts after any semver one and the
 /// downstream guard — which only compares when both parse as semver — treats a
 /// non-semver floor as "no provable downgrade".
-pub(crate) fn version_floor(current: Option<&str>, last_good: Option<&str>) -> Option<String> {
+pub fn version_floor(current: Option<&str>, last_good: Option<&str>) -> Option<String> {
     let mut candidates: Vec<&str> = [current, last_good].into_iter().flatten().collect();
     candidates.sort_by(|a, b| cmp_desc(a, b));
     candidates.first().map(|s| (*s).to_owned())

@@ -1,6 +1,8 @@
-//! Supervised-service runtime + CLI passthrough (design §5/§8/§9).
+#![forbid(unsafe_code)]
+//! lode-supervisor — the embeddable supervised-service runtime + exec passthrough
+//! (design §5/§8/§9).
 //!
-//! [`serve`] is the bare-`lode` path: acquire the single-instance lock, clean up
+//! [`serve_embedded`] drives the same loop bare `lode` runs: acquire the single-instance lock, clean up
 //! orphans/garbage from a previous run, decide which version to launch (bootstrap
 //! the latest only when nothing is installed), then spawn the app as a child and
 //! supervise it. By default (`supervise.restart=on-failure`) lode keeps the app
@@ -17,6 +19,10 @@
 //! `restart_nonce` requests (§7), runs the `[update].policy` check (§5), and — when
 //! a target is applied — performs the stop-start hot-update with the readiness/stop
 //! handshake (§8) and automatic rollback to `last_good` on failure.
+//!
+//! [`serve_core`] is the same loop with a caller-supplied config *reloader*, which
+//! is what the `lode` binary's CLI wrapper uses to re-resolve from its parsed
+//! globals on a `lode.toml`-change reload.
 //!
 //! [`exec_passthrough`] is the `lode <args>` path: validate the version (bootstrap
 //! if none), prepare the same argv/env/runtime, then `exec`-replace into the app —
@@ -38,20 +44,12 @@ use nix::sys::wait::{WaitPidFlag, WaitStatus, waitpid};
 use nix::unistd::Pid;
 use signal_hook::iterator::Signals;
 
-#[cfg(feature = "cli")]
-use crate::cli::Globals;
-// The `config` module alias backs the cli `serve` wrapper's `config::resolve`
-// (and the test fixtures). It is unused on the embeddable `--features supervisor`
-// path, so gate it to keep that build warning-clean.
-#[cfg(any(feature = "cli", test))]
-use crate::config;
-use crate::config::{Config, Policy, Readiness, RestartPolicy};
-use crate::engine::{
+use lode_core::config::{Config, Policy, Readiness, RestartPolicy};
+use lode_core::engine::{
     Target, ensure_runtime, locate, required_asset, resolve_target, version_installed,
 };
-use crate::error::{Error, Result};
-use crate::state::{self, HistoryEntry, HistoryResult, State, Status};
-use crate::{download, install, manifest};
+use lode_core::state::{self, HistoryEntry, HistoryResult, State, Status};
+use lode_core::{Error, Result, download, install, manifest};
 
 /// Supervise-loop tick. Bounds signal-forwarding and child-exit latency while
 /// leaving headroom for the C2 state-poll / update-observation on the same cadence.
@@ -115,26 +113,6 @@ impl SuperviseOptions {
     }
 }
 
-/// Run the app as a supervised service (bare `lode`). A thin wrapper over
-/// [`serve_core`]: resolve config from the parsed globals, install the OWNED
-/// (signal-hook) signal source with lode's standard set, and drive the loop with
-/// the binary defaults (subreaper + single-instance lock), re-resolving from the
-/// globals on a `lode.toml`-change reload. Behaviour is identical to the pre-seam
-/// loader: `set_subreaper` + `flock` + `signal_hook` registration + the same loop.
-#[cfg(feature = "cli")]
-pub(crate) fn serve(globals: &Globals) -> Result<ExitCode> {
-    let cfg = config::resolve(globals)?;
-    // Install the signal handlers ONCE (before any bootstrap work): resolve/install
-    // and the runtime fetch may download for minutes, and as PID 1 an unhandled
-    // SIGTERM is simply ignored — `docker stop` would hang until the SIGKILL.
-    let mut signals = OwnedSignalSource::new(&cfg)?;
-    serve_core(cfg, &mut signals, SuperviseOptions::owned(), |_cfg| {
-        // A paused app whose `lode.toml` was edited: re-resolve from the globals
-        // (CLI/env layer included) so a reload behaves exactly as the loader did.
-        config::resolve(globals)
-    })
-}
-
 /// Embeddable supervise entry (Globals-free).
 ///
 /// Drives the same supervise loop the bare-`lode` binary uses, reading signal
@@ -172,13 +150,20 @@ fn reload_from_config_path(cfg: &Config) -> Result<Config> {
     Ok(next)
 }
 
-/// The shared supervise loop behind both [`serve`] and [`serve_embedded`]. Holds
+/// The supervise loop, with a caller-supplied config `reload`.
+///
+/// Behind [`serve_embedded`] (which re-reads `cfg.config_path`) and the `lode`
+/// binary's CLI `serve` wrapper (which re-resolves from its parsed globals). Holds
 /// the single-instance lock (when `opts.acquire_lock`) across config reloads: each
 /// run supervises the app until graceful shutdown (→ return the child's exit code)
 /// or a `lode.toml`-change recovery (→ `reload` the config and re-run). Reads all
 /// signal events from the injected `signals` source; sets the subreaper / acquires
 /// the lock only as `opts` directs.
-fn serve_core(
+///
+/// # Errors
+/// Propagates a single-instance lock failure (when `opts.acquire_lock`) and any
+/// fatal bootstrap error, exactly as [`serve_embedded`] does.
+pub fn serve_core(
     mut cfg: Config,
     signals: &mut dyn SignalSource,
     opts: SuperviseOptions,
@@ -809,7 +794,7 @@ fn exit_action(
 
 // --- pure update / readiness / rollback decision logic (design §5/§8) ---
 
-/// What an [`update.policy`](crate::config::Policy) check should do with the
+/// What an [`update.policy`](lode_core::config::Policy) check should do with the
 /// channel-latest version it just resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PolicyAction {
@@ -1169,7 +1154,7 @@ impl<'c> Supervisor<'c> {
         // out of scope (design §8) and fall back to stop-start with this note.
         if !matches!(
             self.cfg.supervise.restart_mode,
-            crate::config::RestartMode::StopStart
+            lode_core::config::RestartMode::StopStart
         ) {
             tracing::info!(
                 mode = ?self.cfg.supervise.restart_mode,
@@ -2497,8 +2482,8 @@ impl<'c> Supervisor<'c> {
 // --- setup helpers ---
 
 /// Acquire the single-instance PID lock (RAII; released on drop).
-fn lock_acquire(cfg: &Config) -> Result<crate::lock::LockGuard> {
-    crate::lock::acquire(&cfg.global.dir, &cfg.global.app)
+fn lock_acquire(cfg: &Config) -> Result<lode_core::lock::LockGuard> {
+    lode_core::lock::acquire(&cfg.global.dir, &cfg.global.app)
 }
 
 /// Become a child subreaper so re-parented grandchildren are reaped by us (PID 1
@@ -3457,12 +3442,12 @@ mod tests {
     /// A minimal config rooted at `dir` for supervisor-level tests.
     fn test_config(dir: PathBuf) -> Config {
         Config {
-            global: config::Global {
+            global: lode_core::config::Global {
                 app: "myapp".to_owned(),
                 dir,
                 log_level: "info".to_owned(),
             },
-            update: config::Update {
+            update: lode_core::config::Update {
                 manifest: None,
                 github: None,
                 github_api: "https://api.github.com".to_owned(),
@@ -3473,28 +3458,28 @@ mod tests {
                 keep_versions: 3,
                 pin: None,
             },
-            http: config::Http {
+            http: lode_core::config::Http {
                 headers: Vec::new(),
                 credential_hosts: Vec::new(),
                 allow_insecure: false,
             },
-            trust: config::Trust {
-                require_signature: config::RequireSignature::Off,
+            trust: lode_core::config::Trust {
+                require_signature: lode_core::config::RequireSignature::Off,
                 trusted_keys: Vec::new(),
                 trusted_keys_file: None,
             },
-            command: config::Command {
+            command: lode_core::config::Command {
                 run: Some("./app".to_owned()),
                 exec: Some("./app".to_owned()),
-                workdir: crate::config::DEFAULT_WORKDIR_PLACEHOLDER.to_owned(),
+                workdir: lode_core::config::DEFAULT_WORKDIR_PLACEHOLDER.to_owned(),
             },
-            runtime: config::Runtime {
+            runtime: lode_core::config::Runtime {
                 runtime: None,
                 download: None,
                 version: None,
                 version_check: None,
             },
-            supervise: config::Supervise {
+            supervise: lode_core::config::Supervise {
                 restart: RestartPolicy::OnFailure,
                 restart_backoff: 1,
                 restart_backoff_max: 30,
@@ -3504,10 +3489,10 @@ mod tests {
                 prepare_timeout: 0,
                 health_grace: 15,
                 stop_timeout: 10,
-                restart_mode: crate::config::RestartMode::StopStart,
+                restart_mode: lode_core::config::RestartMode::StopStart,
                 listen: None,
             },
-            signals: config::Signals {
+            signals: lode_core::config::Signals {
                 forward: Vec::new(),
                 restart: None,
             },

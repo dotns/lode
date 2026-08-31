@@ -16,7 +16,7 @@ use crate::state;
 /// Set `state.json`'s `target` to `version` (or the recorded `last_good`) and
 /// report it. Writes through a locked stdout handle (the `println!` macro is
 /// denied workspace-wide).
-pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
+pub fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
     let target = set_target(&cfg.global.dir, version)?;
 
     let mut out = std::io::stdout().lock();

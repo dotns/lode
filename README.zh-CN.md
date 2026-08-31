@@ -108,6 +108,24 @@ lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何
 - **信任** —— `sha256` + `ed25519`;设 `[trust].trusted_keys` + `require_signature = off | auto | enforce`。注意:校验默认为 `auto`(仅在配置了受信密钥时才强制)—— 生产环境请设 `require_signature = "enforce"`。签名是发布方的事 —— 见[集成 §3](docs/integration.zh-CN.md)。
 - **私有源** —— `[http].headers`(支持 `${ENV}` 展开)随每次拉取发送。
 
+## 作为库使用
+
+lode 由三个 crate 组成:**`lode-core`**(不含 clap、不碰信号——配置、manifest 解析、
+校验下载/安装、`Engine` 门面)、**`lode-supervisor`**(监管循环 + 就绪/停止握手,构建在
+`lode-core` 之上)、**`lode`**(二进制:clap + 发布工具)。嵌入前两者不会带上 CLI,也不会
+自动安装 lode 的进程级副作用——那些通过 `InitOptions` 显式开启。
+
+```toml
+[dependencies]
+lode-core = "0.1"        # 配置 + Engine(无 clap、无信号)
+lode-supervisor = "0.1"  # + 监管循环,由注入的 SignalSource 驱动
+```
+
+```bash
+cargo run -p lode-core --example engine        # 代码里构造配置 + 只读 Engine
+cargo run -p lode-supervisor --example embedded # 宿主自持信号,无 subreaper/flock
+```
+
 ## 从源码构建
 
 ```bash

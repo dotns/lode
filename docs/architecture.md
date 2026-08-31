@@ -554,27 +554,36 @@ The global arguments are the `--xxx` of §10 (parsed by clap, with `env` fallbac
 ## 14. Rust module layout (multiple files)
 
 ```
-Cargo.toml          # package + [workspace] + [workspace.lints] + [profile.*] + dependencies
+Cargo.toml          # virtual workspace root: members + [workspace.package] + [workspace.dependencies] + [workspace.lints] + [profile.*]
 Cargo.lock          # committed (binary project)
 rust-toolchain.toml # channel = "1.96.0", components, musl targets
 .cargo/config.toml  # +crt-static (musl), git-fetch-with-cli
 deny.toml clippy.toml rustfmt.toml .config/nextest.toml
-src/
-  main.rs           # #![forbid(unsafe_code)]; install aws-lc-rs provider; panic hook; rlimit suppress core; subreaper (zombie reaping); CLI dispatch
-  cli.rs            # clap definitions + subcommands
-  config.rs         # Config + lode.toml parsing + merge (CLI>env>lode.toml>defaults) + validation
-  error.rs          # thiserror error types
-  logging.rs        # tracing initialization
-  idval.rs          # path-component validation for untrusted ids (version / runtime name) and launch-command overrides
-  manifest.rs       # serde types (JSON) + both source adapters + select asset by name + format-from-extension (not persisted locally)
-  http.rs           # ureq (rustls/aws-lc-rs) + headers passthrough + redaction
-  verify.rs         # sha256 + ed25519 verify/sign/keygen
-  download.rs       # streaming download to temp + sha256 + unpack per format
-  install.rs        # versions directory + atomic symlink switch + prune; startup GC (clean *.part/*.tmp, reclaim per keep_versions)
-  lock.rs           # PID lock (O_EXCL) + stale-lock takeover
-  state.rs          # state.json atomic read/write
-  supervisor.rs     # spawn / backoff restart / signal forwarding / graceful stop / health observation / rollback / restart mode / clean up orphan child processes at startup
-  commands/         # run.rs status.rs update.rs rollback.rs restart.rs versions.rs keygen.rs sign.rs verify_cmd.rs
+crates/
+  lode-core/        # clap-free, signal-free core (embeddable library)
+    src/lib.rs      #   InitOptions (crypto provider / core-dump / logging / panic hook) + the public re-exports
+    src/config.rs   #   Config + lode.toml parsing + merge (Overrides>lode.toml>defaults) + validation
+    src/engine.rs   #   Engine facade: status / check / install / rollback / versions / restart / resolve_target / ensure_runtime
+    src/error.rs    #   thiserror error types
+    src/logging.rs  #   tracing initialization
+    src/idval.rs    #   path-component validation for untrusted ids (version / runtime name) and launch-command overrides
+    src/manifest.rs #   serde types (JSON) + both source adapters + select asset by name + format-from-extension (not persisted locally)
+    src/http.rs     #   ureq (rustls/aws-lc-rs) + headers passthrough + manual redirects + redaction
+    src/verify.rs   #   sha256 + ed25519 verify/sign/keygen
+    src/download.rs #   streaming download to the per-version cache + sha256
+    src/install.rs  #   versions directory + atomic symlink switch + prune; startup GC (clean *.part/*.tmp, reclaim per keep_versions)
+    src/lock.rs     #   PID lock (O_EXCL) + stale-lock takeover
+    src/state.rs    #   state.json atomic read/write
+    src/commands/   #   status.rs update.rs rollback.rs restart.rs versions.rs seed.rs
+  lode-supervisor/  # embeddable process supervisor (depends on lode-core)
+    src/lib.rs      #   spawn / backoff restart / signal forwarding / graceful stop / health observation / rollback / restart mode / clean up orphan child processes at startup; SignalSource seam
+  lode/             # the binary (depends on both) — the only clap consumer
+    src/main.rs     #   #![forbid(unsafe_code)]; maps run() to an exit code
+    src/lib.rs      #   run(): multi-call dispatch (lode / lode-cli) + the process-global init the binary installs
+    src/cli.rs      #   clap definitions + subcommands (+ the ValueEnum mirrors of the core config enums)
+    src/config_cli.rs #  clap Globals -> lode_core::config::Overrides + config file search / starter scaffold
+    src/serve_cli.rs  #  bare `lode` serve wrapper (owned signal source + reload-from-globals)
+    src/authoring.rs  #  keygen / sign / verify / manifest / init
 ```
 
 ---

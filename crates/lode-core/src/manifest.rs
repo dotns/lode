@@ -1,5 +1,7 @@
 //! The `lode/v1` remote manifest: serde types, fetch, and version/asset
-//! resolution (design §12, source-adapters §6). The manifest lives remotely and is
+//! resolution (design §12, source-adapters §6).
+//!
+//! The manifest lives remotely and is
 //! never persisted locally; per-version metadata is written into the version dir at
 //! install time (the `.lode.json` marker, see [`crate::install`]).
 //!
@@ -22,21 +24,23 @@ use crate::idval::validate_id;
 /// The only manifest schema this loader understands.
 const SCHEMA: &str = "lode/v1";
 
-/// A parsed `lode/v1` manifest. `key_id`/`sig` are the **optional** top-level
+/// A parsed `lode/v1` manifest.
+///
+/// `key_id`/`sig` are the **optional** top-level
 /// publisher identity + whole-catalog signature: when present they are verified by
 /// [`crate::install::verify_manifest_identity`] over [`Manifest::signing_message`]
 /// (verify-if-present tamper-evidence), but they are never required — `latest`
 /// rollback is instead guarded client-side by [`resolve_target`]'s downgrade floor.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Manifest {
-    pub(crate) schema: String,
-    pub(crate) name: String,
+pub struct Manifest {
+    pub schema: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) key_id: Option<String>,
+    pub key_id: Option<String>,
     #[serde(default)]
-    pub(crate) sig: Option<String>,
-    pub(crate) channels: BTreeMap<String, Channel>,
-    pub(crate) versions: BTreeMap<String, VersionEntry>,
+    pub sig: Option<String>,
+    pub channels: BTreeMap<String, Channel>,
+    pub versions: BTreeMap<String, VersionEntry>,
 }
 
 impl Manifest {
@@ -81,7 +85,7 @@ impl Manifest {
     /// `name`, `key_id` and [`Self::canonical_catalog`]. The publisher
     /// (`lode-cli manifest-sign`) and the loader ([`crate::install`]) both call this
     /// so signer and verifier never disagree on the bytes.
-    pub(crate) fn signing_message(&self) -> Vec<u8> {
+    pub fn signing_message(&self) -> Vec<u8> {
         crate::verify::manifest_message(
             &self.name,
             self.key_id.as_deref().unwrap_or(""),
@@ -92,54 +96,56 @@ impl Manifest {
 
 /// A release channel: its `latest` points at a key in `versions`.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Channel {
-    pub(crate) latest: String,
+pub struct Channel {
+    pub latest: String,
 }
 
 /// One published version: optional notes plus its assets, keyed by filename.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct VersionEntry {
+pub struct VersionEntry {
     /// Human-readable release notes (shown by `update`).
     #[serde(default)]
-    pub(crate) notes: Option<String>,
-    pub(crate) assets: Vec<Asset>,
+    pub notes: Option<String>,
+    pub assets: Vec<Asset>,
 }
 
-/// A single downloadable asset, selected by its filename (`name`). The filename is
+/// A single downloadable asset, selected by its filename (`name`).
+///
+/// The filename is
 /// the §1 signed identity and the §3 selection key; its extension determines the
 /// packaging format ([`format_from_name`]) — neither `platform` nor `format` is
 /// stored or signed.
 #[derive(Debug, Clone, Deserialize)]
-pub(crate) struct Asset {
+pub struct Asset {
     /// Asset filename — the selection key (matched against `[update].asset`) and
     /// the identity bound by the §1 signature.
-    pub(crate) name: String,
+    pub name: String,
     /// Absolute download URL (runtime; never signed).
-    pub(crate) url: String,
+    pub url: String,
     /// Lowercase-hex sha256 of the downloaded file (pre-unpack).
-    pub(crate) sha256: String,
+    pub sha256: String,
     /// base64 ed25519 over the §1 canonical message (the GitHub asset `label`).
     #[serde(default)]
-    pub(crate) sig: Option<String>,
+    pub sig: Option<String>,
     /// Overrides the manifest `key_id` for this asset.
     #[serde(default)]
     #[allow(dead_code)] // advisory per-asset key override; tried via the trusted-key set
-    pub(crate) key_id: Option<String>,
+    pub key_id: Option<String>,
     /// Optional bare-run launch command published with the asset; when present it
     /// OVERRIDES the operator's `[command].run`. Signed (bound into both the §1
     /// artifact message and the catalog signature).
     #[serde(default)]
-    pub(crate) run: Option<String>,
+    pub run: Option<String>,
     /// Optional `lode <args>` passthrough base published with the asset; when
     /// present it OVERRIDES the operator's `[command].exec`. Signed like `run`.
     #[serde(default)]
-    pub(crate) exec: Option<String>,
+    pub exec: Option<String>,
     /// Expected byte size (an extra guard, checked at download).
     #[serde(default)]
-    pub(crate) size: Option<u64>,
+    pub size: Option<u64>,
     /// `false` => do not attach `[http].headers` to this URL (e.g. pre-signed).
     #[serde(default = "default_true")]
-    pub(crate) auth: bool,
+    pub auth: bool,
 }
 
 const fn default_true() -> bool {
@@ -148,10 +154,12 @@ const fn default_true() -> bool {
 
 /// Derive the packaging format from an asset filename's suffix (longest match,
 /// case-insensitive, §3): `.tar.gz`/`.tgz` → `tar.gz`, `.gz` → `gz`, `.zip` →
-/// `zip`, anything else → `raw`. The extension is authoritative — `format` is never
+/// `zip`, anything else → `raw`.
+///
+/// The extension is authoritative — `format` is never
 /// stored or signed.
 #[allow(clippy::case_sensitive_file_extension_comparisons)] // lowered first; literals are ASCII
-pub(crate) fn format_from_name(name: &str) -> &'static str {
+pub fn format_from_name(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         "tar.gz"
@@ -166,7 +174,7 @@ pub(crate) fn format_from_name(name: &str) -> &'static str {
 
 /// Fetch and parse the manifest for the configured source. Dispatches on which
 /// `[update]` key is set (validated mutually-exclusive in [`crate::config`]).
-pub(crate) fn fetch(cfg: &Config) -> Result<Manifest> {
+pub fn fetch(cfg: &Config) -> Result<Manifest> {
     match (cfg.update.manifest.as_deref(), cfg.update.github.as_deref()) {
         (Some(url), _) => fetch_native(cfg, url),
         (None, Some(repo)) => fetch_github(cfg, repo),
@@ -178,6 +186,7 @@ pub(crate) fn fetch(cfg: &Config) -> Result<Manifest> {
 
 /// The hosts permitted to receive `[http].headers` (credentials) on an artifact
 /// download for the configured source — the trusted credential same-origin set.
+///
 /// The manifest/source origin is implicitly trusted; the operator may extend it
 /// via `[http].credential_hosts`. A manifest that points an artifact at any other
 /// host gets no credentials (see [`crate::download::fetch_artifact`]).
@@ -187,7 +196,7 @@ pub(crate) fn fetch(cfg: &Config) -> Result<Manifest> {
 /// - github: the `[update].github_api` host plus GitHub's fixed asset hosts — the
 ///   token must ride both the API call and the release-asset download.
 /// - neither source set: just `[http].credential_hosts`.
-pub(crate) fn allowed_hosts(cfg: &Config) -> Vec<String> {
+pub fn allowed_hosts(cfg: &Config) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
     match (cfg.update.manifest.as_deref(), cfg.update.github.as_deref()) {
         (Some(url), _) => {
@@ -537,7 +546,7 @@ struct GhAsset {
 }
 
 /// Parse and structurally validate a `lode/v1` manifest from raw JSON bytes.
-pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest> {
+pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     let manifest: Manifest = serde_json::from_slice(bytes)?;
     if manifest.schema != SCHEMA {
         return Err(Error::Manifest(format!(
@@ -568,11 +577,13 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Manifest> {
 }
 
 /// Validate an asset's optional `run`/`exec` launch override: when present it must
-/// be non-blank and free of control characters. A newline or tab would let one
+/// be non-blank and free of control characters.
+///
+/// A newline or tab would let one
 /// signed field masquerade as another in the `\n`-/`\t`-framed canonical messages
 /// ([`crate::verify::artifact_message`] / [`Manifest::canonical_catalog`]), so they
 /// are rejected before the value can reach a signature check or an argv.
-pub(crate) fn validate_command_override(kind: &str, value: &str) -> Result<()> {
+pub fn validate_command_override(kind: &str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(Error::Manifest(format!(
             "asset {kind} must not be blank when present (omit the field instead)"
@@ -599,7 +610,7 @@ pub(crate) fn validate_command_override(kind: &str, value: &str) -> Result<()> {
 /// concrete version or a `pin` is the operator's deliberate choice and is never
 /// blocked (pass `floor` from the caller's state; it is consulted only on the
 /// `latest`-following branches).
-pub(crate) fn resolve_target(
+pub fn resolve_target(
     manifest: &Manifest,
     channel: &str,
     pin: Option<&str>,
@@ -674,17 +685,19 @@ fn channel_latest(manifest: &Manifest, channel: &str) -> Result<String> {
 }
 
 /// Borrow the entry for an exact `version` id.
-pub(crate) fn version_entry<'a>(manifest: &'a Manifest, version: &str) -> Result<&'a VersionEntry> {
+pub fn version_entry<'a>(manifest: &'a Manifest, version: &str) -> Result<&'a VersionEntry> {
     manifest
         .versions
         .get(version)
         .ok_or_else(|| Error::Manifest(format!("version {version:?} not present in manifest")))
 }
 
-/// Select the asset whose filename matches `asset_name` exactly (§3). There is no
+/// Select the asset whose filename matches `asset_name` exactly (§3).
+///
+/// There is no
 /// platform fallback and no `any` wildcard: the operator names the exact asset for
 /// this host via `[update].asset`. Errors when no asset matches.
-pub(crate) fn select_asset<'a>(entry: &'a VersionEntry, asset_name: &str) -> Result<&'a Asset> {
+pub fn select_asset<'a>(entry: &'a VersionEntry, asset_name: &str) -> Result<&'a Asset> {
     entry
         .assets
         .iter()
@@ -697,7 +710,7 @@ mod tests {
     use super::*;
 
     fn example() -> Manifest {
-        parse(include_bytes!("../docs/manifest.example.json")).unwrap()
+        parse(include_bytes!("../../../docs/manifest.example.json")).unwrap()
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::{download, install, lock, manifest, state};
 
 /// Run `update`, installing `version` (or the channel latest when `None`).
-pub(crate) fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
+pub fn run(cfg: &Config, version: Option<&str>) -> Result<()> {
     // Clear any interrupted downloads/staging before we begin.
     install::gc(cfg)?;
 

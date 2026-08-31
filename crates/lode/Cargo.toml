@@ -1,0 +1,31 @@
+[package]
+name = "lode"
+description = "Universal, single-binary update lode: verifies integrity + publisher identity, then launches and manages a packaged app as a child process."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+default-run = "lode"
+# `examples/` holds standalone demo apps (Go/Bun/Rust, each its own project), NOT
+# Cargo example targets — disable auto-discovery so `cargo --all-targets` ignores it.
+autoexamples = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "lode"
+path = "src/main.rs"
+
+[dependencies]
+lode-core = { workspace = true }
+lode-supervisor = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+base64 = { workspace = true }
+ed25519-dalek = { workspace = true }
+# `lode-cli keygen` seeds an ed25519 key from the OS RNG.
+getrandom = { workspace = true }

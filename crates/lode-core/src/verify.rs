@@ -20,26 +20,27 @@ use sha2::{Digest as _, Sha256};
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
 
-/// Identity of a single release asset, used to build the signed message. `name`
+/// Identity of a single release asset, used to build the signed message.
+///
+/// `name`
 /// is the **asset filename** — the field binding *which* artifact a signature
 /// authorises (§1). The optional `run`/`exec` launch overrides a manifest may
 /// publish are bound too (they decide what the loader executes, so a signature
 /// must cover them); `format`/`url` are derived from the filename or are
 /// operator-local, so they are deliberately not part of this struct.
-pub(crate) struct Artifact<'a> {
+pub struct Artifact<'a> {
     /// The asset filename (selection key + signed identity).
-    pub(crate) name: &'a str,
-    pub(crate) version: &'a str,
+    pub name: &'a str,
+    pub version: &'a str,
     /// On-disk path to hash (authoring only); not part of the signed message.
     /// Read only by `authoring` (cli); under `--features engine` the artifact is
     /// built to verify a download, never to hash a local file, so it is
     /// constructed-but-unread there.
-    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
-    pub(crate) path: &'a str,
+    pub path: &'a str,
     /// Manifest-published bare-run launch override (signed; empty when absent).
-    pub(crate) run: Option<&'a str>,
+    pub run: Option<&'a str>,
     /// Manifest-published passthrough launch override (signed; empty when absent).
-    pub(crate) exec: Option<&'a str>,
+    pub exec: Option<&'a str>,
 }
 
 /// Lowercase hex encoding.
@@ -53,20 +54,24 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 /// `key_id` = first 16 hex chars of `sha256(public_key)`.
-pub(crate) fn key_id(public: &[u8; 32]) -> String {
+pub fn key_id(public: &[u8; 32]) -> String {
     let digest = Sha256::digest(public);
     to_hex(&digest)[..16].to_owned()
 }
 
-/// Canonical ed25519 message binding an asset's identity (`name` = the asset
-/// filename, plus `version`) to its content digest and its optional `run`/`exec`
-/// launch overrides (empty fields when absent — they steer what the loader
-/// executes, so a tampered override must fail verification). Exact bytes (UTF-8,
+/// Canonical ed25519 message for an asset (design §1).
+///
+/// Binds the asset's identity (`name` = the asset filename, plus `version`) to its
+/// content digest and its optional `run`/`exec` launch overrides (empty fields when
+/// absent — they steer what the loader executes, so a tampered override must fail
+/// verification).
+///
+/// Exact bytes (UTF-8,
 /// `\n` separated, no trailing newline) — must match the loader. `format`/`url`
 /// are *not* bound: the filename's extension fixes the format and `url` is a
 /// runtime concern (§1/§3). `run`/`exec` may not contain control characters
 /// (rejected at manifest parse), so the field framing is unambiguous.
-pub(crate) fn artifact_message(a: &Artifact<'_>, sha256_hex: &str) -> Vec<u8> {
+pub fn artifact_message(a: &Artifact<'_>, sha256_hex: &str) -> Vec<u8> {
     format!(
         "lode.artifact.v1\n{}\n{}\n{}\n{}\n{}",
         a.name,
@@ -79,7 +84,7 @@ pub(crate) fn artifact_message(a: &Artifact<'_>, sha256_hex: &str) -> Vec<u8> {
 }
 
 /// Stream a file through sha256 and return the lowercase hex digest.
-pub(crate) fn sha256_hex_file(path: &Path) -> Result<String> {
+pub fn sha256_hex_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut hasher = Sha256::new();
     io::copy(&mut file, &mut hasher).with_context(|| format!("read {}", path.display()))?;
@@ -87,7 +92,7 @@ pub(crate) fn sha256_hex_file(path: &Path) -> Result<String> {
 }
 
 /// Verify a base64 signature over an artifact message against a base64 public key.
-pub(crate) fn verify_signature(public_b64: &str, message: &[u8], sig_b64: &str) -> Result<bool> {
+pub fn verify_signature(public_b64: &str, message: &[u8], sig_b64: &str) -> Result<bool> {
     let public = decode_key(public_b64).context("decode public key")?;
     let verifying = VerifyingKey::from_bytes(&public).context("invalid ed25519 public key")?;
     let sig_bytes = B64
@@ -101,20 +106,23 @@ pub(crate) fn verify_signature(public_b64: &str, message: &[u8], sig_b64: &str) 
 /// [`sha256_hex_file`] for callers that already hold the bytes (the
 /// runtime-download path and unit tests). Reuses the same `to_hex` encoding.
 #[allow(dead_code)] // in-memory digest helper; used by the download path + tests
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes))
 }
 
-/// Verify an asset's ed25519 signature against a set of trusted keys, using the
-/// exact §1 canonical message
+/// Verify an asset's ed25519 signature against a set of trusted keys.
+///
+/// Uses the exact §1 canonical message
 /// (`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`, where `name`
 /// is the asset filename and `run`/`exec` are the asset's optional launch
-/// overrides, empty when absent). Each entry in `trusted_keys` is
+/// overrides, empty when absent).
+///
+/// Each entry in `trusted_keys` is
 /// `key_id:base64` (CLI/TOML form) or `key_id base64` (file form); the base64
 /// public component is extracted from either. Succeeds as soon as any trusted
 /// key validates the signature; errors if none do. The integrity (sha256) check
 /// is the caller's responsibility (see [`crate::install`]).
-pub(crate) fn verify_artifact_sig(
+pub fn verify_artifact_sig(
     name: &str,
     version: &str,
     sha256_hex: &str,
@@ -147,24 +155,30 @@ pub(crate) fn verify_artifact_sig(
     bail!("artifact signature did not match any trusted key");
 }
 
-/// Canonical ed25519 message binding a manifest's identity (`name` +
-/// `key_id`) to a deterministic, `sig`-free serialization of its catalog
-/// (`canonical` — built by [`crate::manifest::Manifest::signing_message`] from the
-/// sorted channel/version maps). Exact bytes (UTF-8, `\n`-separated, no trailing
+/// Canonical ed25519 message for a manifest catalog (design §6).
+///
+/// Binds the manifest's identity (`name` + `key_id`) to a deterministic,
+/// `sig`-free serialization of its catalog (`canonical` — built by
+/// [`crate::manifest::Manifest::signing_message`] from the sorted channel/version
+/// maps).
+///
+/// Exact bytes (UTF-8, `\n`-separated, no trailing
 /// newline beyond what `canonical` carries): `lode.manifest.v1\n{name}\n{key_id}\n{canonical}`.
 /// The publisher (`lode-cli manifest-sign`) and the loader MUST produce identical
 /// bytes; both go through `signing_message` so they always do.
-pub(crate) fn manifest_message(name: &str, key_id: &str, canonical: &str) -> Vec<u8> {
+pub fn manifest_message(name: &str, key_id: &str, canonical: &str) -> Vec<u8> {
     format!("lode.manifest.v1\n{name}\n{key_id}\n{canonical}").into_bytes()
 }
 
 /// Verify a manifest's top-level ed25519 signature over its canonical message
-/// against a set of trusted keys. The manifest's declared `key_id` selects the
+/// against a set of trusted keys.
+///
+/// The manifest's declared `key_id` selects the
 /// preferred key; when it is `None` or matches no trusted entry, every trusted key
 /// is tried (covering an absent id or a rotation where the id differs). Succeeds as
 /// soon as any key validates the signature; errors if none do. Entry forms are the
 /// same `key_id:base64` / `key_id base64` / bare `base64` accepted elsewhere.
-pub(crate) fn verify_manifest_sig(
+pub fn verify_manifest_sig(
     trusted_keys: &[String],
     key_id: Option<&str>,
     message: &[u8],
@@ -217,7 +231,7 @@ fn trusted_key_public(entry: &str) -> &str {
 }
 
 /// Decode a base64 32-byte key.
-pub(crate) fn decode_key(b64: &str) -> Result<[u8; 32]> {
+pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
     let bytes = B64.decode(b64.trim()).context("base64 decode")?;
     let arr: [u8; 32] = bytes
         .as_slice()

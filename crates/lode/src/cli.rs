@@ -11,11 +11,123 @@
 //!   (`keygen`/`sign`/`verify`/`manifest`/`init`). See [`ToolCli`].
 //!
 //! [`Globals`] (shared options) fall back to `LODE_*` env vars; the full
-//! precedence (CLI > env > TOML > default) is resolved in [`crate::config`].
+//! precedence (CLI > env > TOML > default) is resolved in [`crate::config_cli`].
+//!
+//! The enum-valued flags use the `*Arg` mirrors below rather than the
+//! `lode_core::config` enums: `ValueEnum` is clap's trait and `lode-core` is
+//! deliberately clap-free, so the derive lives here and each mirror converts into
+//! its core twin. Variant names (and their doc comments, which clap renders as
+//! value help) match the core enums, so `--help` is unchanged.
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
-use crate::config::{Policy, Readiness, RequireSignature, RestartMode, RestartPolicy};
+use lode_core::config::{Policy, Readiness, RequireSignature, RestartMode, RestartPolicy};
+
+/// `--policy` (mirror of [`Policy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PolicyArg {
+    /// No background checks; run current/pinned only.
+    Off,
+    /// Periodically check and advertise, but never auto-apply (default).
+    Check,
+    /// Periodically check and auto-apply newer versions.
+    Auto,
+}
+
+impl From<PolicyArg> for Policy {
+    fn from(v: PolicyArg) -> Self {
+        match v {
+            PolicyArg::Off => Self::Off,
+            PolicyArg::Check => Self::Check,
+            PolicyArg::Auto => Self::Auto,
+        }
+    }
+}
+
+/// `--require-signature` (mirror of [`RequireSignature`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RequireSignatureArg {
+    /// Integrity only (sha256), no signature check.
+    Off,
+    /// Enforce when keys are configured, else warn-and-skip (default).
+    Auto,
+    /// Always require a valid signature.
+    Enforce,
+}
+
+impl From<RequireSignatureArg> for RequireSignature {
+    fn from(v: RequireSignatureArg) -> Self {
+        match v {
+            RequireSignatureArg::Off => Self::Off,
+            RequireSignatureArg::Auto => Self::Auto,
+            RequireSignatureArg::Enforce => Self::Enforce,
+        }
+    }
+}
+
+/// `--readiness` (mirror of [`Readiness`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ReadinessArg {
+    /// Alive for `health_grace` seconds counts as ready (default).
+    None,
+    /// Wait for the app to write `state.ready`.
+    State,
+}
+
+impl From<ReadinessArg> for Readiness {
+    fn from(v: ReadinessArg) -> Self {
+        match v {
+            ReadinessArg::None => Self::None,
+            ReadinessArg::State => Self::State,
+        }
+    }
+}
+
+/// `--restart` (mirror of [`RestartPolicy`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RestartPolicyArg {
+    /// Mirror the child: lode exits with the child's code, never restarting. The
+    /// orchestrator owns whole-process restart.
+    Off,
+    /// Restart on failure (non-zero exit or killed by a signal); a clean `exit(0)`
+    /// makes lode exit too. After `restart_max` failed retries lode PAUSES (stays
+    /// alive — does not exit) until a recovery trigger. The default.
+    OnFailure,
+    /// Like `on-failure` but restart on *any* child exit, including a clean
+    /// `exit(0)`; pauses after `restart_max` retries.
+    Always,
+}
+
+impl From<RestartPolicyArg> for RestartPolicy {
+    fn from(v: RestartPolicyArg) -> Self {
+        match v {
+            RestartPolicyArg::Off => Self::Off,
+            RestartPolicyArg::OnFailure => Self::OnFailure,
+            RestartPolicyArg::Always => Self::Always,
+        }
+    }
+}
+
+/// `--restart-mode` (mirror of [`RestartMode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum RestartModeArg {
+    /// Stop the old child before starting the new one (default).
+    StopStart,
+    /// systemd socket-activation protocol; needs `listen`.
+    SocketActivation,
+    /// Overlap old and new via `SO_REUSEPORT`.
+    ReuseportOverlap,
+}
+
+impl From<RestartModeArg> for RestartMode {
+    fn from(v: RestartModeArg) -> Self {
+        match v {
+            RestartModeArg::StopStart => Self::StopStart,
+            RestartModeArg::SocketActivation => Self::SocketActivation,
+            RestartModeArg::ReuseportOverlap => Self::ReuseportOverlap,
+        }
+    }
+}
 
 /// Shared options for both the loader and `lode-cli`. Every option is `global`
 /// and falls back to its `LODE_*` env var.
@@ -57,7 +169,7 @@ pub(crate) struct Globals {
     pub(crate) channel: Option<String>,
     /// Update policy: off | check | auto.
     #[arg(long = "policy", env = "LODE_UPDATE_POLICY", global = true)]
-    pub(crate) policy: Option<Policy>,
+    pub(crate) policy: Option<PolicyArg>,
     /// Check interval in seconds (0 = check once at startup).
     #[arg(long = "interval", env = "LODE_CHECK_INTERVAL", global = true)]
     pub(crate) interval: Option<u64>,
@@ -101,7 +213,7 @@ pub(crate) struct Globals {
         env = "LODE_REQUIRE_SIGNATURE",
         global = true
     )]
-    pub(crate) require_signature: Option<RequireSignature>,
+    pub(crate) require_signature: Option<RequireSignatureArg>,
     /// Trusted public keys, comma-separated `key_id:base64`.
     #[arg(long = "trusted-keys", env = "LODE_TRUSTED_KEYS", global = true)]
     pub(crate) trusted_keys: Option<String>,
@@ -151,7 +263,7 @@ pub(crate) struct Globals {
     // --- [supervise] ---
     /// Restart policy: off | on-failure | always (default on-failure).
     #[arg(long = "restart", env = "LODE_RESTART", global = true)]
-    pub(crate) restart: Option<RestartPolicy>,
+    pub(crate) restart: Option<RestartPolicyArg>,
     /// Crash-restart backoff base, seconds (only used when restart != off).
     #[arg(long = "restart-backoff", env = "LODE_RESTART_BACKOFF", global = true)]
     pub(crate) restart_backoff: Option<u64>,
@@ -167,7 +279,7 @@ pub(crate) struct Globals {
     pub(crate) restart_max: Option<u32>,
     /// Readiness check: none | state.
     #[arg(long = "readiness", env = "LODE_READINESS", global = true)]
-    pub(crate) readiness: Option<Readiness>,
+    pub(crate) readiness: Option<ReadinessArg>,
     /// `readiness=state`: seconds to wait for ready before failing.
     #[arg(long = "ready-timeout", env = "LODE_READY_TIMEOUT", global = true)]
     pub(crate) ready_timeout: Option<u64>,
@@ -179,7 +291,7 @@ pub(crate) struct Globals {
     pub(crate) stop_timeout: Option<u64>,
     /// Restart mode: stop-start | socket-activation | reuseport-overlap.
     #[arg(long = "restart-mode", env = "LODE_RESTART_MODE", global = true)]
-    pub(crate) restart_mode: Option<RestartMode>,
+    pub(crate) restart_mode: Option<RestartModeArg>,
     /// socket-activation listen address (e.g. 0.0.0.0:3000).
     #[arg(long = "listen", env = "LODE_LISTEN", global = true)]
     pub(crate) listen: Option<String>,

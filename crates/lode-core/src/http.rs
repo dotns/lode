@@ -86,7 +86,7 @@ fn agent_with(timeouts: &TimeoutCfg) -> ureq::Agent {
 /// persisted into [`crate::config::Config`]. A malformed line, an empty name, an
 /// unterminated `${…}`, or a reference to an unset variable is an error. Error
 /// messages never echo a header value.
-pub(crate) fn expand_headers(raw: &[String]) -> Result<Vec<(String, String)>> {
+pub fn expand_headers(raw: &[String]) -> Result<Vec<(String, String)>> {
     let mut out = Vec::with_capacity(raw.len());
     for line in raw {
         let (name, value) = line
@@ -129,11 +129,13 @@ fn expand_with(input: &str, lookup: impl Fn(&str) -> Option<String>) -> Result<S
     Ok(out)
 }
 
-/// Fetch a URL fully into memory (for manifests). Bounded by [`MANIFEST_LIMIT`]
+/// Fetch a URL fully into memory (for manifests).
+///
+/// Bounded by [`MANIFEST_LIMIT`]
 /// and time-capped by [`SMALL_FETCH_CAP`]. `allow_insecure` waives the default
 /// HTTPS requirement (see [`enforce_scheme`]); `attach` decides per redirect hop
 /// whether `headers` ride to that hop's host (see [`send`]).
-pub(crate) fn get_bytes(
+pub fn get_bytes(
     url: &str,
     headers: &[(String, String)],
     allow_insecure: bool,
@@ -153,12 +155,14 @@ pub(crate) fn get_bytes(
     .map_err(|e| Error::Http(format!("read body from {}: {e}", redact_url(url))))
 }
 
-/// Open a streaming reader over a URL (for artifact downloads). The reader owns
+/// Open a streaming reader over a URL (for artifact downloads).
+///
+/// The reader owns
 /// the connection (`'static`) and is byte-unbounded (the caller streams it to
 /// disk) but time-capped by [`STREAM_FETCH_CAP`]. `allow_insecure` waives the
 /// default HTTPS requirement (see [`enforce_scheme`]); `attach` decides per
 /// redirect hop whether `headers` ride to that hop's host (see [`send`]).
-pub(crate) fn get_reader(
+pub fn get_reader(
     url: &str,
     headers: &[(String, String)],
     allow_insecure: bool,
@@ -305,11 +309,13 @@ fn has_http_scheme(s: &str) -> bool {
     })
 }
 
-/// Attach-predicate allowing only the exact host of `url` (ASCII
-/// case-insensitive) — the minimum same-origin rule for API/manifest fetches:
-/// credentials follow same-host redirects but never leave the host the operator
-/// configured. A hostless `url` yields a predicate that allows nothing.
-pub(crate) fn same_host_as(url: &str) -> impl Fn(&str) -> bool {
+/// Attach-predicate allowing only the exact host of `url`, case-insensitively.
+///
+/// The minimum same-origin rule for API/manifest fetches: credentials follow
+/// same-host redirects but never leave the host the operator configured.
+///
+/// A hostless `url` yields a predicate that allows nothing.
+pub fn same_host_as(url: &str) -> impl Fn(&str) -> bool {
     let initial = url_host(url).map(str::to_owned);
     move |host: &str| {
         initial
@@ -378,6 +384,7 @@ fn redact_url(url: &str) -> &str {
 
 /// The host of an `http`/`https` URL — the authority's hostname, with the scheme,
 /// any `userinfo@`, the `:port`, and the path/query/fragment all stripped.
+///
 /// Hand-rolled (no URL crate per the dependency policy); returns a borrow, so it
 /// is *not* lowercased — callers compare with [`str::eq_ignore_ascii_case`].
 /// `None` when `url` carries no recognizable `http(s)://` host.
@@ -385,7 +392,7 @@ fn redact_url(url: &str) -> &str {
 /// Userinfo is stripped *before* the port so a credential-stuffed authority like
 /// `https://github.com:@evil.example/…` resolves to `evil.example` (not the
 /// spoofed `github.com`) and is correctly treated as cross-origin.
-pub(crate) fn url_host(url: &str) -> Option<&str> {
+pub fn url_host(url: &str) -> Option<&str> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
@@ -662,6 +669,49 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("x-api-key")
         );
+    }
+
+    /// Every redirect status the loop claims to handle is actually followed —
+    /// notably the *permanent* ones (`301`/`308`), which release hosts use when a
+    /// download URL moves. The request is a GET on every hop, so a 301 needs no
+    /// method rewrite; the check is that the hop is taken at all (auto-follow is
+    /// off on the agent) and the final body comes back.
+    #[test]
+    fn permanent_redirect_hops_are_followed() {
+        for (code, phrase) in [(301, "Moved Permanently"), (308, "Permanent Redirect")] {
+            let b = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port_b = b.local_addr().unwrap().port();
+            let tb = serve_one(b, OK_BODY.to_owned());
+            let a = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port_a = a.local_addr().unwrap().port();
+            let ta = serve_one(
+                a,
+                format!(
+                    "HTTP/1.1 {code} {phrase}\r\nLocation: http://127.0.0.1:{port_b}/moved\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+            );
+
+            let fetched = get_bytes(
+                &format!("http://127.0.0.1:{port_a}/start"),
+                &[],
+                false,
+                &|_: &str| true,
+            );
+            assert!(fetched.is_ok(), "{code} hop not followed: {fetched:?}");
+            assert_eq!(
+                fetched.unwrap(),
+                b"ok",
+                "{code} did not reach the redirect target"
+            );
+            ta.join().unwrap();
+            // The second hop is a plain GET of the Location path.
+            let head_b = tb.join().unwrap();
+            assert!(
+                head_b.starts_with("GET /moved "),
+                "{code} hop sent {head_b:?}"
+            );
+        }
     }
 
     /// More than [`MAX_REDIRECT_HOPS`] redirects is an error, not a loop.

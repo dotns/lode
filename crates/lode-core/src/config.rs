@@ -10,42 +10,36 @@
 //! logged here; `${ENV}` expansion happens at fetch time in the http module.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
-// `Path` is used only by the cli-side loaders (`find_config_path`,
-// `ensure_sourceless_toml`, `seed_run_command`); `PathBuf` backs the always-on
-// resolved `Config`, so it stays ungated.
-#[cfg(feature = "cli")]
 use std::path::Path;
+use std::path::PathBuf;
 
 use serde::Deserialize;
 
-#[cfg(feature = "cli")]
-use crate::cli::Globals;
 use crate::error::{Error, Result};
 
 const DEFAULT_LOG_LEVEL: &str = "info";
 const DEFAULT_APP: &str = "app";
-/// Default base / run directory. Holds `lode.toml`, `versions/`, `state.json`,
+/// Default base / run directory.
+///
+/// Holds `lode.toml`, `versions/`, `state.json`,
 /// `lode.pid` and `runtime/`. Change the whole location with `--dir` /
 /// `LODE_DIR` (config is then searched at `$LODE_DIR/lode.toml`).
-const DEFAULT_DIR: &str = "/srv/lode";
+pub const DEFAULT_DIR: &str = "/srv/lode";
 
 /// Minimal starter `lode.toml` scaffolded on first run when none exists (also
-/// what `lode-cli init` writes). Deliberately small — the complete documented
+/// what `lode-cli init` writes).
+///
+/// Deliberately small — the complete documented
 /// reference lives in `docs/lode.example.toml` (which a test also parses).
-/// cli-only: consumed by `scaffold_starter_config` and `authoring::init`, both of
-/// which are gated out under `--features engine`.
-#[cfg(feature = "cli")]
-pub(crate) const STARTER_TOML: &str = include_str!("../docs/lode.starter.toml");
+pub const STARTER_TOML: &str = include_str!("../../../docs/lode.starter.toml");
 const DEFAULT_GITHUB_API: &str = "https://api.github.com";
 const DEFAULT_CHANNEL: &str = "stable";
-pub(crate) const DEFAULT_WORKDIR_PLACEHOLDER: &str = "{dir}";
+pub const DEFAULT_WORKDIR_PLACEHOLDER: &str = "{dir}";
 
 // --- typed enums (shared by the CLI and TOML layers) -----------------------
 
 /// Update policy (`update.policy`), design §5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Policy {
     /// No background checks; run current/pinned only.
@@ -58,7 +52,6 @@ pub enum Policy {
 
 /// Signature-enforcement strength (`trust.require_signature`), design §6.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum RequireSignature {
     /// Integrity only (sha256), no signature check.
@@ -71,7 +64,6 @@ pub enum RequireSignature {
 
 /// Readiness determination (`supervise.readiness`), design §8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum Readiness {
     /// Alive for `health_grace` seconds counts as ready (default).
@@ -86,7 +78,6 @@ pub enum Readiness {
 /// mirrors the child's lifecycle. Update / rollback / explicit-restart relaunches
 /// happen regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartPolicy {
     /// Mirror the child: lode exits with the child's code, never restarting. The
@@ -103,7 +94,6 @@ pub enum RestartPolicy {
 
 /// Restart strategy (`supervise.restart_mode`), design §8.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[cfg_attr(feature = "cli", derive(clap::ValueEnum))]
 #[serde(rename_all = "kebab-case")]
 pub enum RestartMode {
     /// Stop the old child before starting the new one (default).
@@ -359,125 +349,102 @@ struct TomlSignals {
 // --- CLI/env override layer (clap-free merge seam) -------------------------
 //
 // `Overrides` is the single CLI/env slot that [`merge`] lays over the TOML layer
-// and the defaults. It is a plain, clap-free mirror of exactly the `Globals`
-// fields the `merge_*` helpers read, so `merge` no longer depends on clap: the
-// CLI path projects `Globals` onto it ([`overrides_from_globals`]), while the
-// library paths ([`Config::from_toml`], [`ConfigBuilder`]) fill it directly.
-// Field names mirror the matching `Globals` / `LODE_*` knobs; `None`/empty/`false`
-// means "not set — fall through to TOML, then the default".
+// and the defaults. It is a plain, clap-free mirror of exactly the CLI globals
+// the `merge_*` helpers read, so this crate never depends on clap: the `lode`
+// binary projects its parsed globals onto it (`config_cli::overrides_from_globals`),
+// while the library paths ([`Config::from_toml`], [`ConfigBuilder`]) fill it
+// directly. Field names mirror the matching CLI flag / `LODE_*` knob;
+// `None`/empty/`false` means "not set — fall through to TOML, then the default".
 //
 // `[command].workdir` and `[supervise].prepare_timeout` are intentionally
 // absent: they are TOML-only (no CLI/env slot), so `merge` reads them straight
 // off the TOML layer.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct Overrides {
-    pub(crate) log_level: Option<String>,
-    pub(crate) app: Option<String>,
-    pub(crate) dir: Option<String>,
-    pub(crate) manifest: Option<String>,
-    pub(crate) github: Option<String>,
-    pub(crate) github_api: Option<String>,
-    pub(crate) asset: Option<String>,
-    pub(crate) channel: Option<String>,
-    pub(crate) policy: Option<Policy>,
-    pub(crate) interval: Option<u64>,
-    pub(crate) keep: Option<u32>,
-    pub(crate) pin: Option<String>,
-    pub(crate) header: Vec<String>,
-    pub(crate) credential_host: Vec<String>,
-    pub(crate) allow_insecure_http: bool,
-    pub(crate) require_signature: Option<RequireSignature>,
-    pub(crate) trusted_keys: Option<String>,
-    pub(crate) trusted_keys_file: Option<String>,
-    pub(crate) run: Option<String>,
-    pub(crate) exec: Option<String>,
-    pub(crate) runtime: Option<String>,
-    pub(crate) runtime_download: Option<String>,
-    pub(crate) runtime_version: Option<String>,
-    pub(crate) runtime_version_check: Option<String>,
-    pub(crate) restart: Option<RestartPolicy>,
-    pub(crate) restart_backoff: Option<u64>,
-    pub(crate) restart_backoff_max: Option<u64>,
-    pub(crate) restart_max: Option<u32>,
-    pub(crate) readiness: Option<Readiness>,
-    pub(crate) ready_timeout: Option<u64>,
-    pub(crate) health_grace: Option<u64>,
-    pub(crate) stop_timeout: Option<u64>,
-    pub(crate) restart_mode: Option<RestartMode>,
-    pub(crate) listen: Option<String>,
-    pub(crate) forward_signals: Option<String>,
-    pub(crate) restart_signal: Option<String>,
+pub struct Overrides {
+    pub log_level: Option<String>,
+    pub app: Option<String>,
+    pub dir: Option<String>,
+    pub manifest: Option<String>,
+    pub github: Option<String>,
+    pub github_api: Option<String>,
+    pub asset: Option<String>,
+    pub channel: Option<String>,
+    pub policy: Option<Policy>,
+    pub interval: Option<u64>,
+    pub keep: Option<u32>,
+    pub pin: Option<String>,
+    pub header: Vec<String>,
+    pub credential_host: Vec<String>,
+    pub allow_insecure_http: bool,
+    pub require_signature: Option<RequireSignature>,
+    pub trusted_keys: Option<String>,
+    pub trusted_keys_file: Option<String>,
+    pub run: Option<String>,
+    pub exec: Option<String>,
+    pub runtime: Option<String>,
+    pub runtime_download: Option<String>,
+    pub runtime_version: Option<String>,
+    pub runtime_version_check: Option<String>,
+    pub restart: Option<RestartPolicy>,
+    pub restart_backoff: Option<u64>,
+    pub restart_backoff_max: Option<u64>,
+    pub restart_max: Option<u32>,
+    pub readiness: Option<Readiness>,
+    pub ready_timeout: Option<u64>,
+    pub health_grace: Option<u64>,
+    pub stop_timeout: Option<u64>,
+    pub restart_mode: Option<RestartMode>,
+    pub listen: Option<String>,
+    pub forward_signals: Option<String>,
+    pub restart_signal: Option<String>,
 }
 
 // --- resolution ------------------------------------------------------------
 
-/// Resolve the effective configuration from CLI/env (`cli`), `lode.toml` and the
+/// Resolve the effective configuration from an already-projected CLI/env layer
+/// (`overrides`), the `lode.toml` at `config_path` (when one was located) and the
 /// design defaults, then validate it.
-#[cfg(feature = "cli")]
-pub(crate) fn resolve(cli: &Globals) -> Result<Config> {
-    let (toml, config_path) = load_toml(cli)?;
-    let mut cfg = merge(&overrides_from_globals(cli), &toml);
+///
+/// Locating the file is the caller's job ([`find_config_path`]) — the `lode`
+/// binary adds the CLI/env search + first-run scaffold on top ([`scaffold_starter_config`]).
+///
+/// # Errors
+/// Returns [`Error::Config`] when `config_path` cannot be read, a TOML parse
+/// error, or a validation failure.
+pub fn resolve_with(overrides: &Overrides, config_path: Option<PathBuf>) -> Result<Config> {
+    let toml = match config_path.as_deref() {
+        Some(path) => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| Error::Config(format!("read config {}: {e}", path.display())))?;
+            toml::from_str(&text)?
+        }
+        None => TomlConfig::default(),
+    };
+    let mut cfg = merge(overrides, &toml);
     cfg.config_path = config_path;
     validate(&cfg)?;
     Ok(cfg)
 }
 
-/// Project the clap `Globals` (CLI flags + folded `LODE_*` env) onto the
-/// clap-free [`Overrides`] seam — the only Globals-bound entry into [`merge`].
-/// Kept beside the other `Globals`-touching loaders so a later task can gate the
-/// whole cli-side group behind `#[cfg(feature = "cli")]` in one clean cut.
-#[cfg(feature = "cli")]
-pub(crate) fn overrides_from_globals(cli: &Globals) -> Overrides {
-    Overrides {
-        log_level: cli.log_level.clone(),
-        app: cli.app.clone(),
-        dir: cli.dir.clone(),
-        manifest: cli.manifest.clone(),
-        github: cli.github.clone(),
-        github_api: cli.github_api.clone(),
-        asset: cli.asset.clone(),
-        channel: cli.channel.clone(),
-        policy: cli.policy,
-        interval: cli.interval,
-        keep: cli.keep,
-        pin: cli.pin.clone(),
-        header: cli.header.clone(),
-        credential_host: cli.credential_host.clone(),
-        allow_insecure_http: cli.allow_insecure_http,
-        require_signature: cli.require_signature,
-        trusted_keys: cli.trusted_keys.clone(),
-        trusted_keys_file: cli.trusted_keys_file.clone(),
-        run: cli.run.clone(),
-        exec: cli.exec.clone(),
-        runtime: cli.runtime.clone(),
-        runtime_download: cli.runtime_download.clone(),
-        runtime_version: cli.runtime_version.clone(),
-        runtime_version_check: cli.runtime_version_check.clone(),
-        restart: cli.restart,
-        restart_backoff: cli.restart_backoff,
-        restart_backoff_max: cli.restart_backoff_max,
-        restart_max: cli.restart_max,
-        readiness: cli.readiness,
-        ready_timeout: cli.ready_timeout,
-        health_grace: cli.health_grace,
-        stop_timeout: cli.stop_timeout,
-        restart_mode: cli.restart_mode,
-        listen: cli.listen.clone(),
-        forward_signals: cli.forward_signals.clone(),
-        restart_signal: cli.restart_signal.clone(),
-    }
-}
-
 /// Write a minimal **sourceless** `lode.toml` (no update source, `policy=off`) at
-/// `$LODE_DIR/lode.toml` when one is absent, so a `seed`-prepared data dir runs
-/// offline with bare `lode`. Never clobbers an existing config. Used by
+/// `<dir>/lode.toml` when one is absent, so a `seed`-prepared data dir runs
+/// offline with bare `lode`.
+///
+/// Never clobbers an existing config. Used by
 /// `lode-cli seed` before it resolves, so seeding "just works" on a fresh dir
 /// without tripping the source-requiring starter scaffold. `seed_source` is the
 /// file being seeded — its name derives the scaffolded `[command]` launch command.
-#[cfg(feature = "cli")]
-pub(crate) fn ensure_sourceless_toml(cli: &Globals, seed_source: &Path) -> Result<()> {
-    let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
-    let path = Path::new(dir).join("lode.toml");
+///
+/// `dir`/`app` are the CLI/env values when set, else lode's defaults.
+///
+/// # Errors
+/// Returns [`Error::Config`] when the directory or the file cannot be written.
+pub fn ensure_sourceless_toml(
+    dir: Option<&str>,
+    app: Option<&str>,
+    seed_source: &Path,
+) -> Result<()> {
+    let path = Path::new(dir.unwrap_or(DEFAULT_DIR)).join("lode.toml");
     if path.exists() {
         return Ok(());
     }
@@ -485,7 +452,7 @@ pub(crate) fn ensure_sourceless_toml(cli: &Globals, seed_source: &Path) -> Resul
         std::fs::create_dir_all(dir)
             .map_err(|e| Error::Config(format!("create {}: {e}", dir.display())))?;
     }
-    let app = cli.app.as_deref().unwrap_or(DEFAULT_APP);
+    let app = app.unwrap_or(DEFAULT_APP);
     let command = seed_run_command(seed_source, app);
     let body = format!(
         "# Sourceless config for OFFLINE local testing (written by `lode-cli seed`).\n\
@@ -511,7 +478,6 @@ pub(crate) fn ensure_sourceless_toml(cli: &Globals, seed_source: &Path) -> Resul
 /// `install::seed_local` lands the file: a raw file keeps its filename, a `.gz`
 /// drops the suffix, and an archive's binary is conventionally `./{app}` at the
 /// extraction root (the scaffold comment tells the operator to edit otherwise).
-#[cfg(feature = "cli")]
 fn seed_run_command(seed_source: &Path, app: &str) -> String {
     let name = seed_source
         .file_name()
@@ -524,17 +490,17 @@ fn seed_run_command(seed_source: &Path, app: &str) -> String {
     }
 }
 
-/// Locate `lode.toml` without reading it: an explicit `--config`/`LODE_CONFIG`
-/// always wins (even if the file is missing — the read will report it);
-/// otherwise search `$LODE_DIR/lode.toml`, then `./lode.toml`. Shared by
-/// [`load_toml`] and [`peek_log_level`] so both see the same file.
-#[cfg(feature = "cli")]
-fn find_config_path(cli: &Globals) -> Option<PathBuf> {
-    if let Some(path) = cli.config.as_ref() {
+/// Locate `lode.toml` without reading it.
+///
+/// An `explicit` path (`--config`/`LODE_CONFIG`) always wins (even if the file is
+/// missing — the read will report it); otherwise search `<dir>/lode.toml`
+/// (`--dir`/`LODE_DIR`, else lode's default base dir), then `./lode.toml`.
+#[must_use]
+pub fn find_config_path(explicit: Option<&str>, dir: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = explicit {
         return Some(PathBuf::from(path));
     }
-    let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
-    let in_data = Path::new(dir).join("lode.toml");
+    let in_data = Path::new(dir.unwrap_or(DEFAULT_DIR)).join("lode.toml");
     if in_data.is_file() {
         return Some(in_data);
     }
@@ -542,43 +508,26 @@ fn find_config_path(cli: &Globals) -> Option<PathBuf> {
     if local.is_file() { Some(local) } else { None }
 }
 
-/// Cheap pre-logging peek at `[global].log_level`, so `logging::init` (which
-/// must run before [`resolve`]) can honour the TOML value. Lenient by design:
-/// a missing, unreadable or malformed file yields `None` — the subsequent full
-/// resolve reports the real error with logging already up.
-#[cfg(feature = "cli")]
-pub(crate) fn peek_log_level(cli: &Globals) -> Option<String> {
-    let path = find_config_path(cli)?;
+/// Cheap pre-logging peek at `[global].log_level` in the `lode.toml` at `path`,
+/// so the tracing subscriber (which must be up before [`resolve_with`]) can
+/// honour the TOML value.
+///
+/// Lenient by design: a missing, unreadable or malformed
+/// file yields `None` — the subsequent full resolve reports the real error with
+/// logging already up.
+#[must_use]
+pub fn peek_log_level(path: &Path) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let parsed: TomlConfig = toml::from_str(&text).ok()?;
     parsed.global.log_level
 }
 
-/// Locate and parse `lode.toml`. An explicit `--config`/`LODE_CONFIG` must exist;
-/// otherwise the default search (`$LODE_DIR/lode.toml`, then `./lode.toml`) is
-/// best-effort and a missing file yields the all-defaults config (design §15).
-#[cfg(feature = "cli")]
-fn load_toml(cli: &Globals) -> Result<(TomlConfig, Option<PathBuf>)> {
-    let Some(path) = find_config_path(cli) else {
-        // No lode.toml anywhere. A source given via env/CLI lets us run file-less;
-        // otherwise scaffold a starter at `$LODE_DIR/lode.toml` and guide the
-        // operator to fill it in (design §15).
-        if cli.manifest.is_some() || cli.github.is_some() {
-            return Ok((TomlConfig::default(), None));
-        }
-        let dir = cli.dir.as_deref().unwrap_or(DEFAULT_DIR);
-        return Err(scaffold_starter_config(&Path::new(dir).join("lode.toml")));
-    };
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| Error::Config(format!("read config {}: {e}", path.display())))?;
-    Ok((toml::from_str(&text)?, Some(path)))
-}
-
-/// First-run convenience: write a starter `lode.toml` at `path` (best-effort,
-/// creating parent dirs) and return a guiding error so the loader stops cleanly
-/// instead of failing later on a placeholder source.
-#[cfg(feature = "cli")]
-fn scaffold_starter_config(path: &Path) -> Error {
+/// First-run convenience: scaffold a starter `lode.toml` at `path`.
+///
+/// Best-effort (creating parent dirs); returns the guiding [`Error::Config`] the
+/// loader stops on, instead of failing later on a placeholder source.
+#[must_use]
+pub fn scaffold_starter_config(path: &Path) -> Error {
     if !path.exists() {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -789,9 +738,9 @@ impl Config {
     /// was not read from a located file).
     ///
     /// ```
-    /// # fn main() -> lode::Result<()> {
+    /// # fn main() -> lode_core::Result<()> {
     /// // Clap-free: parse `lode.toml` text directly, no CLI/env layer.
-    /// let cfg = lode::Config::from_toml("[global]\napp = \"demo\"\n[update]\npolicy = \"off\"\n")?;
+    /// let cfg = lode_core::Config::from_toml("[global]\napp = \"demo\"\n[update]\npolicy = \"off\"\n")?;
     /// assert_eq!(cfg.global.app, "demo");
     /// # Ok(())
     /// # }
@@ -962,55 +911,9 @@ mod tests {
 
     /// The CLI/env override layer with no flags set (the all-unset baseline), so
     /// [`merge`] sees an empty top slot and resolves TOML-over-default. Field
-    /// names mirror the `Globals` knobs, so the existing tests mutate it verbatim.
+    /// names mirror the CLI knobs, so the existing tests mutate it verbatim.
     fn blank_cli() -> Overrides {
         Overrides::default()
-    }
-
-    /// A clap `Globals` with no flags set. Used only by the peek-path test, which
-    /// drives a `Globals`-bound loader fn directly (the override layer omits the
-    /// loader-only `config` path, so `Overrides` can't stand in here).
-    #[cfg(feature = "cli")]
-    fn blank_globals() -> Globals {
-        Globals {
-            log_level: None,
-            config: None,
-            app: None,
-            dir: None,
-            manifest: None,
-            github: None,
-            github_api: None,
-            asset: None,
-            channel: None,
-            policy: None,
-            interval: None,
-            keep: None,
-            pin: None,
-            header: Vec::new(),
-            credential_host: Vec::new(),
-            allow_insecure_http: false,
-            require_signature: None,
-            trusted_keys: None,
-            trusted_keys_file: None,
-            run: None,
-            exec: None,
-            runtime: None,
-            runtime_download: None,
-            runtime_version: None,
-            runtime_version_check: None,
-            restart: None,
-            restart_backoff: None,
-            restart_backoff_max: None,
-            restart_max: None,
-            readiness: None,
-            ready_timeout: None,
-            health_grace: None,
-            stop_timeout: None,
-            restart_mode: None,
-            listen: None,
-            forward_signals: None,
-            restart_signal: None,
-        }
     }
 
     #[test]
@@ -1170,7 +1073,7 @@ mod tests {
     #[test]
     fn parses_example_toml() {
         // The shipped full reference must round-trip through the parser + merge.
-        let text = include_str!("../docs/lode.example.toml");
+        let text = include_str!("../../../docs/lode.example.toml");
         let parsed: TomlConfig = toml::from_str(text).unwrap();
         let cfg = merge(&blank_cli(), &parsed);
         assert_eq!(cfg.global.app, "myapp");
@@ -1265,32 +1168,37 @@ mod tests {
         assert_eq!(merge(&cli, &t).global.log_level, "warn");
     }
 
-    #[cfg(feature = "cli")]
     #[test]
     fn peek_log_level_reads_toml_leniently() {
         let dir = std::env::temp_dir().join(format!("lode-peek-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("lode.toml");
-        let cli_for = |p: &Path| {
-            let mut cli = blank_globals();
-            cli.config = Some(p.to_string_lossy().into_owned());
-            cli
-        };
 
         // A config file with a level → Some(level).
         std::fs::write(&path, "[global]\nlog_level = \"debug\"\n").unwrap();
-        assert_eq!(peek_log_level(&cli_for(&path)).as_deref(), Some("debug"));
+        assert_eq!(peek_log_level(&path).as_deref(), Some("debug"));
 
         // Present but without the key → None.
         std::fs::write(&path, "[global]\napp = \"x\"\n").unwrap();
-        assert_eq!(peek_log_level(&cli_for(&path)), None);
+        assert_eq!(peek_log_level(&path), None);
 
         // Malformed → None (full resolve reports the error later, logging up).
         std::fs::write(&path, "[global\nlog_level = ").unwrap();
-        assert_eq!(peek_log_level(&cli_for(&path)), None);
+        assert_eq!(peek_log_level(&path), None);
 
         // Absent → None.
-        assert_eq!(peek_log_level(&cli_for(&dir.join("missing.toml"))), None);
+        assert_eq!(peek_log_level(&dir.join("missing.toml")), None);
+
+        // An explicit path wins over the search; the search falls back to
+        // `<dir>/lode.toml` and reports None when nothing is there.
+        assert_eq!(
+            find_config_path(Some("/tmp/explicit.toml"), Some("/tmp")),
+            Some(PathBuf::from("/tmp/explicit.toml"))
+        );
+        assert_eq!(
+            find_config_path(None, dir.to_str()),
+            Some(dir.join("lode.toml"))
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -1371,7 +1279,7 @@ mod tests {
     fn from_toml_surfaces_parse_and_validate_errors() {
         // Unknown key → parse error (same deny_unknown_fields contract as resolve).
         assert!(Config::from_toml("[update]\nbogus_key = 1\n").is_err());
-        // Mutually-exclusive sources → validate error (no clap/Globals involved).
+        // Mutually-exclusive sources → validate error.
         let err = Config::from_toml(
             "[update]\nmanifest = \"https://x/m.json\"\ngithub = \"owner/name\"\n",
         )

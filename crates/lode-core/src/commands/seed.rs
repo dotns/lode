@@ -1,6 +1,8 @@
 //! `lode-cli seed <app-bin>` — dev/testing: install a LOCAL executable (or archive)
 //! as a version without a manifest, download, or verification, and (by default)
-//! activate it. After seeding, bare `lode --dir <dir>` supervises it fully
+//! activate it.
+//!
+//! After seeding, bare `lode --dir <dir>` supervises it fully
 //! offline. This deliberately bypasses the sha256 + signature checks of the real
 //! install path: you are placing trusted bytes yourself. Not for production.
 
@@ -13,7 +15,7 @@ use crate::{install, manifest};
 
 /// Seed `app_bin` as `version` into the configured data dir (activating it unless
 /// `activate` is false), then print where it landed and how to run it.
-pub(crate) fn run(cfg: &Config, app_bin: &str, version: &str, activate: bool) -> Result<()> {
+pub fn run(cfg: &Config, app_bin: &str, version: &str, activate: bool) -> Result<()> {
     install::seed_local(cfg, version, Path::new(app_bin), activate)?;
 
     let mut out = std::io::stdout().lock();

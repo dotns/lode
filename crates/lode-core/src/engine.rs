@@ -32,35 +32,39 @@ use std::os::unix as unix_ext;
 
 // --- version resolution (shared by serve + exec) ---
 
-/// A resolved, installed version and what is needed to launch it: its dir plus
-/// the manifest-published `run`/`exec` launch overrides read back from the
-/// version marker (they take precedence over the live `[command]` values).
+/// A resolved, installed version and what is needed to launch it.
+///
+/// Holds its dir plus the manifest-published `run`/`exec` launch overrides read
+/// back from the version marker (they take precedence over the live `[command]`
+/// values).
+///
 ///
 /// `dir`/`run`/`exec` are consumed only when actually launching the child (the
 /// supervise loop and exec-passthrough), so under `--features engine` — which
 /// resolves versions but never spawns — they are constructed-but-unread. The
 /// `cfg_attr` keeps that intentional; the default (`cli`) build still lint-checks
 /// the fields fully.
-#[cfg_attr(not(feature = "supervisor"), allow(dead_code))]
-pub(crate) struct Target {
-    pub(crate) version: String,
-    pub(crate) dir: PathBuf,
-    pub(crate) run: Option<String>,
-    pub(crate) exec: Option<String>,
+pub struct Target {
+    pub version: String,
+    pub dir: PathBuf,
+    pub run: Option<String>,
+    pub exec: Option<String>,
 }
 
 /// Decide which version to run and load its launch metadata. Bootstraps the
 /// latest only when nothing usable is installed (design §4: never auto-jump
 /// versions).
-pub(crate) fn resolve_target(cfg: &Config) -> Result<Target> {
+pub fn resolve_target(cfg: &Config) -> Result<Target> {
     let version = determine_version(cfg)?;
     locate(cfg, &version)
 }
 
 /// Build the launch [`Target`] for an already-installed `version` by reading its
-/// `.lode.json` marker (design §15). Errors if the version is not installed.
+/// `.lode.json` marker (design §15).
+///
+/// Errors if the version is not installed.
 /// Used by `serve` and by the C2 hot-update apply path.
-pub(crate) fn locate(cfg: &Config, version: &str) -> Result<Target> {
+pub fn locate(cfg: &Config, version: &str) -> Result<Target> {
     // Defensive: every caller already validated `version`, but it keys
     // `versions/<version>` here too — re-check before the join.
     idval::validate_id("version", version)?;
@@ -107,7 +111,7 @@ fn determine_version(cfg: &Config) -> Result<String> {
 
 /// A version counts as installed once its `.lode.json` marker is present (install
 /// writes it last, atomically).
-pub(crate) fn version_installed(cfg: &Config, version: &str) -> bool {
+pub fn version_installed(cfg: &Config, version: &str) -> bool {
     cfg.global
         .dir
         .join("versions")
@@ -188,9 +192,11 @@ fn bootstrap(cfg: &Config, requested: Option<&str>) -> Result<String> {
 }
 
 /// The operator-selected asset filename (`[update].asset`) — the source-agnostic
-/// selection key for both adapters. There is no platform fallback, so this errors
+/// selection key for both adapters.
+///
+/// There is no platform fallback, so this errors
 /// clearly when unset rather than guessing an asset.
-pub(crate) fn required_asset(cfg: &Config) -> Result<&str> {
+pub fn required_asset(cfg: &Config) -> Result<&str> {
     cfg.update.asset.as_deref().ok_or_else(|| {
         Error::Config(
             "no [update].asset configured — set the asset filename to install (source-adapters §3)"
@@ -296,7 +302,7 @@ fn prune_runtime_cache(runtime_root: &Path, keep: &str) {
 /// touching the network, so a persistent `$LODE_DIR` makes the download a one-time
 /// cost — but only for the *same* `[runtime]` config: repointing `version`/`download`
 /// changes the key, which forces a fresh download and reclaims the previous cache.
-pub(crate) fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
+pub fn ensure_runtime(cfg: &Config) -> Result<Option<PathBuf>> {
     let runtime = cfg.runtime.runtime.as_deref();
     let download_url = cfg.runtime.download.as_deref();
     let expected = cfg.runtime.version.as_deref();
@@ -519,9 +525,9 @@ pub struct CheckResult {
 /// commands, owning a resolved [`Config`].
 ///
 /// ```no_run
-/// # fn main() -> lode::Result<()> {
-/// let cfg = lode::Config::from_toml("")?;
-/// let engine = lode::Engine::new(cfg);
+/// # fn main() -> lode_core::Result<()> {
+/// let cfg = lode_core::Config::from_toml("")?;
+/// let engine = lode_core::Engine::new(cfg);
 /// let latest = engine.check()?;
 /// println!("{} {} -> {}", latest.app, latest.channel, latest.version);
 /// # Ok(())

@@ -554,27 +554,36 @@ lode-cli 发布/签名(发布者,详见 docs/integration.zh-CN.md):
 ## 14. Rust 模块布局(多文件)
 
 ```
-Cargo.toml          # package + [workspace] + [workspace.lints] + [profile.*] + 依赖
+Cargo.toml          # 虚拟工作区根:members + [workspace.package] + [workspace.dependencies] + [workspace.lints] + [profile.*]
 Cargo.lock          # 提交（二进制项目）
 rust-toolchain.toml # channel = "1.96.0", 组件, musl targets
 .cargo/config.toml  # +crt-static (musl), git-fetch-with-cli
 deny.toml clippy.toml rustfmt.toml .config/nextest.toml
-src/
-  main.rs           # #![forbid(unsafe_code)]；装 aws-lc-rs provider；panic hook；rlimit 抑 core；subreaper(僵尸回收)；CLI 分发
-  cli.rs            # clap 定义 + 子命令
-  config.rs         # Config + lode.toml 解析 + 合并(CLI>env>lode.toml>默认) + 校验
-  error.rs          # thiserror 错误类型
-  logging.rs        # tracing 初始化
-  idval.rs          # 不可信 id(版本 / 运行时名)的路径分量校验及启动命令覆盖校验
-  manifest.rs       # serde 类型(JSON) + 远程拉取 + semver 比较(不落本地)
-  http.rs           # ureq(rustls/aws-lc-rs) + headers 透传 + 脱敏
-  verify.rs         # sha256 + ed25519 verify/sign/keygen
-  download.rs       # 流式下载到 temp + sha256 + 按 format 解包
-  install.rs        # versions 目录 + 原子软链切换 + prune;启动 GC(清 *.part/*.tmp、按 keep_versions 回收)
-  lock.rs           # PID 锁(O_EXCL) + 僵尸锁接管
-  state.rs          # state.json 原子读写
-  supervisor.rs     # spawn / 退避重启 / 信号转发 / 优雅停 / 健康观察 / 回滚 / 重启模式 / 启动时清理孤儿子进程
-  commands/         # run.rs status.rs update.rs rollback.rs restart.rs versions.rs keygen.rs sign.rs verify_cmd.rs
+crates/
+  lode-core/        # 不含 clap / 不碰信号的核心(可嵌入库)
+    src/lib.rs      #   InitOptions(crypto provider / core dump / 日志 / panic hook)+ 公共再导出
+    src/config.rs   #   Config + lode.toml 解析 + 合并(Overrides>lode.toml>默认) + 校验
+    src/engine.rs   #   Engine 门面:status / check / install / rollback / versions / restart / resolve_target / ensure_runtime
+    src/error.rs    #   thiserror 错误类型
+    src/logging.rs  #   tracing 初始化
+    src/idval.rs    #   不可信 id(版本 / 运行时名)的路径分量校验及启动命令覆盖校验
+    src/manifest.rs #   serde 类型(JSON) + 两种源适配 + 按文件名选资产 + 由扩展名推 format(不落本地)
+    src/http.rs     #   ureq(rustls/aws-lc-rs) + headers 透传 + 手动重定向 + 脱敏
+    src/verify.rs   #   sha256 + ed25519 verify/sign/keygen
+    src/download.rs #   流式下载到按版本缓存 + sha256
+    src/install.rs  #   versions 目录 + 原子软链切换 + prune;启动 GC(清 *.part/*.tmp、按 keep_versions 回收)
+    src/lock.rs     #   PID 锁(O_EXCL) + 僵尸锁接管
+    src/state.rs    #   state.json 原子读写
+    src/commands/   #   status.rs update.rs rollback.rs restart.rs versions.rs seed.rs
+  lode-supervisor/  # 可嵌入的进程监管(依赖 lode-core)
+    src/lib.rs      #   spawn / 退避重启 / 信号转发 / 优雅停 / 健康观察 / 回滚 / 重启模式 / 启动时清理孤儿子进程;SignalSource 接缝
+  lode/             # 二进制(依赖前两者)——唯一使用 clap 的 crate
+    src/main.rs     #   #![forbid(unsafe_code)];把 run() 结果映射为退出码
+    src/lib.rs      #   run():多调用名分发(lode / lode-cli)+ 二进制安装的进程级全局初始化
+    src/cli.rs      #   clap 定义 + 子命令(含核心 config 枚举的 ValueEnum 镜像)
+    src/config_cli.rs #  clap Globals -> lode_core::config::Overrides + 配置文件查找 / 首次运行脚手架
+    src/serve_cli.rs  #  裸 `lode` 的 serve 包装(自有信号源 + 按 globals 重载)
+    src/authoring.rs  #  keygen / sign / verify / manifest / init
 ```
 
 ---
