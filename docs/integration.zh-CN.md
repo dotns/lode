@@ -116,17 +116,18 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 
 lode 解析 **channel → version → asset**,校验后安装/运行。每台主机装哪个资产由**文件名**
 (`[update].asset`)决定,每个资产都带一个对规范消息
-`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`(UTF-8、`\n` 分隔、无结尾换行;`run`/`exec` 缺省为空字符串)的 ed25519
-签名。`name` 是资产文件名。完整规范(含原生 manifest 形状与字段表)见
+`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`(UTF-8、`\n` 分隔、无结尾换行;`run`/`exec` 缺省为空字符串)的
+签名(默认 ed25519;也支持 ECDSA P-256 / P-384,见 [source-adapters §1 *密钥*](source-adapters.zh-CN.md#密钥))。`name` 是资产文件名。完整规范(含原生 manifest 形状与字段表)见
 [source-adapters.zh-CN.md](source-adapters.zh-CN.md)。
 
 打包 + 签名是**发布方**的事,可在任意 CI 完成。`lode-cli` 是参考实现;任何产出相同签名的
-ed25519 工具效果一致。
+工具效果一致。
 
 ### 密钥(一次性)
 
 `lode-cli keygen` 打印 `key_id`、`trusted_keys` 条目(`<key_id>:<base64>`,交给运维)、以及
-保密种子 —— 离线保存。
+保密种子 —— 离线保存。需要 ECDSA 密钥时传 `--alg ecdsa-p256` 或 `--alg ecdsa-p384`:其条目与
+密钥文件会带 `<alg>:` 前缀,所有 `--key` / `--key-env` / `--pubkey` 都接受该带前缀的形式。
 
 ### GitHub Releases(`github = "owner/repo"`)
 

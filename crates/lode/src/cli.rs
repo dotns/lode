@@ -368,11 +368,16 @@ pub(crate) enum ToolCommand {
         no_activate: bool,
     },
 
-    /// Generate an ed25519 publisher keypair.
+    /// Generate a publisher keypair (ed25519 by default).
     Keygen {
         /// Write `<prefix>.key` (private) and `<prefix>.pub` (public) instead of only printing.
         #[arg(long)]
         out: Option<String>,
+        /// Signature algorithm: `ed25519` (default), `ecdsa-p256`, or `ecdsa-p384`.
+        /// Non-ed25519 keys are written and printed tagged (`<alg>:…`), so every
+        /// consumer knows how to use them.
+        #[arg(long, default_value = "ed25519")]
+        alg: String,
     },
     /// Sign an asset (emit sha256 + signature; the signature is the GitHub `label`).
     /// Provide the key with exactly one of `--key` (file) or `--key-env` (env var).
@@ -390,11 +395,12 @@ pub(crate) enum ToolCommand {
         /// signature; the loader uses it instead of `[command].exec`).
         #[arg(long)]
         exec: Option<String>,
-        /// Path to the private key file (base64 seed, from `keygen`).
+        /// Path to the private key file (from `keygen`: base64 seed, or
+        /// `<alg>:<base64>` for an ECDSA key).
         #[arg(long)]
         key: Option<String>,
-        /// Read the base64 private seed from this env var (e.g. a CI secret) instead
-        /// of a key file — the key never touches disk.
+        /// Read the private key (same form as the key file) from this env var (e.g.
+        /// a CI secret) instead of a key file — the key never touches disk.
         #[arg(long = "key-env")]
         key_env: Option<String>,
     },
@@ -411,7 +417,7 @@ pub(crate) enum ToolCommand {
         /// The asset's published `exec` override, if any (part of the signed message).
         #[arg(long)]
         exec: Option<String>,
-        /// Base64 public key.
+        /// Public key: base64 (ed25519), or `<alg>:<base64>` as printed by `keygen`.
         #[arg(long)]
         pubkey: String,
         /// Base64 signature.
@@ -442,7 +448,8 @@ pub(crate) enum ToolCommand {
         /// Channel whose `latest` is set to this version.
         #[arg(long, default_value = "stable")]
         channel: String,
-        /// Path to the private key file (base64 seed, from `keygen`).
+        /// Path to the private key file (from `keygen`: base64 seed, or
+        /// `<alg>:<base64>` for an ECDSA key).
         #[arg(long)]
         key: String,
         /// Create-or-merge into this `manifest.json` instead of printing.
@@ -454,7 +461,8 @@ pub(crate) enum ToolCommand {
         /// The `manifest.json` to sign in place.
         #[arg(long = "into")]
         into: String,
-        /// Path to the private key file (base64 seed, from `keygen`).
+        /// Path to the private key file (from `keygen`: base64 seed, or
+        /// `<alg>:<base64>` for an ECDSA key).
         #[arg(long)]
         key: String,
     },

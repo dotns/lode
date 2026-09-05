@@ -3,7 +3,7 @@
 **English** · [中文](architecture.zh-CN.md)
 
 > A general-purpose "update + launch" component: a **small static Rust binary** (a few MB), language-agnostic.
-> It verifies **file integrity (sha256)** and **publisher identity (ed25519 signature)**, then launches and manages the service, supporting seamless hot-update and rollback.
+> It verifies **file integrity (sha256)** and **publisher identity (ed25519 / ECDSA signature)**, then launches and manages the service, supporting seamless hot-update and rollback.
 > Universal image = `zzci/ubase` + the lode binary (no language runtime required; the runtime, if any, is downloaded and cached at boot); one instance = **single program, single channel**.
 
 This document is the authoritative **architecture spec**; the implementation follows it. It adheres to the **pma-rust** hard locks (edition 2024, `#![forbid(unsafe_code)]`, rustls+aws-lc-rs, deny-warnings, musl+crt-static, cargo-deny/shear/typos/nextest).
@@ -23,7 +23,7 @@ This document is the authoritative **architecture spec**; the implementation fol
 2. **Three-file division of labor**: `lode.toml` (local TOML, pure configuration, **the app does not write it**), `state.json` (local JSON, **written by both lode and app**, the communication hub), `manifest.json` (**remote JSON**, not persisted locally). The app communicates with lode by **reading/writing `state.json`** (reads `available`, writes `target`/`restart_nonce`); other realtime/RPC communication is out-of-band and handled by the app itself. See §7.
 3. **Download driven by the manifest, run driven by lode.toml**: an artifact's `format` determines how it lands on disk; the run commands `run`/`exec` (+ optional `[runtime]`) are written in lode.toml, with **no `kind`**.
 4. **Never jump versions on its own**: only download the latest when no installed version exists locally; if a version exists, start the existing version first, and leave updates to policy and app/CLI triggers.
-5. **Two-layer verification**: integrity (sha256) + publisher identity (ed25519), enforced per `trust.require_signature`.
+5. **Two-layer verification**: integrity (sha256) + publisher identity (ed25519 by default, or ECDSA P-256/P-384), enforced per `trust.require_signature`.
 6. **Child-process launch + service management**: lode always spawns and supervises as a child process, providing start/stop/restart/status; readiness/stop handshakes avoid killing the process prematurely; optional zero-downtime restart (inspired by overseer).
 7. **Unified configuration**: `CLI > environment variables (LODE_*) > lode.toml (TOML) > defaults`.
 8. **Private sources**: `[http].headers` pass through authentication; private keys/credentials never go into the image.
@@ -64,7 +64,7 @@ zzci/ubase                        │  lode (static Rust binary, a few MB) │
 - **Dependencies (pure Rust / pma-rust compliant, no tokio/axum, synchronous implementation to stay small)**:
   - HTTP: `ureq` + `rustls` (aws-lc-rs provider, `install_default()` in `main`)
   - Serialization: `serde` + `serde_json` (manifest/state) + `toml` (lode.toml); versioning: `semver`
-  - Verification: `sha2`, `ed25519-dalek`, `base64`
+  - Verification: `sha2`, `ed25519-dalek`, `p256` / `p384` (ECDSA), `base64`
   - Unpacking: `flate2` (miniz_oxide, pure Rust) + `tar` (+ optional `zip`)
   - CLI: `clap` (derive, env); errors: `thiserror` (+ `anyhow` only in main)
   - Logging: `tracing` + `tracing-subscriber`
@@ -178,7 +178,7 @@ Zero-downtime (reuseport-overlap / socket-activation): start the new process fir
 ## 6. Verification and trust: file integrity + publisher identity
 
 - **Integrity**: compute sha256 over the raw downloaded file; it must equal the artifact's `sha256` (lowercase hex).
-- **Identity**: ed25519. The publisher's private key signs a "release record," and lode verifies the signature with the pre-placed **trusted public key** → even if the CDN/mirror is poisoned or the transfer is MITM'd, it can confirm that the publisher issued it and that it has not been tampered with.
+- **Identity**: a publisher signature — ed25519 by default, or ECDSA (P-256 / P-384); the algorithm travels with the key (see *Trusted public keys* below). The publisher's private key signs a "release record," and lode verifies the signature with the pre-placed **trusted public key** → even if the CDN/mirror is poisoned or the transfer is MITM'd, it can confirm that the publisher issued it and that it has not been tampered with.
 
 ### Signature canonical bytes (exact, UTF-8, `\n`-separated, no trailing newline)
 
@@ -193,7 +193,7 @@ lode.artifact.v1
 ```
 `{name}` is the **asset filename** (the selection key), `{version}` the release version, `{sha256}` the lowercase-hex digest of the raw downloaded file, `{run}` and `{exec}` the manifest-published launch overrides (empty string when absent). The signature binds *which asset*, *which release*, *which bytes*, and *which launch commands*; `format`/`url` are derived from the filename or are operator-local and are **not** signed, so a tampered catalog cannot move a genuine signature onto different bytes, a different asset, a different version, or inject malicious run/exec commands. Verify with the trusted public key corresponding to `key_id` (asset.key_id ?? manifest.key_id).
 
-> **What is signed is the sha256 (digest), not the bin stream directly.** ed25519 signs the canonical text string above (which contains `{sha256}`) — equivalent to "signing the digest + identity fields." The full verify chain: **downloaded bytes → recompute sha256 → (integrity) == artifact.sha256 → (identity) verify this signature**. The sha256 already binds the content, so there is no need to stream the entire binary through the signer; this is also the conventional approach for release signing (such as signing `SHA256SUMS`).
+> **What is signed is the sha256 (digest), not the bin stream directly.** The publisher key signs the canonical text string above (which contains `{sha256}`) — equivalent to "signing the digest + identity fields." The full verify chain: **downloaded bytes → recompute sha256 → (integrity) == artifact.sha256 → (identity) verify this signature**. The sha256 already binds the content, so there is no need to stream the entire binary through the signer; this is also the conventional approach for release signing (such as signing `SHA256SUMS`).
 
 Optional top-level manifest `sig`, set by `lode-cli manifest-sign` and verified before any version is resolved/downloaded, preventing the addition/removal of versions, a swapped channel `latest`, or rewritten URLs:
 ```
@@ -206,7 +206,7 @@ lode.manifest.v1
 
 ### Trusted public keys / strength
 
-- `LODE_TRUSTED_KEYS` = comma-separated `key_id:base64(32-byte raw ed25519 public key)`; or `LODE_TRUSTED_KEYS_FILE` (each line `key_id base64`). Multiple keys are supported (rotation). `key_id` = the first 16 hex digits of `sha256(32-byte public key)`.
+- `LODE_TRUSTED_KEYS` = comma-separated `[<alg>:]<key_id>:<base64 public key>`, where `alg` is `ed25519` (raw 32-byte key; the default when omitted), `ecdsa-p256` or `ecdsa-p384` (SEC1 point, compressed canonical); or `LODE_TRUSTED_KEYS_FILE` (each line `[<alg>:]<key_id> <base64>`). Multiple keys are supported (rotation), of mixed algorithms. `key_id` = the first 16 hex digits of `sha256(public key bytes)`. **The algorithm is pinned on the trusted key**: a signature is checked with that key's algorithm, never with one the manifest names (its `alg` is advisory).
 - `LODE_REQUIRE_SIGNATURE` = `off` (sha256 only) | `auto` (default) | `enforce` (recommended for production). **It gates the per-artifact signature only.** The catalog (manifest-level) signature is *verify-if-present* — verified when a catalog carries one, never required, and so independent of this setting (see *Catalog signature* below).
   - **`auto` is fail-closed once any trusted key is configured**: the *artifact* signature is then required — a missing *or* invalid signature is rejected. Only when **no** trusted key is configured does `auto` skip the artifact check and log the source as **UNVERIFIED**.
   - **`enforce`** always requires trusted keys plus a valid *artifact* signature.
@@ -430,7 +430,7 @@ headers = [
 
 The remote manifest is provided by the publisher, in **JSON format** (UTF-8), fetched by lode from `[update].manifest`, and **not stored locally**. **For a complete maximal example, see [`docs/manifest.example.json`](./manifest.example.json)**. Structural contract:
 
-- Top level: `schema` (required, `"lode/v1"`), `name` (required, must match `app` in `lode.toml`), `key_id` (optional, the default signing public-key id), `sig` (optional, the ed25519 catalog signature, §6 — *verify-if-present*: checked when present, never required).
+- Top level: `schema` (required, `"lode/v1"`), `name` (required, must match `app` in `lode.toml`), `key_id` (optional, the default signing public-key id), `alg` (optional, advisory: that key's algorithm, `ed25519` when absent), `sig` (optional, the catalog signature, §6 — *verify-if-present*: checked when present, never required).
 - `channels` (required): an object, keyed by channel name, with values containing `latest` (a version id). **Multiple channels are allowed**, and lode follows one per `channel`.
 - `versions` (required): an object, keyed by version id (referenced by a channel's `latest`), with values containing `notes` (optional) + an `assets` array (≥1).
 - Each asset is keyed by its **filename** (`name`); the operator selects one via `[update].asset`:
@@ -440,8 +440,9 @@ The remote manifest is provided by the publisher, in **JSON format** (UTF-8), fe
 | `name` | ✓ | the asset **filename** (e.g. `myapp-linux-x86_64.tar.gz`) — the selection key and the signed identity; its extension fixes the `format` (§4) |
 | `url` | ✓ | absolute download URL |
 | `sha256` | ✓ | lowercase hex digest of the downloaded file (before unpacking) |
-| `sig` | conditional | base64 ed25519 over the §6 message `(name, version, sha256, run, exec)`; required under `require_signature=enforce` (and under `auto` once a trusted key is set) |
+| `sig` | conditional | base64 signature (the key's algorithm) over the §6 message `(name, version, sha256, run, exec)`; required under `require_signature=enforce` (and under `auto` once a trusted key is set) |
 | `key_id` | | overrides the top-level `key_id` |
+| `alg` | | advisory: the signing key's algorithm (`ed25519` when absent); verification uses the trusted key's own algorithm |
 | `run` | | optional literal launch command override (signed; overrides `[command].run`; see §4) |
 | `exec` | | optional CLI-passthrough command override (signed; overrides `[command].exec`; see §4) |
 | `size` | | expected byte count (an extra layer of protection) |
@@ -540,7 +541,7 @@ lode-cli management (writes state.json, communicates with the running service in
   seed         dev/testing: install a LOCAL executable/archive as a version (no manifest, no download, no signature check) and activate it, so bare `lode` runs it fully offline
 
 lode-cli publishing/signing (publisher, see docs/integration.md):
-  keygen       generate an ed25519 private key/public key/key_id
+  keygen       generate a publisher keypair + key_id (--alg ed25519 [default] | ecdsa-p256 | ecdsa-p384)
   sign         compute sha256 for an artifact + produce a sig
   verify       verify an artifact's sha256 + sig locally
   manifest     sign one asset and generate / merge (--into) a lode/v1 manifest
@@ -570,7 +571,7 @@ crates/
     src/idval.rs    #   path-component validation for untrusted ids (version / runtime name) and launch-command overrides
     src/manifest.rs #   serde types (JSON) + both source adapters + select asset by name + format-from-extension (not persisted locally)
     src/http.rs     #   ureq (rustls/aws-lc-rs) + headers passthrough + manual redirects + redaction
-    src/verify.rs   #   sha256 + ed25519 verify/sign/keygen
+    src/verify.rs   #   sha256 + ed25519 / ECDSA verify (Algorithm, PublicKey, trusted-key entries)
     src/download.rs #   streaming download to the per-version cache + sha256
     src/install.rs  #   versions directory + atomic symlink switch + prune; startup GC (clean *.part/*.tmp, reclaim per keep_versions)
     src/lock.rs     #   PID lock (O_EXCL) + stale-lock takeover

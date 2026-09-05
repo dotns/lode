@@ -108,7 +108,7 @@ shipped alongside it) it is the operator/publisher toolkit.
 - **Update** `[update].policy = off | check | auto`; source is either `manifest` (native `lode/v1` JSON) **or** `github = "owner/repo"` (Releases).
 - **Rollback** — a new version that exits within `health_grace` is reverted to the last known-good (single-strike).
 - **Restart** `[supervise].restart = off | on-failure | always` — `on-failure` (default, keep-alive) retries a failing app `restart_max` times then **pauses** (lode stays alive, never crash-looping the container); `off` opts back into mirroring the child; lode-initiated update/rollback/restart always relaunch.
-- **Trust** — `sha256` + `ed25519`; set `[trust].trusted_keys` + `require_signature = off | auto | enforce`. Note: verification defaults to `auto` (enforced only when trusted keys are configured) — set `require_signature = "enforce"` for production. Signing is the publisher's job — see [Integration §3](docs/integration.md).
+- **Trust** — `sha256` + `ed25519` (or ECDSA P-256 / P-384, tagged on the key); set `[trust].trusted_keys` + `require_signature = off | auto | enforce`. Note: verification defaults to `auto` (enforced only when trusted keys are configured) — set `require_signature = "enforce"` for production. Signing is the publisher's job — see [Integration §3](docs/integration.md).
 - **Private sources** — `[http].headers` (with `${ENV}` expansion) is sent on every fetch.
 
 ## Use as a library

@@ -3,7 +3,7 @@
 [English](architecture.md) · **中文**
 
 > 通用的"升级 + 启动"组件:一个**小型 Rust 静态二进制**(几 MB),语言无关。
-> 校验**文件完整性(sha256)**与**发布者身份(ed25519 签名)**,再启动并管理服务,支持无缝热更新与回滚。
+> 校验**文件完整性(sha256)**与**发布者身份(ed25519 / ECDSA 签名)**,再启动并管理服务,支持无缝热更新与回滚。
 > 通用镜像 = `zzci/ubase` + lode 二进制(无需任何语言运行时;运行时若有则启动时下载并缓存);一个实例 = **单程序、单通道**。
 
 本文是权威**架构文档**,实现以本文为准。遵循 **pma-rust** 硬锁(edition 2024、`#![forbid(unsafe_code)]`、rustls+aws-lc-rs、deny-warnings、musl+crt-static、cargo-deny/shear/typos/nextest)。
@@ -23,7 +23,7 @@
 2. **三文件分工**:`lode.toml`(本地 TOML,纯配置,**app 不写**)、`state.json`(本地 JSON,**lode 与 app 都写**,通信中枢)、`manifest.json`(**远程 JSON**,不落本地)。app 通过**读写 `state.json`**(读 `available`、写 `target`/`restart_nonce`)与 lode 沟通;其它实时/RPC 通信属带外,由 app 自理。详见 §7。
 3. **下载靠 manifest,运行靠 lode.toml**:artifact 的 `format` 决定如何落地;运行命令 `run`/`exec`(+ 可选 `[runtime]`)写在 lode.toml,**无 `kind`**。
 4. **不主动跳版本**:仅当本地无任何已装版本时才下载最新;有版本先起现有版本,更新交策略与 app/CLI 触发。
-5. **双层校验**:完整性(sha256)+ 发布者身份(ed25519),按 `trust.require_signature` 强制。
+5. **双层校验**:完整性(sha256)+ 发布者身份(默认 ed25519,或 ECDSA P-256/P-384),按 `trust.require_signature` 强制。
 6. **子进程启动 + 服务管理**:lode 永远以子进程拉起并监督,提供起停/重启/状态;就绪/停止握手避免提前杀进程;可选无停机重启(借鉴 overseer)。
 7. **统一配置**:`CLI > 环境变量(`LODE_*`) > `lode.toml`(TOML) > 默认值`。
 8. **私有源**:`[http].headers` 透传鉴权;私钥/凭据不进镜像。
@@ -64,7 +64,7 @@ zzci/ubase                 │  lode (Rust 静态二进制, 几 MB)   │
 - **依赖(纯 Rust / pma-rust 合规,无 tokio/axum,同步实现保持小巧)**:
   - HTTP:`ureq` + `rustls`(aws-lc-rs provider,`install_default()` 于 `main`)
   - 序列化:`serde` + `serde_json`(manifest/state)+ `toml`(lode.toml);版本:`semver`
-  - 校验:`sha2`、`ed25519-dalek`、`base64`
+  - 校验:`sha2`、`ed25519-dalek`、`p256` / `p384`(ECDSA)、`base64`
   - 解包:`flate2`(miniz_oxide 纯 Rust)+ `tar`(+ 可选 `zip`)
   - CLI:`clap`(derive, env);错误:`thiserror`(+ `anyhow` 仅 main)
   - 日志:`tracing` + `tracing-subscriber`
@@ -178,7 +178,7 @@ target ≠ current 且可用(stop-start 模式):
 ## 6. 验证与信任:文件完整性 + 发布者身份
 
 - **完整性**:对下载到的原始文件求 sha256,必须等于 artifact 的 `sha256`(小写 hex)。
-- **身份**:ed25519。发布者私钥签"发布记录",lode 用预置**受信公钥**验签 → 即使 CDN/镜像被投毒或传输被 MITM,也能确认是该发布者所发且未篡改。
+- **身份**:发布者签名 —— 默认 ed25519,或 ECDSA(P-256 / P-384);算法随密钥走(见下文*受信公钥*)。发布者私钥签"发布记录",lode 用预置**受信公钥**验签 → 即使 CDN/镜像被投毒或传输被 MITM,也能确认是该发布者所发且未篡改。
 
 ### 签名规范字节(精确,UTF-8,`\n` 分隔,无尾换行)
 
@@ -193,7 +193,7 @@ lode.artifact.v1
 ```
 `{name}` 是**资产文件名**(选择键),`{version}` 是发布版本,`{sha256}` 是原始下载文件的小写 hex 摘要,`{run}` 与 `{exec}` 是 manifest 发布的启动命令覆盖(缺省为空字符串)。签名绑定*哪个资产*、*哪个版本*、*哪些字节*、*哪些启动命令*;`format`/`url` 由文件名推导或属 operator 本地,**不**参与签名,故被篡改的 catalog 无法把真签名挪到别的字节、别的资产、别的版本或注入恶意 run/exec 命令上。用 `key_id`(asset.key_id ?? manifest.key_id)对应的受信公钥验签。
 
-> **签的是 sha256(摘要),不是直接对 bin 流签名。** ed25519 对上面这串规范文本(其中含 `{sha256}`)签名——等价于"签摘要 + 身份字段"。完整 verify 链:**下载字节 → 重算 sha256 →(完整性)== artifact.sha256 →(身份)验这串签名**。sha256 已把内容绑定,故无需把整个二进制流过签名器;这也是发布签名(如签 `SHA256SUMS`)的常规做法。
+> **签的是 sha256(摘要),不是直接对 bin 流签名。** 发布者密钥对上面这串规范文本(其中含 `{sha256}`)签名——等价于"签摘要 + 身份字段"。完整 verify 链:**下载字节 → 重算 sha256 →(完整性)== artifact.sha256 →(身份)验这串签名**。sha256 已把内容绑定,故无需把整个二进制流过签名器;这也是发布签名(如签 `SHA256SUMS`)的常规做法。
 
 可选 manifest 顶层 `sig`,由 `lode-cli manifest-sign` 写入,并在解析/下载任何版本**之前**验证,防增删版本、改 channel `latest`、改 URL:
 ```
@@ -206,7 +206,7 @@ lode.manifest.v1
 
 ### 受信公钥 / 强度
 
-- `LODE_TRUSTED_KEYS` = 逗号分隔 `key_id:base64(32字节原始 ed25519 公钥)`;或 `LODE_TRUSTED_KEYS_FILE`(每行 `key_id base64`)。支持多把(轮换)。`key_id` = `sha256(公钥32字节)` 的前 16 位十六进制。
+- `LODE_TRUSTED_KEYS` = 逗号分隔 `[<alg>:]<key_id>:<base64 公钥>`,其中 `alg` 为 `ed25519`(原始 32 字节公钥;省略时的默认)、`ecdsa-p256` 或 `ecdsa-p384`(SEC1 点,规范形式为压缩);或 `LODE_TRUSTED_KEYS_FILE`(每行 `[<alg>:]<key_id> <base64>`)。支持多把(轮换),算法可混用。`key_id` = `sha256(公钥字节)` 的前 16 位十六进制。**算法钉在受信密钥上**:签名用该密钥的算法验证,绝不用 manifest 声明的算法(其 `alg` 仅为提示)。
 - `LODE_REQUIRE_SIGNATURE` = `off`(仅 sha256) | `auto`(默认) | `enforce`(生产推荐)。**它只门控 per-artifact 签名。** 目录(manifest 级)签名是 *present 才验* —— 目录携带时才验,永不强制,因此与此设置无关(见下方*目录签名*)。
   - **`auto` 一旦配置了任一受信公钥即变为 fail-closed**:此时 *artifact* 签名成为必需 —— 缺签名*或*验签失败都拒绝。仅当**未**配置任何受信公钥时,`auto` 才跳过 artifact 验签,并把来源记为 **UNVERIFIED**。
   - **`enforce`** 始终要求受信公钥,且 *artifact* 签名必须有效。
@@ -430,7 +430,7 @@ headers = [
 
 远程 manifest 由发布方提供,**格式为 JSON**(UTF-8),由 lode 从 `[update].manifest` 拉取,**不存本地**。**完整最大化示例见 [`docs/manifest.example.json`](./manifest.example.json)**。结构约定:
 
-- 顶层:`schema`(必填,`"lode/v1"`)、`name`(必填,须与 `lode.toml` 的 `app` 一致)、`key_id`(可选,默认签名公钥 id)、`sig`(可选,catalog 的 ed25519 签名,§6 —— *present 才验*:存在时验证,永不强制)。
+- 顶层:`schema`(必填,`"lode/v1"`)、`name`(必填,须与 `lode.toml` 的 `app` 一致)、`key_id`(可选,默认签名公钥 id)、`alg`(可选,提示性:该密钥的算法,缺省为 `ed25519`)、`sig`(可选,catalog 的签名,§6 —— *present 才验*:存在时验证,永不强制)。
 - `channels`(必填):对象,键为通道名,值含 `latest`(版本 id)。**可多个通道**,lode 按 `channel` 跟随其一。
 - `versions`(必填):对象,键为版本 id(被通道 `latest` 引用),值含 `notes`(可选)+ `assets` 数组(≥1)。
 - 每个资产以**文件名**(`name`)为键;operator 用 `[update].asset` 选其一:
@@ -440,8 +440,9 @@ headers = [
 | `name` | ✓ | 资产**文件名**(如 `myapp-linux-x86_64.tar.gz`)—— 选择键与被签身份;其扩展名确定 `format`(§4) |
 | `url` | ✓ | 绝对下载地址 |
 | `sha256` | ✓ | 下载文件(解包前)的小写 hex 摘要 |
-| `sig` | 条件 | base64 ed25519,对 §6 消息 `(name, version, sha256, run, exec)` 签名;`require_signature=enforce` 时必填(`auto` 一旦配了受信公钥也必填) |
+| `sig` | 条件 | base64 签名(密钥的算法),对 §6 消息 `(name, version, sha256, run, exec)` 签名;`require_signature=enforce` 时必填(`auto` 一旦配了受信公钥也必填) |
 | `key_id` | | 覆盖顶层 `key_id` |
+| `alg` | | 提示性:签名密钥的算法(缺省为 `ed25519`);验证用受信密钥自身的算法 |
 | `run` | | 可选字面启动命令覆盖(已签名;覆盖 `[command].run`;见 §4) |
 | `exec` | | 可选 CLI 透传命令覆盖(已签名;覆盖 `[command].exec`;见 §4) |
 | `size` | | 期望字节数(多一道防护) |
@@ -540,7 +541,7 @@ lode-cli 管理（写 state.json,与运行中的服务实例沟通）:
   seed         开发/测试:把本地可执行文件/归档作为一个版本安装(无 manifest、无下载、无签名校验)并激活,使裸 `lode` 可完全离线运行它
 
 lode-cli 发布/签名(发布者,详见 docs/integration.zh-CN.md):
-  keygen       生成 ed25519 私钥/公钥/key_id
+  keygen       生成发布者密钥对 + key_id(--alg ed25519 [默认] | ecdsa-p256 | ecdsa-p384)
   sign         对 artifact 算 sha256 + 产出 sig
   verify       本地校验 artifact 的 sha256 + sig
   manifest     对单个资产签名并生成 / 合并(--into)lode/v1 manifest
@@ -570,7 +571,7 @@ crates/
     src/idval.rs    #   不可信 id(版本 / 运行时名)的路径分量校验及启动命令覆盖校验
     src/manifest.rs #   serde 类型(JSON) + 两种源适配 + 按文件名选资产 + 由扩展名推 format(不落本地)
     src/http.rs     #   ureq(rustls/aws-lc-rs) + headers 透传 + 手动重定向 + 脱敏
-    src/verify.rs   #   sha256 + ed25519 verify/sign/keygen
+    src/verify.rs   #   sha256 + ed25519 / ECDSA 验签(Algorithm、PublicKey、受信密钥条目)
     src/download.rs #   流式下载到按版本缓存 + sha256
     src/install.rs  #   versions 目录 + 原子软链切换 + prune;启动 GC(清 *.part/*.tmp、按 keep_versions 回收)
     src/lock.rs     #   PID 锁(O_EXCL) + 僵尸锁接管

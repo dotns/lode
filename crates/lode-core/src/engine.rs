@@ -457,6 +457,7 @@ fn runtime_asset(url: &str, name: &str) -> manifest::Asset {
         sha256: String::new(),
         sig: None,
         key_id: None,
+        alg: None,
         run: None,
         exec: None,
         size: None,

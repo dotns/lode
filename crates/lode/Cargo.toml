@@ -27,5 +27,7 @@ tracing = { workspace = true }
 serde_json = { workspace = true }
 base64 = { workspace = true }
 ed25519-dalek = { workspace = true }
-# `lode-cli keygen` seeds an ed25519 key from the OS RNG.
+p256 = { workspace = true }
+p384 = { workspace = true }
+# `lode-cli keygen` seeds a publisher key from the OS RNG.
 getrandom = { workspace = true }

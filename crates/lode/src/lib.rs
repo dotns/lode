@@ -93,7 +93,7 @@ fn run_tool() -> anyhow::Result<ExitCode> {
 
     match cli.command {
         // --- publisher / authoring (no config required) ---
-        ToolCommand::Keygen { out } => authoring::keygen(out.as_deref())?,
+        ToolCommand::Keygen { out, alg } => authoring::keygen(out.as_deref(), &alg)?,
         ToolCommand::Sign {
             artifact,
             version,

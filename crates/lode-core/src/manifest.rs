@@ -39,6 +39,11 @@ pub struct Manifest {
     pub key_id: Option<String>,
     #[serde(default)]
     pub sig: Option<String>,
+    /// Advisory: the [`crate::verify::Algorithm`] name of the key behind the
+    /// top-level `sig` (absent = `ed25519`). Informational only — the loader always
+    /// verifies with the algorithm pinned on each trusted key, never this value.
+    #[serde(default)]
+    pub alg: Option<String>,
     pub channels: BTreeMap<String, Channel>,
     pub versions: BTreeMap<String, VersionEntry>,
 }
@@ -54,7 +59,7 @@ impl Manifest {
     /// `run`/`exec` are the asset's optional launch overrides, empty when absent —
     /// they steer what the loader executes, so a present catalog signature must
     /// cover them; [`parse`] rejects control characters in them, keeping the
-    /// tab-separated framing unambiguous). The per-asset `sig`/`key_id` and the
+    /// tab-separated framing unambiguous). The per-asset `sig`/`key_id`/`alg` and the
     /// runtime-only `url`/`size` are deliberately excluded (each asset's own
     /// signature is verified separately); this binds the catalog shape, the
     /// channel pointers and every asset's identity + digest + launch overrides.
@@ -124,13 +129,18 @@ pub struct Asset {
     pub url: String,
     /// Lowercase-hex sha256 of the downloaded file (pre-unpack).
     pub sha256: String,
-    /// base64 ed25519 over the §1 canonical message (the GitHub asset `label`).
+    /// base64 signature over the §1 canonical message (the GitHub asset `label`).
     #[serde(default)]
     pub sig: Option<String>,
     /// Overrides the manifest `key_id` for this asset.
     #[serde(default)]
     #[allow(dead_code)] // advisory per-asset key override; tried via the trusted-key set
     pub key_id: Option<String>,
+    /// Advisory: the [`crate::verify::Algorithm`] name of the key behind `sig`
+    /// (absent = `ed25519`). Like `key_id`, informational only — verification uses
+    /// the algorithm pinned on each trusted key.
+    #[serde(default)]
+    pub alg: Option<String>,
     /// Optional bare-run launch command published with the asset; when present it
     /// OVERRIDES the operator's `[command].run`. Signed (bound into both the §1
     /// artifact message and the catalog signature).
@@ -476,6 +486,7 @@ fn map_release(
         schema: SCHEMA.to_owned(),
         name: app.to_owned(),
         key_id: None,
+        alg: None,
         sig: None,
         channels,
         versions,
@@ -500,6 +511,7 @@ fn gh_asset_to_asset(a: GhAsset) -> Asset {
         sha256,
         sig: a.label,
         key_id: None,
+        alg: None,
         run: None,
         exec: None,
         size: a.size,
@@ -560,11 +572,16 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
     if manifest.versions.is_empty() {
         return Err(Error::Manifest("manifest declares no versions".to_owned()));
     }
+    // `alg` is advisory (each trusted key pins the algorithm actually used), so an
+    // unknown name — a publisher typo, or an algorithm a newer lode added — is
+    // reported, not fatal.
+    warn_unknown_alg("manifest", manifest.alg.as_deref());
     // Launch overrides flow from the network into signed messages and argv; guard
     // them once, at the parse boundary, so every downstream consumer sees clean
     // values (the GitHub adapter never sets them).
     for ver in manifest.versions.values() {
         for asset in &ver.assets {
+            warn_unknown_alg(&asset.name, asset.alg.as_deref());
             if let Some(run) = asset.run.as_deref() {
                 validate_command_override("run", run)?;
             }
@@ -574,6 +591,19 @@ pub fn parse(bytes: &[u8]) -> Result<Manifest> {
         }
     }
     Ok(manifest)
+}
+
+/// Log a manifest/asset `alg` that names no [`crate::verify::Algorithm`].
+fn warn_unknown_alg(what: &str, alg: Option<&str>) {
+    if let Some(alg) = alg
+        && crate::verify::Algorithm::parse(alg).is_none()
+    {
+        tracing::warn!(
+            what,
+            alg,
+            "unknown signature algorithm declared (advisory; ignored)"
+        );
+    }
 }
 
 /// Validate an asset's optional `run`/`exec` launch override: when present it must
@@ -757,6 +787,31 @@ mod tests {
         assert!(parse(mk("\"  \"").as_bytes()).is_err());
         // A normal command parses.
         assert!(parse(mk("\"./app serve\"").as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn parse_carries_advisory_alg_and_tolerates_unknown_names() {
+        let mk = |top: &str, asset: &str| {
+            format!(
+                r#"{{"schema":"lode/v1","name":"x",{top}
+                   "channels":{{"stable":{{"latest":"1.0.0"}}}},
+                   "versions":{{"1.0.0":{{"assets":[
+                     {{"name":"a","url":"","sha256":"00"{asset}}}]}}}}}}"#
+            )
+        };
+        // Absent = ed25519 (nothing to carry).
+        let m = parse(mk("", "").as_bytes()).unwrap();
+        assert!(m.alg.is_none());
+        assert!(m.versions["1.0.0"].assets[0].alg.is_none());
+        // Declared names are carried verbatim, top-level and per asset.
+        let m = parse(mk(r#""alg":"ecdsa-p384","#, r#","alg":"ecdsa-p256""#).as_bytes()).unwrap();
+        assert_eq!(m.alg.as_deref(), Some("ecdsa-p384"));
+        assert_eq!(
+            m.versions["1.0.0"].assets[0].alg.as_deref(),
+            Some("ecdsa-p256")
+        );
+        // An unknown name is advisory: the manifest still parses (forward compat).
+        assert!(parse(mk(r#""alg":"ml-dsa-65","#, r#","alg":"typo""#).as_bytes()).is_ok());
     }
 
     #[test]

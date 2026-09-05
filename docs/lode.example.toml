@@ -44,10 +44,13 @@ keep_versions  = 3         # old versions kept for rollback (rest GC'd)
 #                          # is ALWAYS allowed. Set true (or pass --allow-insecure-http) only for
 #                          # a trusted non-TLS source — credentials then travel in the clear.
 
-# --- fetch: verify publisher identity (ed25519) ---
+# --- fetch: verify publisher identity (ed25519 by default; ECDSA via an `<alg>:` tag) ---
 [trust]
 require_signature = "auto"   # off | auto | enforce
 trusted_keys = ["9787ab11e55b4cbc:nyQSShSI8fAtHZNiJWDemBbcaX6V9OvmXtovkITm4fc="]
+#                          # entries are `[<alg>:]<key_id>:<base64>` as printed by `lode-cli keygen`;
+#                          # no tag = ed25519, e.g. "ecdsa-p256:<key_id>:<base64>" for an ECDSA P-256 key.
+#                          # The algorithm is pinned here, on the key — never taken from the manifest.
 # trusted_keys_file = "/run/secrets/lode_keys"
 
 # --- run: how to launch.  run = the LITERAL command for bare `lode`; exec = the base

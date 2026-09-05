@@ -66,8 +66,9 @@ welcome to notify us if lode's use of a dependency is exploitable.
 ## Threat Model Summary
 
 - **Artifact verification:** every installed artifact is verified by **sha256**
-  and, when configured, an **ed25519 signature** over a minimal message
-  (asset name / version / sha256). `[trust].require_signature = off | auto |
+  and, when configured, a **publisher signature** (ed25519 by default, or
+  ECDSA P-256 / P-384 — the algorithm is pinned on the trusted key, never read
+  from the manifest) over a minimal message (asset name / version / sha256). `[trust].require_signature = off | auto |
   enforce` gates **artifacts only**; `auto` (the default) enforces only when
   trusted keys are configured — set `enforce` for production.
 - **Catalog/manifest signature:** *verify-if-present* — checked when a

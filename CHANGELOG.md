@@ -5,6 +5,35 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Selectable signature algorithm.** Publisher keys now carry an `alg`:
+  `ed25519` (unchanged default), `ecdsa-p256` (SHA-256, 64-byte `r||s` signature) or
+  `ecdsa-p384` (SHA-384, 96-byte `r||s`). `lode-cli keygen --alg <alg>` generates the
+  key; non-ed25519 keys are tagged `<alg>:…` in the key file, the `.pub` line and the
+  `trusted_keys` entry (`<alg>:<key_id>:<base64>`), and `--key` / `--key-env` /
+  `--pubkey` accept the tagged form. ECDSA public keys are SEC1 (compressed canonical;
+  uncompressed accepted), `key_id` is derived over the compressed encoding.
+- **The algorithm is pinned on the trusted key, never read from the manifest.** Each
+  `[trust].trusted_keys` entry is verified with its own algorithm; key bytes relabelled
+  under another algorithm fail to decode. The manifest gains an optional, advisory
+  `alg` field (top level and per asset, absent = `ed25519`) that `lode-cli manifest` /
+  `manifest-sign` stamp for non-ed25519 keys; unknown names are logged, not fatal.
+  The signed messages (`lode.artifact.v1` / `lode.manifest.v1`) are unchanged, so
+  existing ed25519 keys, signatures and manifests keep verifying as before.
+- `lode-cli keygen` / `sign` print an `alg:` line; `lode_core::verify` exposes
+  `Algorithm`, `PublicKey` and `decode_trusted_key`. `verify::key_id` now takes
+  `&[u8]` (any canonical public-key encoding), and `verify_signature` accepts a
+  tagged trusted-key entry in place of a bare base64 key.
+
+### Dependencies
+
+- `p256` / `p384` 0.13 (RustCrypto, pure Rust; `ecdsa` + `std` features only), kept on
+  the digest 0.10 generation shared with `ed25519-dalek` 2 / `sha2` 0.10 — the 0.14
+  line requires `sha2` 0.11 and is deferred to a coordinated crypto-stack bump.
+
 ## [0.2.0] - 2026-08-31
 
 ### Changed (breaking, library only)

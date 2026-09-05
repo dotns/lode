@@ -2,6 +2,7 @@
   "schema": "lode/v1",
   "name": "myapp",
   "key_id": "9787ab11e55b4cbc",
+  "alg": "ed25519",
 
   "channels": {
     "stable": { "latest": "1.5.0" },
@@ -19,6 +20,7 @@
           "size": 5242880,
           "sig": "Izn/bTO7W4gOFBlpPswTE6ZjmyfqktRinRISNW4P8+B+InbQ6xyclGguJrv6aitYO4hBKSP7e7zz34Mb+mYYCw==",
           "key_id": "9787ab11e55b4cbc",
+          "alg": "ed25519",
           "run": "./bin/myapp serve",
           "exec": "./bin/myapp",
           "auth": true
@@ -42,5 +44,5 @@
     }
   },
 
-  "sig": "<optional: base64 ed25519 over the lode.manifest.v1 message — set by `lode-cli manifest-sign --into manifest.json --key private.key`; pairs with the top-level key_id>"
+  "sig": "<optional: base64 signature (the key's alg) over the lode.manifest.v1 message — set by `lode-cli manifest-sign --into manifest.json --key private.key`; pairs with the top-level key_id>"
 }

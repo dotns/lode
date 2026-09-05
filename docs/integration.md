@@ -145,18 +145,21 @@ is replaced by temp-file + rename on every write).
 
 lode resolves a **channel → version → asset**, verifies it, and installs/runs it.
 The asset each host installs is chosen by **filename** (`[update].asset`), and every
-asset carries an ed25519 signature over the canonical message
+asset carries a signature (ed25519 by default; ECDSA P-256 / P-384 also supported —
+see [source-adapters §1 *Keys*](source-adapters.md#keys)) over the canonical message
 `lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}` (UTF-8, `\n`-separated, no trailing
 newline; `run`/`exec` are empty string when absent). `name` is the asset filename. Full spec, including the native manifest
 shape and field tables: [source-adapters.md](source-adapters.md).
 
 Packaging + signing are the **publisher's** job, doable in any CI. `lode-cli` is a
-reference implementation; any ed25519 tooling that produces the same signature works.
+reference implementation; any tooling that produces the same signature works.
 
 ### Keys (once)
 
 `lode-cli keygen` prints `key_id`, the `trusted_keys` entry (`<key_id>:<base64>`,
-hand to operators), and the secret seed — keep it offline.
+hand to operators), and the secret seed — keep it offline. Pass `--alg ecdsa-p256`
+or `--alg ecdsa-p384` for an ECDSA key: its entry and key file are then tagged
+`<alg>:…`, and every `--key` / `--key-env` / `--pubkey` accepts that tagged form.
 
 ### GitHub Releases (`github = "owner/repo"`)
 

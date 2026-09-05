@@ -12,7 +12,7 @@ lode 从且仅从一个源拉取更新:**native** 清单 URL,或 **GitHub Releas
 
 ## 1. 被签名的 artifact 消息
 
-签名是对一个规范消息的 ed25519 —— UTF-8、`\n` 分隔、**无结尾换行**:
+签名由发布者密钥的算法(默认 ed25519,见*密钥*)对一个规范消息做出 —— UTF-8、`\n` 分隔、**无结尾换行**:
 
 ```
 lode.artifact.v1
@@ -37,9 +37,18 @@ lode.artifact.v1
 
 ### 密钥
 
-- ed25519,32 字节密钥以 base64 分发。`key_id` = `sha256(公钥)` 的前 16 个 hex 字符。
-- 操作者在 `[trust].trusted_keys` 里以 `key_id:base64公钥` 钉住发布者。
-- 签名:`sig = base64(ed25519_sign(私钥, message))`。
+每把密钥都带签名算法(`alg`)。未声明 = `ed25519`,因此 `alg` 出现之前的密钥、配置与 manifest 全部不变。
+
+| `alg` | 公钥(base64) | 签名(base64) | 哈希 |
+|---|---|---|---|
+| `ed25519`(默认) | 原始 32 字节 | 64 字节 | — |
+| `ecdsa-p256` | SEC1 点;规范形式为压缩 33 字节(也接受非压缩) | 64 字节 `r ‖ s` | SHA-256 |
+| `ecdsa-p384` | SEC1 点;规范形式为压缩 49 字节(也接受非压缩) | 96 字节 `r ‖ s` | SHA-384 |
+
+- `key_id` = 对上述规范编码求 `sha256(公钥)` 的前 16 个 hex 字符。
+- 操作者在 `[trust].trusted_keys` 里以 `<alg>:<key_id>:<base64公钥>` 钉住发布者;ed25519 省略 `<alg>:` 前缀(`<key_id>:<base64公钥>`,即原有形式)。`lode-cli keygen --alg <alg>` 直接打印可粘贴的条目。
+- **算法绑定在受信密钥上,绝不取自 manifest。** lode 用每把受信密钥所钉住的算法验签;manifest 里可选的 `alg` 字段仅为提示。密钥字节换个算法标签就无法解码,因此任何签名都不可能用操作者未给该密钥钉住的算法来验证。
+- 签名:`sig = base64(sign(私钥, message))` —— 各算法签的消息字节完全相同。
 - 验证:当且仅当 `sig` 对**任一**受信密钥在重建消息上验过、**且**下载字节 hash 等于
   `sha256` 时,lode 才接受该 artifact。
 
@@ -224,7 +233,8 @@ asset    = "myapp-linux-x64.tar.gz"
 | `name` | ✓ | 选择 key;与 `[update].asset` 匹配 |
 | `url` | ✓ | 绝对下载 URL |
 | `sha256` | ✓ | 原始文件的小写 hex |
-| `sig` | enforce / auto+keys | 对 §1 消息(含 `run`/`exec`)的 base64 ed25519;内嵌,或在资产旁放 `.sig` sidecar |
+| `sig` | enforce / auto+keys | 对 §1 消息(含 `run`/`exec`)的 base64 签名(签名密钥的算法,见 §1 *密钥*);内嵌,或在资产旁放 `.sig` sidecar |
+| `alg` | | 提示性:签名密钥的算法(缺省为 `ed25519`);验证始终用受信密钥自身的算法 |
 | `run` | | 可选字面启动命令覆盖(已签名;覆盖 `[command].run`;见 §4) |
 | `exec` | | 可选 CLI 透传命令覆盖(已签名;覆盖 `[command].exec`;见 §4) |
 | `size` | | 期望字节数(额外完整性校验) |

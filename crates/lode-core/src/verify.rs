@@ -1,24 +1,157 @@
-//! Integrity (sha256) + publisher identity (ed25519) verification.
+//! Integrity (sha256) + publisher identity (ed25519 / ECDSA) verification.
 //!
 //! These are the runtime primitives the loader uses to verify a downloaded
 //! artifact. The publisher-side `keygen` / `sign` / `verify` / `manifest`
 //! commands (exposed under `lode-cli`) reuse them — see [`crate::authoring`].
 //!
-//! Keys are raw 32-byte ed25519 values, distributed as base64. A `key_id` is the
-//! first 16 hex chars of `sha256(public_key)`. The signed message binds an
-//! artifact's identity to its content digest; see [`artifact_message`].
+//! Keys are distributed as base64, tagged with their [`Algorithm`]; an untagged
+//! key is ed25519 (the default). A `key_id` is the first 16 hex chars of
+//! `sha256(public_key)` over the key's canonical encoding. The signed message
+//! binds an artifact's identity to its content digest; see [`artifact_message`].
 
+use std::fmt;
 use std::fs::File;
 use std::io;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::{Context as _, Result, bail};
 use base64::Engine as _;
-use ed25519_dalek::{Signature, Verifier as _, VerifyingKey};
+use ed25519_dalek::Verifier as _;
 use sha2::{Digest as _, Sha256};
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::STANDARD;
+
+/// Signature algorithm of a publisher key.
+///
+/// The algorithm is a property of the **trusted-key entry** (and of the key files
+/// `keygen` writes), never of the manifest: a signature is always checked with the
+/// algorithm the operator pinned for that key, so a catalog cannot pick a weaker or
+/// mismatched primitive for a key it does not own. Unstated = ed25519.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Algorithm {
+    /// Raw 32-byte public key, 64-byte signature. The default when unstated.
+    Ed25519,
+    /// ECDSA over NIST P-256 with SHA-256: SEC1 public key (33-byte compressed is
+    /// canonical; uncompressed accepted), fixed-size 64-byte `r || s` signature.
+    EcdsaP256,
+    /// ECDSA over NIST P-384 with SHA-384: SEC1 public key (49-byte compressed is
+    /// canonical; uncompressed accepted), fixed-size 96-byte `r || s` signature.
+    EcdsaP384,
+}
+
+impl Algorithm {
+    /// Every supported algorithm, in the order `keygen --help` lists them.
+    pub const ALL: [Self; 3] = [Self::Ed25519, Self::EcdsaP256, Self::EcdsaP384];
+
+    /// The wire name (`ed25519`, `ecdsa-p256`, `ecdsa-p384`) used in trusted-key
+    /// entries, key files and the manifest `alg` field.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            Self::EcdsaP256 => "ecdsa-p256",
+            Self::EcdsaP384 => "ecdsa-p384",
+        }
+    }
+
+    /// Parse a wire name; `None` when unknown.
+    pub fn parse(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|a| a.name() == name)
+    }
+}
+
+impl fmt::Display for Algorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for Algorithm {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        Self::parse(s).ok_or_else(|| {
+            let known: Vec<&str> = Self::ALL.iter().map(|a| a.name()).collect();
+            anyhow::anyhow!(
+                "unknown signature algorithm {s:?} (expected one of: {})",
+                known.join(", ")
+            )
+        })
+    }
+}
+
+/// A decoded publisher public key, tagged with its [`Algorithm`].
+#[derive(Debug, Clone)]
+pub enum PublicKey {
+    Ed25519(ed25519_dalek::VerifyingKey),
+    EcdsaP256(p256::ecdsa::VerifyingKey),
+    EcdsaP384(p384::ecdsa::VerifyingKey),
+}
+
+impl PublicKey {
+    /// Decode raw public-key bytes under `alg` (raw 32 bytes for ed25519, SEC1
+    /// compressed or uncompressed for ECDSA). Bytes of the wrong shape for `alg`
+    /// are an error — a key never silently changes algorithm.
+    pub fn decode(alg: Algorithm, bytes: &[u8]) -> Result<Self> {
+        Ok(match alg {
+            Algorithm::Ed25519 => {
+                let raw: &[u8; 32] = bytes.try_into().map_err(|_| {
+                    anyhow::anyhow!("expected 32-byte ed25519 key, got {} bytes", bytes.len())
+                })?;
+                Self::Ed25519(
+                    ed25519_dalek::VerifyingKey::from_bytes(raw)
+                        .context("invalid ed25519 public key")?,
+                )
+            }
+            Algorithm::EcdsaP256 => Self::EcdsaP256(
+                p256::ecdsa::VerifyingKey::from_sec1_bytes(bytes)
+                    .context("invalid ecdsa-p256 public key (expected SEC1 bytes)")?,
+            ),
+            Algorithm::EcdsaP384 => Self::EcdsaP384(
+                p384::ecdsa::VerifyingKey::from_sec1_bytes(bytes)
+                    .context("invalid ecdsa-p384 public key (expected SEC1 bytes)")?,
+            ),
+        })
+    }
+
+    pub const fn algorithm(&self) -> Algorithm {
+        match self {
+            Self::Ed25519(_) => Algorithm::Ed25519,
+            Self::EcdsaP256(_) => Algorithm::EcdsaP256,
+            Self::EcdsaP384(_) => Algorithm::EcdsaP384,
+        }
+    }
+
+    /// The canonical encoding — raw 32 bytes (ed25519) or the SEC1 *compressed*
+    /// point (ECDSA): what [`key_id`] hashes and what `keygen` prints.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Ed25519(k) => k.to_bytes().to_vec(),
+            Self::EcdsaP256(k) => k.to_encoded_point(true).as_bytes().to_vec(),
+            Self::EcdsaP384(k) => k.to_encoded_point(true).as_bytes().to_vec(),
+        }
+    }
+
+    /// `key_id` of this key (over its canonical encoding, so an ECDSA key pinned
+    /// in uncompressed form derives the same id `keygen` printed).
+    pub fn key_id(&self) -> String {
+        key_id(&self.to_bytes())
+    }
+
+    /// Verify a raw signature over `message`. A signature of the wrong shape for
+    /// this key's algorithm simply fails to verify.
+    pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
+        match self {
+            Self::Ed25519(k) => ed25519_dalek::Signature::from_slice(signature)
+                .is_ok_and(|sig| k.verify(message, &sig).is_ok()),
+            Self::EcdsaP256(k) => p256::ecdsa::Signature::from_slice(signature)
+                .is_ok_and(|sig| k.verify(message, &sig).is_ok()),
+            Self::EcdsaP384(k) => p384::ecdsa::Signature::from_slice(signature)
+                .is_ok_and(|sig| k.verify(message, &sig).is_ok()),
+        }
+    }
+}
 
 /// Identity of a single release asset, used to build the signed message.
 ///
@@ -53,13 +186,14 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-/// `key_id` = first 16 hex chars of `sha256(public_key)`.
-pub fn key_id(public: &[u8; 32]) -> String {
+/// `key_id` = first 16 hex chars of `sha256(public_key)` (the key's canonical
+/// encoding — see [`PublicKey::to_bytes`]).
+pub fn key_id(public: &[u8]) -> String {
     let digest = Sha256::digest(public);
     to_hex(&digest)[..16].to_owned()
 }
 
-/// Canonical ed25519 message for an asset (design §1).
+/// Canonical signed message for an asset (design §1).
 ///
 /// Binds the asset's identity (`name` = the asset filename, plus `version`) to its
 /// content digest and its optional `run`/`exec` launch overrides (empty fields when
@@ -70,7 +204,8 @@ pub fn key_id(public: &[u8; 32]) -> String {
 /// `\n` separated, no trailing newline) — must match the loader. `format`/`url`
 /// are *not* bound: the filename's extension fixes the format and `url` is a
 /// runtime concern (§1/§3). `run`/`exec` may not contain control characters
-/// (rejected at manifest parse), so the field framing is unambiguous.
+/// (rejected at manifest parse), so the field framing is unambiguous. The same
+/// bytes are signed under every [`Algorithm`].
 pub fn artifact_message(a: &Artifact<'_>, sha256_hex: &str) -> Vec<u8> {
     format!(
         "lode.artifact.v1\n{}\n{}\n{}\n{}\n{}",
@@ -91,15 +226,17 @@ pub fn sha256_hex_file(path: &Path) -> Result<String> {
     Ok(to_hex(&hasher.finalize()))
 }
 
-/// Verify a base64 signature over an artifact message against a base64 public key.
-pub fn verify_signature(public_b64: &str, message: &[u8], sig_b64: &str) -> Result<bool> {
-    let public = decode_key(public_b64).context("decode public key")?;
-    let verifying = VerifyingKey::from_bytes(&public).context("invalid ed25519 public key")?;
+/// Verify a base64 signature over an artifact message against a trusted-key entry.
+///
+/// `public` is any form [`decode_trusted_key`] accepts (a bare base64 key is
+/// ed25519). Errors when the entry itself is malformed; `Ok(false)` when the
+/// signature does not validate (including one of the wrong shape for the key).
+pub fn verify_signature(public: &str, message: &[u8], sig_b64: &str) -> Result<bool> {
+    let key = decode_trusted_key(public)?;
     let sig_bytes = B64
         .decode(sig_b64.trim())
         .context("decode signature base64")?;
-    let signature = Signature::from_slice(&sig_bytes).context("invalid ed25519 signature")?;
-    Ok(verifying.verify(message, &signature).is_ok())
+    Ok(key.verify(message, &sig_bytes))
 }
 
 /// Lowercase-hex sha256 of an in-memory buffer. Companion to
@@ -110,18 +247,18 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     to_hex(&Sha256::digest(bytes))
 }
 
-/// Verify an asset's ed25519 signature against a set of trusted keys.
+/// Verify an asset's signature against a set of trusted keys.
 ///
 /// Uses the exact §1 canonical message
 /// (`lode.artifact.v1\n{name}\n{version}\n{sha256}\n{run}\n{exec}`, where `name`
 /// is the asset filename and `run`/`exec` are the asset's optional launch
 /// overrides, empty when absent).
 ///
-/// Each entry in `trusted_keys` is
-/// `key_id:base64` (CLI/TOML form) or `key_id base64` (file form); the base64
-/// public component is extracted from either. Succeeds as soon as any trusted
-/// key validates the signature; errors if none do. The integrity (sha256) check
-/// is the caller's responsibility (see [`crate::install`]).
+/// Each entry in `trusted_keys` is a trusted-key entry (see
+/// [`decode_trusted_key`]: `[<alg>:][<key_id>:]<base64>`, or the whitespace file
+/// form); the signature is checked with **that entry's** algorithm. Succeeds as
+/// soon as any trusted key validates the signature; errors if none do. The
+/// integrity (sha256) check is the caller's responsibility (see [`crate::install`]).
 pub fn verify_artifact_sig(
     name: &str,
     version: &str,
@@ -143,19 +280,17 @@ pub fn verify_artifact_sig(
     };
     let message = artifact_message(&artifact, sha256_hex);
     for key in trusted_keys {
-        // A malformed key (bad base64 / wrong length) is skipped, not fatal —
-        // another configured key (e.g. during rotation) may still validate.
-        if matches!(
-            verify_signature(trusted_key_public(key), &message, sig_b64),
-            Ok(true)
-        ) {
+        // A malformed key (bad base64 / wrong shape for its algorithm) is skipped,
+        // not fatal — another configured key (e.g. during rotation) may still
+        // validate.
+        if matches!(verify_signature(key, &message, sig_b64), Ok(true)) {
             return Ok(());
         }
     }
     bail!("artifact signature did not match any trusted key");
 }
 
-/// Canonical ed25519 message for a manifest catalog (design §6).
+/// Canonical signed message for a manifest catalog (design §6).
 ///
 /// Binds the manifest's identity (`name` + `key_id`) to a deterministic,
 /// `sig`-free serialization of its catalog (`canonical` — built by
@@ -170,14 +305,14 @@ pub fn manifest_message(name: &str, key_id: &str, canonical: &str) -> Vec<u8> {
     format!("lode.manifest.v1\n{name}\n{key_id}\n{canonical}").into_bytes()
 }
 
-/// Verify a manifest's top-level ed25519 signature over its canonical message
-/// against a set of trusted keys.
+/// Verify a manifest's top-level signature over its canonical message against a
+/// set of trusted keys.
 ///
 /// The manifest's declared `key_id` selects the
 /// preferred key; when it is `None` or matches no trusted entry, every trusted key
 /// is tried (covering an absent id or a rotation where the id differs). Succeeds as
 /// soon as any key validates the signature; errors if none do. Entry forms are the
-/// same `key_id:base64` / `key_id base64` / bare `base64` accepted elsewhere.
+/// same as for [`verify_artifact_sig`]; each is checked with its own algorithm.
 pub fn verify_manifest_sig(
     trusted_keys: &[String],
     key_id: Option<&str>,
@@ -192,45 +327,73 @@ pub fn verify_manifest_sig(
         && let Some(entry) = trusted_keys
             .iter()
             .find(|e| trusted_key_id(e).as_deref() == Some(want))
-        && matches!(
-            verify_signature(trusted_key_public(entry), message, sig_b64),
-            Ok(true)
-        )
+        && matches!(verify_signature(entry, message, sig_b64), Ok(true))
     {
         return Ok(());
     }
     // Fall back to trying every trusted key (a missing/unmatched id, or rotation).
     for entry in trusted_keys {
-        if matches!(
-            verify_signature(trusted_key_public(entry), message, sig_b64),
-            Ok(true)
-        ) {
+        if matches!(verify_signature(entry, message, sig_b64), Ok(true)) {
             return Ok(());
         }
     }
     bail!("manifest signature did not match any trusted key");
 }
 
-/// The `key_id` of a trusted-key entry, derived from its base64 public component,
-/// or `None` when the entry is malformed (bad base64 / wrong length).
+/// The `key_id` of a trusted-key entry, derived from its public component, or
+/// `None` when the entry is malformed (bad base64 / wrong shape for its algorithm).
 fn trusted_key_id(entry: &str) -> Option<String> {
-    decode_key(trusted_key_public(entry))
-        .ok()
-        .map(|public| key_id(&public))
+    decode_trusted_key(entry).ok().map(|key| key.key_id())
 }
 
-/// Extract the base64 public-key component from a trusted-key entry, accepting
-/// `key_id:base64`, `key_id base64`, or a bare `base64`. (The base64 alphabet
-/// contains no `:` or whitespace, so the split is unambiguous.)
-fn trusted_key_public(entry: &str) -> &str {
-    let entry = entry.trim();
-    entry
-        .split_once(':')
-        .or_else(|| entry.split_once(char::is_whitespace))
-        .map_or(entry, |(_, key)| key.trim())
+/// Split a trusted-key entry into its algorithm and base64 public component.
+///
+/// Fields are separated by `:` or whitespace (neither occurs in base64, so the
+/// split is unambiguous):
+/// - `<base64>` — ed25519;
+/// - `<key_id>:<base64>` / `<key_id> <base64>` — ed25519 (the pre-`alg` forms);
+/// - `<alg>:<base64>` — `alg` without an id;
+/// - `<alg>:<key_id>:<base64>` / `<alg>:<key_id> <base64>` — the full form
+///   `keygen` prints for non-ed25519 keys.
+///
+/// The `key_id` field is informational: the id used for matching is always
+/// re-derived from the public component.
+fn parse_trusted_key(entry: &str) -> Result<(Algorithm, &str)> {
+    let mut fields = entry
+        .split(|c: char| c == ':' || c.is_whitespace())
+        .filter(|f| !f.is_empty());
+    let parsed = match (fields.next(), fields.next(), fields.next()) {
+        (Some(key), None, None) => (Algorithm::Ed25519, key),
+        // Two fields: `<alg>:<key>` when the first names an algorithm, else the
+        // legacy `<key_id>:<key>`.
+        (Some(first), Some(key), None) => {
+            (Algorithm::parse(first).unwrap_or(Algorithm::Ed25519), key)
+        }
+        (Some(alg), Some(_key_id), Some(key)) => (alg.parse::<Algorithm>()?, key),
+        _ => bail!("empty trusted-key entry"),
+    };
+    if fields.next().is_some() {
+        bail!("malformed trusted-key entry (expected `[<alg>:][<key_id>:]<base64>`)");
+    }
+    Ok(parsed)
 }
 
-/// Decode a base64 32-byte key.
+/// Decode a trusted-key entry into a [`PublicKey`] carrying the algorithm the
+/// operator pinned for it.
+///
+/// Accepted forms (fields split on `:` or whitespace, neither of which occurs in
+/// base64): `<base64>` and `<key_id>:<base64>` / `<key_id> <base64>` (ed25519, the
+/// pre-`alg` forms); `<alg>:<base64>`; `<alg>:<key_id>:<base64>` /
+/// `<alg>:<key_id> <base64>` (what `keygen` prints for non-ed25519 keys). The
+/// `key_id` field is informational — the id used for matching is re-derived from
+/// the public component.
+pub fn decode_trusted_key(entry: &str) -> Result<PublicKey> {
+    let (alg, b64) = parse_trusted_key(entry)?;
+    let bytes = B64.decode(b64).context("base64 decode")?;
+    PublicKey::decode(alg, &bytes)
+}
+
+/// Decode a base64 32-byte key (an ed25519 public key or private seed).
 pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
     let bytes = B64.decode(b64.trim()).context("base64 decode")?;
     let arr: [u8; 32] = bytes
@@ -362,7 +525,8 @@ mod tests {
         let keys_colon = vec![format!("{id}:{public_b64}")];
         let keys_bare = vec![public_b64.clone()];
         let keys_space = vec![format!("{id} {public_b64}")]; // file form
-        for keys in [&keys_colon, &keys_bare, &keys_space] {
+        let keys_tagged = vec![format!("ed25519:{id}:{public_b64}")]; // explicit alg
+        for keys in [&keys_colon, &keys_bare, &keys_space, &keys_tagged] {
             assert!(check(sha, keys).is_ok());
         }
 
@@ -408,11 +572,185 @@ mod tests {
         assert!(check(sha, &[other]).is_err());
     }
 
+    /// One ECDSA key per curve, with its canonical (compressed) public key and
+    /// trusted-key entry.
+    fn ecdsa_p256() -> (p256::ecdsa::SigningKey, String) {
+        let signing = p256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let public = PublicKey::EcdsaP256(*signing.verifying_key());
+        let entry = format!(
+            "ecdsa-p256:{}:{}",
+            public.key_id(),
+            B64.encode(public.to_bytes())
+        );
+        (signing, entry)
+    }
+
+    fn ecdsa_p384() -> (p384::ecdsa::SigningKey, String) {
+        let signing = p384::ecdsa::SigningKey::from_slice(&[7u8; 48]).unwrap();
+        let public = PublicKey::EcdsaP384(*signing.verifying_key());
+        let entry = format!(
+            "ecdsa-p384:{}:{}",
+            public.key_id(),
+            B64.encode(public.to_bytes())
+        );
+        (signing, entry)
+    }
+
     #[test]
-    fn trusted_key_public_parses_all_forms() {
-        assert_eq!(trusted_key_public("abc123:KEYDATA"), "KEYDATA");
-        assert_eq!(trusted_key_public("abc123 KEYDATA"), "KEYDATA");
-        assert_eq!(trusted_key_public("  KEYDATA  "), "KEYDATA");
+    fn ecdsa_artifact_sig_roundtrip_both_curves() {
+        let sha = "a97ad2265ae84cdeff1219b1c83db8e6f096e444c81f733bc93355f0fff368a1";
+        let name = "myapp-linux-x86_64.tar.gz";
+        let artifact = Artifact {
+            name,
+            version: "1.5.0",
+            path: "",
+            run: Some("./myapp serve"),
+            exec: None,
+        };
+        let message = artifact_message(&artifact, sha);
+
+        let (p256_key, p256_entry) = ecdsa_p256();
+        let p256_sig: p256::ecdsa::Signature = p256_key.sign(&message);
+        let p256_sig = B64.encode(p256_sig.to_bytes());
+        let (p384_key, p384_entry) = ecdsa_p384();
+        let p384_sig: p384::ecdsa::Signature = p384_key.sign(&message);
+        let p384_sig = B64.encode(p384_sig.to_bytes());
+
+        for (sig, entry) in [(&p256_sig, &p256_entry), (&p384_sig, &p384_entry)] {
+            let keys = vec![entry.clone()];
+            let check = |sha: &str, run: Option<&str>| {
+                verify_artifact_sig(name, "1.5.0", sha, run, None, sig, &keys)
+            };
+            assert!(check(sha, Some("./myapp serve")).is_ok());
+            // The same bindings as ed25519: digest and launch override are covered.
+            assert!(check("00", Some("./myapp serve")).is_err());
+            assert!(check(sha, Some("./evil")).is_err());
+        }
+
+        // Signatures do not cross curves, even though both are `r || s`.
+        assert!(
+            verify_artifact_sig(
+                name,
+                "1.5.0",
+                sha,
+                Some("./myapp serve"),
+                None,
+                &p384_sig,
+                std::slice::from_ref(&p256_entry)
+            )
+            .is_err()
+        );
+        // A mixed trust set (ed25519 + ECDSA) verifies with whichever key signed.
+        let ed = B64.encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        assert!(
+            verify_artifact_sig(
+                name,
+                "1.5.0",
+                sha,
+                Some("./myapp serve"),
+                None,
+                &p256_sig,
+                &[ed, p384_entry, p256_entry]
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn ecdsa_manifest_sig_roundtrip() {
+        let (signing, entry) = ecdsa_p256();
+        let id = decode_trusted_key(&entry).unwrap().key_id();
+        let canonical = "channel\tstable\t1.0.0\nversion\t1.0.0\nasset\tapp.tar.gz\tabc\t\t\n";
+        let message = manifest_message("myapp", &id, canonical);
+        let sig: p256::ecdsa::Signature = signing.sign(&message);
+        let sig = B64.encode(sig.to_bytes());
+
+        let trusted = vec![entry];
+        assert!(verify_manifest_sig(&trusted, Some(&id), &message, &sig).is_ok());
+        assert!(verify_manifest_sig(&trusted, None, &message, &sig).is_ok());
+        let tampered = manifest_message("myapp", &id, "channel\tstable\t2.0.0\n");
+        assert!(verify_manifest_sig(&trusted, Some(&id), &tampered, &sig).is_err());
+    }
+
+    /// The algorithm comes from the trusted entry, never from the signature: key
+    /// bytes relabelled under another algorithm are rejected at decode, so a
+    /// signature can only ever be checked with the primitive the operator pinned.
+    #[test]
+    fn algorithm_is_bound_to_the_trusted_entry() {
+        let ed_public = B64.encode(
+            SigningKey::from_bytes(&[9u8; 32])
+                .verifying_key()
+                .to_bytes(),
+        );
+        let (_, p256_entry) = ecdsa_p256();
+        let (_, p256_b64) = parse_trusted_key(&p256_entry).unwrap();
+
+        // 32 raw ed25519 bytes are not a SEC1 point; 33 SEC1 bytes are not an
+        // ed25519 key. Both relabellings fail to decode (and so never verify).
+        assert!(decode_trusted_key(&format!("ecdsa-p256:{ed_public}")).is_err());
+        assert!(decode_trusted_key(&format!("ecdsa-p384:{ed_public}")).is_err());
+        assert!(decode_trusted_key(&format!("ed25519:{p256_b64}")).is_err());
+        assert!(decode_trusted_key(&format!("ecdsa-p384:{p256_b64}")).is_err());
+        // The untagged form is ed25519 — an ECDSA key needs its tag.
+        assert!(decode_trusted_key(p256_b64).is_err());
+        assert!(
+            verify_signature(
+                &format!("ecdsa-p256:{ed_public}"),
+                b"m",
+                &B64.encode([0u8; 64])
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_trusted_key_accepts_all_forms() {
+        let ok = |entry: &str, alg: Algorithm| {
+            assert_eq!(
+                parse_trusted_key(entry).unwrap(),
+                (alg, "KEYDATA"),
+                "{entry}"
+            );
+        };
+        ok("KEYDATA", Algorithm::Ed25519);
+        ok("  KEYDATA  ", Algorithm::Ed25519);
+        ok("abc123:KEYDATA", Algorithm::Ed25519);
+        ok("abc123 KEYDATA", Algorithm::Ed25519);
+        ok("ed25519:abc123:KEYDATA", Algorithm::Ed25519);
+        ok("ed25519:KEYDATA", Algorithm::Ed25519);
+        ok("ecdsa-p256:abc123:KEYDATA", Algorithm::EcdsaP256);
+        ok("ecdsa-p256:abc123 KEYDATA", Algorithm::EcdsaP256);
+        ok("ecdsa-p256:KEYDATA", Algorithm::EcdsaP256);
+        ok("ecdsa-p384:abc123:KEYDATA", Algorithm::EcdsaP384);
+        // A three-field entry must name a known algorithm; more fields is malformed.
+        assert!(parse_trusted_key("rsa-pss:abc123:KEYDATA").is_err());
+        assert!(parse_trusted_key("ed25519:abc123:KEYDATA:extra").is_err());
+        assert!(parse_trusted_key("").is_err());
+    }
+
+    #[test]
+    fn ecdsa_key_id_is_canonical_over_compressed_point() {
+        let (signing, entry) = ecdsa_p256();
+        let compressed = decode_trusted_key(&entry).unwrap();
+        let uncompressed = B64.encode(signing.verifying_key().to_encoded_point(false).as_bytes());
+        let from_uncompressed = decode_trusted_key(&format!("ecdsa-p256:{uncompressed}")).unwrap();
+        assert_eq!(compressed.to_bytes().len(), 33);
+        assert_eq!(compressed.key_id(), from_uncompressed.key_id());
+        assert_eq!(compressed.to_bytes(), from_uncompressed.to_bytes());
+    }
+
+    #[test]
+    fn algorithm_names_roundtrip() {
+        for alg in Algorithm::ALL {
+            assert_eq!(alg.name().parse::<Algorithm>().unwrap(), alg);
+            assert_eq!(alg.to_string(), alg.name());
+        }
+        assert!("ECDSA-P256".parse::<Algorithm>().is_err());
+        assert!(Algorithm::parse("hmac-sha256").is_none());
     }
 
     #[test]
@@ -471,13 +809,17 @@ mod tests {
             .to_bytes();
         let id = key_id(&public);
         let public_b64 = B64.encode(public);
-        // All three entry forms resolve to the same derived id.
+        // All entry forms resolve to the same derived id.
         assert_eq!(
             trusted_key_id(&format!("ignored:{public_b64}")).as_deref(),
             Some(id.as_str())
         );
         assert_eq!(
             trusted_key_id(&format!("ignored {public_b64}")).as_deref(),
+            Some(id.as_str())
+        );
+        assert_eq!(
+            trusted_key_id(&format!("ed25519:ignored:{public_b64}")).as_deref(),
             Some(id.as_str())
         );
         assert_eq!(trusted_key_id(&public_b64).as_deref(), Some(id.as_str()));

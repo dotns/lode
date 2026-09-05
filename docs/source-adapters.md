@@ -15,8 +15,9 @@ in both sources. There is no platform detection and no arch-alias table.
 
 ## 1. The signed artifact message
 
-The signature is ed25519 over a canonical message — UTF-8, `\n`-separated, **no
-trailing newline**:
+The signature is made with the publisher key's algorithm (ed25519 by default —
+see *Keys*) over a canonical message — UTF-8, `\n`-separated, **no trailing
+newline**:
 
 ```
 lode.artifact.v1
@@ -43,10 +44,28 @@ of which need to be signed separately.
 
 ### Keys
 
-- ed25519, 32-byte keys distributed as base64. `key_id` = first 16 hex chars of
-  `sha256(public_key)`.
-- Operators pin publishers in `[trust].trusted_keys` as `key_id:base64pub`.
-- Sign: `sig = base64(ed25519_sign(private_key, message))`.
+Every key carries a signature algorithm (`alg`). Unstated = `ed25519`, so keys,
+configs and manifests from before `alg` existed are unchanged.
+
+| `alg` | public key (base64) | signature (base64) | hash |
+|---|---|---|---|
+| `ed25519` (default) | raw 32 bytes | 64 bytes | — |
+| `ecdsa-p256` | SEC1 point; compressed 33 bytes canonical (uncompressed accepted) | 64-byte `r ‖ s` | SHA-256 |
+| `ecdsa-p384` | SEC1 point; compressed 49 bytes canonical (uncompressed accepted) | 96-byte `r ‖ s` | SHA-384 |
+
+- `key_id` = first 16 hex chars of `sha256(public_key)` over the canonical
+  encoding above.
+- Operators pin publishers in `[trust].trusted_keys` as
+  `<alg>:<key_id>:<base64pub>`; for ed25519 the `<alg>:` prefix is omitted
+  (`<key_id>:<base64pub>`, the pre-existing form). `lode-cli keygen --alg <alg>`
+  prints the entry ready to paste.
+- **The algorithm is bound to the trusted key, never taken from the manifest.**
+  lode checks a signature with the algorithm pinned on each trusted key it tries;
+  the manifest's optional `alg` field is advisory. Key bytes relabelled under
+  another algorithm fail to decode, so no signature is ever verified with a
+  primitive the operator did not pin for that key.
+- Sign: `sig = base64(sign(private_key, message))` — the message bytes are the
+  same under every algorithm.
 - Verify: lode accepts the artifact iff `sig` validates against **any** trusted
   key over the reconstructed message **and** the downloaded bytes hash to
   `sha256`.
@@ -250,7 +269,8 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
 | `name` | ✓ | selection key; matched against `[update].asset` |
 | `url` | ✓ | absolute download URL |
 | `sha256` | ✓ | lowercase hex of the raw file |
-| `sig` | enforce / auto+keys | base64 ed25519 over the §1 message (including `run`/`exec`); inline, or supply a `.sig` sidecar alongside the asset |
+| `sig` | enforce / auto+keys | base64 signature (the signing key's algorithm, §1 *Keys*) over the §1 message (including `run`/`exec`); inline, or supply a `.sig` sidecar alongside the asset |
+| `alg` | | advisory: the signing key's algorithm (`ed25519` when absent); verification always uses the trusted key's own algorithm |
 | `run` | | optional literal launch command override (signature-bound; overrides `[command].run`; see §4) |
 | `exec` | | optional CLI-passthrough command override (signature-bound; overrides `[command].exec`; see §4) |
 | `size` | | expected byte count (extra integrity check) |

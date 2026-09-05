@@ -105,7 +105,7 @@ lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何
 - **更新** `[update].policy = off | check | auto`;来源是 `manifest`(原生 `lode/v1` JSON)**或** `github = "owner/repo"`(Releases)。
 - **回滚** —— 新版本若在 `health_grace` 内退出,回滚到上一个已知良好版本(单次触发)。
 - **重启** `[supervise].restart = off | on-failure | always` —— `on-failure`(默认,keep-alive)对失败的应用重试 `restart_max` 次后**暂停**(lode 保持存活,容器绝不陷入崩溃循环);`off` 退回镜像子进程的旧行为;lode 主动发起的更新/回滚/重启总会重新拉起。
-- **信任** —— `sha256` + `ed25519`;设 `[trust].trusted_keys` + `require_signature = off | auto | enforce`。注意:校验默认为 `auto`(仅在配置了受信密钥时才强制)—— 生产环境请设 `require_signature = "enforce"`。签名是发布方的事 —— 见[集成 §3](docs/integration.zh-CN.md)。
+- **信任** —— `sha256` + `ed25519`(或 ECDSA P-256 / P-384,算法标在密钥上);设 `[trust].trusted_keys` + `require_signature = off | auto | enforce`。注意:校验默认为 `auto`(仅在配置了受信密钥时才强制)—— 生产环境请设 `require_signature = "enforce"`。签名是发布方的事 —— 见[集成 §3](docs/integration.zh-CN.md)。
 - **私有源** —— `[http].headers`(支持 `${ENV}` 展开)随每次拉取发送。
 
 ## 作为库使用
