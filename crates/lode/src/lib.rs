@@ -135,7 +135,14 @@ fn run_tool() -> anyhow::Result<ExitCode> {
             key,
             into,
         } => authoring::manifest(
-            cli.globals.app.as_deref().unwrap_or("app"),
+            // The manifest `name` must equal the loader's `[global].app`, so a
+            // silent default would publish a catalog every instance rejects.
+            cli.globals.app.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "manifest needs the app name: pass --app <name> (or set LODE_APP_NAME); \
+                     it must match the loader's [global].app"
+                )
+            })?,
             &artifact,
             &version,
             &url,

@@ -1,6 +1,6 @@
 # tests/compose — lode docker-compose end-to-end integration
 
-A REAL, fully-local docker proof that the distroless `lode` image loads packaged
+A REAL, fully-local docker proof that the `lode` image (static binary on `zzci/ubase`) loads packaged
 apps, auto-updates, rolls back from a bad release, updates by app-exit, and bounds
 an opt-in restart loop — with signature verification ENFORCED and **no real network
 / GitHub**. Driven entirely by `tests/src/integration/compose.test.ts` (bun + TS;
@@ -28,13 +28,14 @@ values reach `docker-compose.yml` via `LODE_E2E_*` env interpolation (whose
 
 ## What the test proves
 
-1. `docker build` of the repo `Dockerfile` produces a working **distroless static** image.
+1. `docker build` of the repo `Dockerfile` produces a working image (static `lode` on `zzci/ubase`).
 2. Both apps install + serve **v0.0.1**, then **auto-update v0.0.1 → v0.0.2**.
 3. A **crashing v0.0.3** is **single-strike rolled back to v0.0.2** (both apps).
 4. **Update-by-app-exit**: `svc-bun`'s app writes `state.target` then `exit(0)`, and
    lode relaunches DIRECTLY on the new version (no flap to the old one).
-5. **Opt-in `restart=always`** bounds the crash loop at `restart_max` then exits
-   `status=error` (vs. the `restart=off` mirror default the other services use).
+5. **`restart=always`** bounds the crash loop at `restart_max` then **pauses** —
+   `status=error`, `last_error` says paused, the container stays up (keep-alive; the
+   default policy is `on-failure`, which pauses the same way).
 6. `docker compose down -v` tears everything down cleanly.
 
 ## Why `docker cp` / `docker exec` instead of bind-mounts + published ports
@@ -43,7 +44,7 @@ So the test passes both on a normal docker host (CI) **and** in
 docker-out-of-docker sandboxes, where the test process shares the daemon socket but
 NOT its network/mount namespaces (there, host bind-mounts share the wrong files and
 published ports are unreachable). The fixed fileserver IP lets the static
-distroless binaries reach it without DNS/NSS; the fileserver carries a tiny
+static binaries reach it without DNS/NSS; the fileserver carries a tiny
 `lodetest get` HTTP client so the test can probe the apps container-to-container.
 
 ## The `lodetest` helper

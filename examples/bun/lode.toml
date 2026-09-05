@@ -18,7 +18,7 @@ trusted_keys = ["<key_id>:<base64-pubkey>"]
 run  = "bun run app.js"   # bare `lode` → bun run app.js (cwd = version dir)
 exec = "bun"       # `lode <args>` → bun <args>
 
-# lode downloads bun if absent from PATH, caches it at $DATA_DIR/runtime/bun, and
+# lode downloads bun if absent from PATH, caches it at $LODE_DIR/runtime/<key>/bun, and
 # pins the version. Drop this block if bun is already baked into the base image.
 [runtime]
 runtime  = "bun"

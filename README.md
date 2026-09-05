@@ -44,6 +44,7 @@ A minimal `lode.toml` (see [`docs/lode.example.toml`](docs/lode.example.toml) fo
 app = "myapp"
 [update]
 manifest = "https://releases.example.com/myapp/manifest.json"   # or: github = "owner/repo"
+asset    = "myapp-linux-x86_64.tar.gz"                          # the exact asset filename this host installs
 policy   = "auto"                                               # off | check | auto
 [command]
 run = "./myapp"                                                # how to launch the app (literal command, cwd = version dir)
@@ -119,10 +120,13 @@ resolution, verified download/install, the `Engine` facade), **`lode-supervisor`
 (the binary: clap + authoring). Embed either library without inheriting the CLI or
 lode's process-global side effects — those are opt-in via `InitOptions`.
 
+The crates are **not published on crates.io** (the `lode` / `lode-core` names there
+belong to unrelated projects) — depend on a release tag of this repository:
+
 ```toml
 [dependencies]
-lode-core = "0.2"        # config + Engine (no clap, no signals)
-lode-supervisor = "0.2"  # + the supervise loop, driven by an injected SignalSource
+lode-core = { git = "https://github.com/dotns/lode", tag = "v0.2.0" }        # config + Engine (no clap, no signals)
+lode-supervisor = { git = "https://github.com/dotns/lode", tag = "v0.2.0" }  # + the supervise loop, driven by an injected SignalSource
 ```
 
 ```bash

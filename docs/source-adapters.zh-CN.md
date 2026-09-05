@@ -243,12 +243,12 @@ asset    = "myapp-linux-x64.tar.gz"
 - **版本指针。** `channels.<c>.latest` 的回滚由客户端禁降级 floor(§2a)在本地拦住 ——
   不需要目录签名来保护它。签目录(§2)仍推荐作为下载前的防篡改证据;`pin` 则彻底不再信任指针。
 - native 可比 GitHub 多(`channels`、`notes`、detached `.sig`、`size`、
-  `auth`);但全部仍在底层归约成 `(name, version, sha256) + sig`。
+  `auth`);但全部仍在底层归约成 `(name, version, sha256, run, exec) + sig`。
 
 **发布:**
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+lode-cli manifest "$f" --app myapp --version 1.5.0 --url "$URL" \
     --run ./myapp --exec ./myapp \
     --key private.key --into manifest.json     # 按 name upsert 资产,设 channels.latest;--run/--exec 可选
 lode-cli manifest-sign --into manifest.json --key private.key   # 可选 §2 目录防篡改证据
@@ -282,6 +282,6 @@ trusted_keys = ["<key_id>:<base64-公钥>"]
 | `manifest.rs` | 内部 `Manifest`,每版 `assets[]` 按 `name`;按 `name` 选资产;从后缀推 `format`;两个适配器(`fetch_github`、`fetch_native`)产出完全相同的内部模型 |
 | `config.rs` | `[update].asset`;`manifest`/`github` 保持互斥 |
 | `download.rs` | 按 `url` 拉取;`[http].headers` 仅同源附加;交叉校验 GitHub `digest` 并对下载文件重新 hash 比对签名里的 `sha256` |
-| `authoring.rs` / `lode-cli` | `keygen`;`sign` → `(name, version, sha256)` 签名与 GitHub `label` 字符串;native `manifest` 组装 + `manifest-sign` 走 §2 目录形式 |
+| `authoring.rs` / `lode-cli` | `keygen`;`sign` → `(name, version, sha256, run, exec)` 签名与 GitHub `label` 字符串;native `manifest` 组装 + `manifest-sign` 走 §2 目录形式 |
 
 下游(`resolve_target`、install、supervise)共享、与源无关。

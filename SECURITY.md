@@ -2,13 +2,13 @@
 
 ## Supported Versions
 
-lode is pre-1.0 software and follows `0.0.x` versioning. Only the **latest
+lode is pre-1.0 software (`0.x.y` versioning; a minor bump may break compatibility). Only the **latest
 released version** receives security updates. Older releases are not patched —
 please upgrade to the most recent release before reporting an issue.
 
 | Version | Supported          |
 | ------- | ------------------ |
-| latest `0.0.x` | :white_check_mark: |
+| latest `0.x` release | :white_check_mark: |
 | any older release | :x:           |
 
 ## Reporting a Vulnerability
@@ -68,7 +68,7 @@ welcome to notify us if lode's use of a dependency is exploitable.
 - **Artifact verification:** every installed artifact is verified by **sha256**
   and, when configured, a **publisher signature** (ed25519 by default, or
   ECDSA P-256 / P-384 — the algorithm is pinned on the trusted key, never read
-  from the manifest) over a minimal message (asset name / version / sha256). `[trust].require_signature = off | auto |
+  from the manifest) over a minimal message (asset name / version / sha256 / `run` / `exec`). `[trust].require_signature = off | auto |
   enforce` gates **artifacts only**; `auto` (the default) enforces only when
   trusted keys are configured — set `enforce` for production.
 - **Catalog/manifest signature:** *verify-if-present* — checked when a
@@ -89,12 +89,12 @@ Even a verified artifact is treated as untrusted bytes during landing, so a
 malicious or malformed archive cannot escape the data dir, smuggle in dangerous
 permissions, or exhaust the host. These guards are implemented:
 
-- **Path-component validation** (`src/idval.rs`): every untrusted id that becomes
+- **Path-component validation** (`crates/lode-core/src/idval.rs`): every untrusted id that becomes
   a filesystem path — a manifest `versions` key, a GitHub release tag, the
   `[runtime].runtime` name — is validated before any path join. It must be one
   safe component: no `..`, no `/` or `\`, not absolute, no control characters, no
   leading `.` or `-`, and nothing outside `[A-Za-z0-9._-]`.
-- **Archive containment** (`src/install.rs`): `tar.gz` is unpacked entry-by-entry
+- **Archive containment** (`crates/lode-core/src/install.rs`): `tar.gz` is unpacked entry-by-entry
   via the `tar` crate's `unpack_in`, which skips any entry whose path contains
   `..` or is absolute (and keeps symlink targets inside the destination); `zip`
   uses `enclosed_name()`, rejecting any entry that would traverse out; and the
@@ -104,10 +104,10 @@ permissions, or exhaust the host. These guards are implemented:
   (enforced independently of the manifest `size`, which only bounds the
   compressed download), the archive entry count is capped at
   `MAX_ARCHIVE_ENTRIES` = 100,000, and the streamed download body itself is
-  capped at `MAX_DOWNLOAD_BYTES` = 2 GiB (`src/download.rs`). A bomb is rejected
+  capped at `MAX_DOWNLOAD_BYTES` = 2 GiB (`crates/lode-core/src/download.rs`). A bomb is rejected
   mid-stream — at most one byte past a cap ever reaches disk — so a tiny artifact
   cannot expand to fill the disk or exhaust memory/inodes.
-- **Permission clamping** (`src/install.rs`): archive-supplied unix modes are NOT
+- **Permission clamping** (`crates/lode-core/src/install.rs`): archive-supplied unix modes are NOT
   trusted. setuid/setgid/sticky (`0o7000`) and group/other-write bits are
   stripped; each extracted file is clamped to `0o644` (or `0o755` when it carries
   an execute bit) and directories to `0o755`. The effective launch command's
@@ -126,3 +126,13 @@ A manifest asset may publish optional `run` and `exec` fields that override the 
   - serve runtimes from a host you control, over HTTPS;
   - list that host in `credential_hosts` only if it actually needs
     credentials.
+- **A consumed `target` request is not replayed after a failed install**
+  (`crates/lode-supervisor/src/lib.rs`, `clear_target`): lode nulls
+  `state.target` unconditionally once it has processed an update request. When
+  the request was the raw alias `"latest"` and the install then fails, the
+  request is consumed — the app must write `target` again to retry.
+- **A `target` written concurrently with a cut-over can be lost**
+  (`write_pre_observe_state`): the pre-spawn state write nulls `target`
+  unconditionally, so a request the app writes in that same instant is cleared
+  without being applied. Apps that see `target` return to `null` with no update
+  following should re-issue the request.

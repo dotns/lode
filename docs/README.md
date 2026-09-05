@@ -11,8 +11,10 @@ Most docs come in two single-language versions: `X.md` (English) and
 | Integration — configure → run → publish | [`integration.md`](integration.md) | [`integration.zh-CN.md`](integration.zh-CN.md) |
 | Architecture (the authoritative spec) | [`architecture.md`](architecture.md) | [`architecture.zh-CN.md`](architecture.zh-CN.md) |
 | Local testing offline (`lode-cli seed`) | [`dev-local-testing.md`](dev-local-testing.md) | [`dev-local-testing.zh-CN.md`](dev-local-testing.zh-CN.md) |
+| Source adapters — the normative signing spec, manifest shape, GitHub / native publishing | [`source-adapters.md`](source-adapters.md) | [`source-adapters.zh-CN.md`](source-adapters.zh-CN.md) |
 
 Reference (language-neutral):
 
 - [`lode.example.toml`](lode.example.toml) — full, sectioned `lode.toml`.
 - [`manifest.example.json`](manifest.example.json) — maximal `lode/v1` manifest.
+- [`recipes/`](recipes/) — `lode.toml` recipes for Bun / Node / Deno apps under a `[runtime]`.

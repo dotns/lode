@@ -13,12 +13,14 @@ is just a new release artifact + a `lode.toml` — no `docker build`.
 ## The idea: download the runtime once, cache it
 
 The base image carries only **lode** (and a libc). On first boot lode downloads the
-runtime named in `[runtime]` into its cache at `$LODE_DIR/runtime/<name>`; on every
+runtime named in `[runtime]` into its cache at `$LODE_DIR/runtime/<key>/<name>` (`<key>`
+is derived from the pinned `version` and a digest of the `download` URL); on every
 later boot it finds the cached binary and **reuses it — no network**. So make
 `$LODE_DIR` a persistent volume and the runtime download is a one-time cost.
 
-> To upgrade or change the runtime, delete `$LODE_DIR/runtime/<name>` (or the whole
-> `runtime/` dir) — the next boot re-downloads it.
+> To upgrade or change the runtime, bump `[runtime].version` / `download`: the cache is
+> keyed by them, so the next boot lands the new runtime in a fresh directory and
+> reclaims the old one — no manual deletion.
 
 A runtime already on `PATH` always wins over the cache, so the same recipe also works
 unchanged if you later decide to bake the runtime into the base image.
@@ -50,7 +52,7 @@ ENTRYPOINT ["/usr/bin/lode"]
 
 ## The `[runtime]` download
 
-lode downloads the runtime named in `[runtime]`, lands the binary at `runtime/<name>`,
+lode downloads the runtime named in `[runtime]`, lands the binary at `runtime/<key>/<name>`,
 and reuses it from there on every later boot. It handles both flat and nested
 archives: after extracting it hoists the named binary to the root when it isn't
 already there, so bun's `bun-linux-x64/bun`, node's `node-vX/bin/node`, and deno's
@@ -78,7 +80,7 @@ version       = "1.3.14"      # require `bun --version` to report this
 
 - A cached or PATH runtime of the **wrong** version is bypassed and the configured
   `download` is fetched instead — so bumping `version` (and `download`) rolls the
-  runtime forward with no manual `rm $LODE_DIR/runtime/<name>`.
+  runtime forward with no manual deletion under `$LODE_DIR/runtime/`.
 - A freshly downloaded runtime whose version still doesn't match is a **hard error**
   (the URL served the wrong version, or `version`/`version_check` is misconfigured).
 - Substring match, so `1.3.14` matches bun's `1.3.14`, node's `v26.3.1` matches

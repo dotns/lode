@@ -43,6 +43,7 @@ docker run --rm \
 app = "myapp"
 [update]
 manifest = "https://releases.example.com/myapp/manifest.json"   # 或:github = "owner/repo"
+asset    = "myapp-linux-x86_64.tar.gz"                          # 本机要安装的资产文件名(精确匹配)
 policy   = "auto"                                               # off | check | auto
 [command]
 run = "./myapp"                                                # 如何启动应用(字面命令,cwd = 版本目录)
@@ -115,10 +116,13 @@ lode 由三个 crate 组成:**`lode-core`**(不含 clap、不碰信号——配�
 `lode-core` 之上)、**`lode`**(二进制:clap + 发布工具)。嵌入前两者不会带上 CLI,也不会
 自动安装 lode 的进程级副作用——那些通过 `InitOptions` 显式开启。
 
+这些 crate **没有发布到 crates.io**(那里的 `lode` / `lode-core` 属于无关项目)——请依赖本仓库的
+发布 tag:
+
 ```toml
 [dependencies]
-lode-core = "0.2"        # 配置 + Engine(无 clap、无信号)
-lode-supervisor = "0.2"  # + 监管循环,由注入的 SignalSource 驱动
+lode-core = { git = "https://github.com/dotns/lode", tag = "v0.2.0" }        # 配置 + Engine(无 clap、无信号)
+lode-supervisor = { git = "https://github.com/dotns/lode", tag = "v0.2.0" }  # + 监管循环,由注入的 SignalSource 驱动
 ```
 
 ```bash

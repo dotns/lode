@@ -108,6 +108,19 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 - **阻止(重新)启动(可选):** 设 `hold = true` 告诉 lode **不要**(重新)启动进程 —— 用于必须在 app 起来之前完成的计划维护(如需要 CLI 介入的 DB 迁移)。lode 报告 `status = "held"` 并等待 —— 开机时、子进程退出后、以及 `restart_nonce`/`target` 请求期间都不启动 —— 直到你设 `hold = false`。hold 只挡"启动",不杀正在运行的子进程:想为维护停掉 app,自己先 `exit(0)`(lode 随即转入 held 而非重拉)。运维也可同样方式驱动(`hold` 就是 `state.json` 的一个字段)。
 - **运行中应用 `lode.toml`/`[env]` 改动(可选):** lode **绝不**因配置编辑自动重启(运行中的 app 不被打扰)。`lode.toml` 被编辑时,lode **递增 `config_generation`** 通知你;你自定时机递增 `restart_nonce` 来应用 —— 那次重启会**重读 `lode.toml`**(新 `[env]`/配置生效)。想响应运维改动就监听 `config_generation`。(宿主进程 env —— `-e`/k8s —— 仍需重启 lode 自身。)
 
+### 并发写入 —— `state.json.lock` 契约
+
+`state.json` 有两个写者(lode 与你的 app),而"读-改-写"(读出、改自己的字段、写回)
+可能悄悄丢掉对方的并发更新。lode 用兄弟文件 `$LODE_DIR/state.json.lock` 上的排他
+`flock(2)` 串行化**自己的全部 RMW**(该文件按需创建、从不删除;锁放在兄弟文件上,
+是因为 `state.json` 本身每次写入都是临时文件 + rename 替换)。
+
+- **做 RMW 的 app 应当拿同一把锁:** 打开 `state.json.lock`(不存在则创建),
+  `flock(fd, LOCK_EX)`(只会阻塞微秒级),然后读 `state.json` → 改自己的字段 →
+  原子写回(临时文件 + rename)→ 解锁(关闭 fd 即释放)。整个周期持锁,仅此而已。
+- **纯读不需要锁:** 临时文件 + rename 的替换是原子的,任何时候读 `state.json`
+  都能看到完整一致的快照。
+
 > 推荐:使用 [SDK](../sdks)(并参考 [`../examples`](../examples),它们都经由 SDK 接入)。一对零依赖、不用 SDK 的 Rust + Bun 手写示例见 [`../tests/apps`](../tests/apps),作为从零实现的参考。
 
 ---
@@ -185,7 +198,7 @@ jobs:
 托管一份 `lode/v1` manifest,其每版 `assets[]` 按 `name`,外加资产托管在任意 HTTPS URL:
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+lode-cli manifest "$f" --app myapp --version 1.5.0 --url "$URL" \
     --run ./myapp --exec ./myapp \
     --key private.key --into manifest.json   # 按 name upsert 资产,设 channels.latest;--run/--exec 可选
 lode-cli manifest-sign --into manifest.json --key private.key   # 可选:对目录做防篡改证据
@@ -205,7 +218,7 @@ manifest 形状 + 逐资产字段表见 [source-adapters.zh-CN.md §6](source-ad
 ### 清单
 
 - [ ] 每台主机的 `[update].asset` 写明本平台对应的确切资产文件名。
-- [ ] `sha256` 针对原始文件;`sig` 针对 `name/version/sha256`,`key_id` 受信。
+- [ ] `sha256` 针对原始文件;`sig` 针对 `name/version/sha256/run/exec`(§1 消息),`key_id` 受信。
 - [ ] github:签名设为资产 **`label`**。native:`sig` 内嵌或 `.sig` sidecar,且最后一次改目录后重新 `manifest-sign`。
 - [ ] `channels.<c>.latest` 指向真实版本(native),或 tag/latest 可解析(github)。
 - [ ] 私钥离线;运维只持公开的 `trusted_keys` 并设 `require_signature = enforce`。

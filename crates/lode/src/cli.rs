@@ -432,7 +432,7 @@ pub(crate) enum ToolCommand {
         #[arg(long = "version")]
         version: String,
         /// Download URL for this asset in the manifest (runtime; not signed).
-        #[arg(long, default_value = "https://...")]
+        #[arg(long)]
         url: String,
         /// Launch-command override published with this asset (signed; overrides
         /// the operator's `[command].run`).

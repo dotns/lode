@@ -28,6 +28,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `&[u8]` (any canonical public-key encoding), and `verify_signature` accepts a
   tagged trusted-key entry in place of a bare base64 key.
 
+### Changed
+
+- **`lode-cli manifest` now requires `--app <name>` (or `LODE_APP_NAME`) and `--url`.**
+  The manifest `name` must equal the loader's `[global].app`, so the former silent
+  default `"app"` published a catalog every instance rejected; `--url` no longer
+  defaults to the placeholder `https://...`.
+- Documentation sweep against the 0.2.0 implementation: README quick-start gains the
+  mandatory `[update].asset`; library usage points at git tags (the crates are not on
+  crates.io); `held`/`hold` and `ready` join the `state.json` spec; rollback-target
+  failure pauses (keep-alive) rather than exiting; the injected child env lists
+  `LODE_WORKDIR`/`LODE_CONFIG`/`LODE_READINESS`; the signed message is quoted with
+  `run`/`exec` everywhere; the default forward-signal set, runtime cache path
+  (`runtime/<key>/<name>`), `SIGCHLD`/fd-passing/offline wording, `SECURITY.md`
+  paths and versioning, and the test READMEs now match the code. The two deferred
+  `target`-request races from 0.0.5 are recorded under `SECURITY.md` *Known
+  Limitations*.
+- e2e coverage: scenario 28 (signal passthrough — default forward set, a narrowed
+  `--forward-signals`, and a consumed `--restart-signal`) and scenario 29 (the GitHub
+  Releases source, driven against a local API stand-in, `tests/src/helpers/githubServer.ts`);
+  `tests/README.md` now lists what deliberately stays unit-level.
+
 ### Dependencies
 
 - `p256` / `p384` 0.13 (RustCrypto, pure Rust; `ecdsa` + `std` features only), kept on

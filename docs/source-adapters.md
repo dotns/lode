@@ -281,13 +281,13 @@ Schema `lode/v1`; per-version `assets[]` keyed by `name`:
   catalog (§2) is still recommended as up-front tamper-evidence; a `pin` removes all
   trust in the pointer entirely.
 - Native may carry more than GitHub (`channels`, `notes`, detached
-  `.sig`, `size`, `auth`); all of it still reduces to `(name, version, sha256) +
+  `.sig`, `size`, `auth`); all of it still reduces to `(name, version, sha256, run, exec) +
   sig` at the bottom.
 
 **Publishing:**
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+lode-cli manifest "$f" --app myapp --version 1.5.0 --url "$URL" \
     --run ./myapp --exec ./myapp \
     --key private.key --into manifest.json     # upserts the asset by name, sets channels.latest; --run/--exec are optional
 lode-cli manifest-sign --into manifest.json --key private.key   # optional §2 catalog tamper-evidence
@@ -322,6 +322,6 @@ trusted_keys = ["<key_id>:<base64-pubkey>"]
 | `manifest.rs` | internal `Manifest` with per-version `assets[]` keyed by `name`; select the asset by `name`; derive `format` from the extension; both adapters (`fetch_github`, `fetch_native`) produce the identical internal model |
 | `config.rs` | `[update].asset`; `manifest`/`github` stay mutually exclusive |
 | `download.rs` | fetch by `url`; attach `[http].headers` only same-origin; cross-check the GitHub `digest` and re-hash the downloaded file against the signed `sha256` |
-| `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256)` signature and the GitHub `label` string; native `manifest` assembly + `manifest-sign` over the §2 catalog form |
+| `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256, run, exec)` signature and the GitHub `label` string; native `manifest` assembly + `manifest-sign` over the §2 catalog form |
 
 Downstream (`resolve_target`, install, supervise) is shared and source-agnostic.

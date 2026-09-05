@@ -75,7 +75,7 @@ exec    = "bun"              # `lode <args>` -> bun <args>   (so `lode run db:in
 #     pin `version` and serve from a host you control; see SECURITY.md ---
 [runtime]
 runtime  = "bun"
-download = "https://example.com/bun-linux-x64.zip"   # raw/.gz/.zip/.tar.gz; the binary is hoisted to runtime/<name> even from a nested archive
+download = "https://example.com/bun-linux-x64.zip"   # raw/.gz/.zip/.tar.gz; the binary is hoisted to runtime/<key>/<name> even from a nested archive
 # version       = "1.3.14"     # require this version: lode probes the runtime (PATH / cache / freshly
 #                              # downloaded) and requires the output to CONTAIN this string. A wrong-version
 #                              # PATH/cache entry is bypassed for a fresh download; a downloaded mismatch is
@@ -110,5 +110,5 @@ restart_mode        = "stop-start"   # stop-start | reuseport-overlap | socket-a
 
 # --- manage: signals ---
 [signals]
-# forward = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGWINCH"]  # forwarded to the child (default set)
+# forward = ["SIGHUP", "SIGUSR1", "SIGUSR2", "SIGWINCH", "SIGCONT", "SIGTSTP"]  # forwarded to the child (default set)
 # restart = "SIGUSR2"   # this signal triggers a graceful restart instead of being forwarded

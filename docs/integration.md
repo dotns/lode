@@ -222,7 +222,7 @@ Host a `lode/v1` manifest whose per-version `assets[]` are keyed by `name`, plus
 assets at any HTTPS URLs:
 
 ```bash
-lode-cli manifest "$f" --version 1.5.0 --url "$URL" \
+lode-cli manifest "$f" --app myapp --version 1.5.0 --url "$URL" \
     --run ./myapp --exec ./myapp \
     --key private.key --into manifest.json   # upserts the asset by name, sets channels.latest; --run/--exec are optional
 lode-cli manifest-sign --into manifest.json --key private.key   # optional: tamper-evidence over the catalog
@@ -245,7 +245,7 @@ entirely.
 ### Checklist
 
 - [ ] each host's `[update].asset` names the exact asset filename for its platform.
-- [ ] `sha256` is of the raw file; `sig` is over `name/version/sha256` with a trusted `key_id`.
+- [ ] `sha256` is of the raw file; `sig` is over `name/version/sha256/run/exec` (the §1 message) with a trusted `key_id`.
 - [ ] github: signature set as the asset **`label`**. native: `sig` inline or a `.sig` sidecar, and the catalog re-signed (`manifest-sign`) after the final edit.
 - [ ] `channels.<c>.latest` points at a real version (native), or tag/latest resolves (github).
 - [ ] private key offline; operators hold only the public `trusted_keys` with `require_signature = enforce`.

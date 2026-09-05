@@ -1,12 +1,12 @@
 # deno.lode.toml — run a Deno app under lode without building a per-app image.
 #
 # Model: a generic base image (e.g. zzci/ubase) carries only lode; lode downloads
-# `deno` ONCE into its runtime cache ($LODE_DIR/runtime/deno) and reuses it on every
+# `deno` ONCE into its runtime cache ($LODE_DIR/runtime/<key>/deno) and reuses it on every
 # later boot. Each app ships only this lode.toml + a release artifact. Deno runs
 # TypeScript and remote/`npm:` imports natively, so usually no bundling is needed.
 #
 # Deno is the easy one: its official release .zip is a single `deno` binary at the
-# archive root, so lode places it directly at runtime/deno — no self-hosting needed.
+# archive root, so lode places it directly at runtime/<key>/deno — no self-hosting needed.
 #
 #   docker run --rm -e PORT=8080 -p 8080:8080 \
 #     -v lode-myapp:/srv/lode \                      # persist the runtime cache + versions
@@ -38,8 +38,9 @@ run     = "deno run -A main.ts"
 exec    = "deno"
 # workdir = "{dir}"   # optional; omit for the version dir (default), or set an absolute path
 
-# lode downloads deno if absent from PATH, caches it at $LODE_DIR/runtime/deno, and
-# reuses it next boot (delete that file to force a re-download / version bump).
+# lode downloads deno if absent from PATH, caches it at $LODE_DIR/runtime/<key>/deno
+# (keyed by version + download URL), and reuses it next boot; bump `version`/`download`
+# to roll it forward.
 # Runtime downloads are UNVERIFIED — pin the version (swap arch for arm64).
 [runtime]
 runtime  = "deno"

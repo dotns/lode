@@ -51,6 +51,16 @@ on_term() {
 }
 trap on_term TERM INT
 
+# --- signal passthrough contract (lode -> app: forwarded signals) ---------
+# lode forwards its [signals].forward set to us as-is (design §8). Log each
+# arrival so the e2e can prove which signals reached the app — and which lode
+# consumed (the restart signal) or ignored (outside the forward set).
+on_sig() { log "signal $1 received"; }
+trap 'on_sig HUP' HUP
+trap 'on_sig USR1' USR1
+trap 'on_sig USR2' USR2
+trap 'on_sig WINCH' WINCH
+
 # --- atomic state.json field write (preserves lode-owned fields) ----------
 # set_state_field <key> <string-value>: replace the key's value if present, else
 # insert the key right after the opening brace, else create a minimal object —

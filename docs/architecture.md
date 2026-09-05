@@ -70,7 +70,7 @@ zzci/ubase                        │  lode (static Rust binary, a few MB) │
   - Logging: `tracing` + `tracing-subscriber`
   - Process/signals: `std::process` + `signal-hook` (receive) + `nix` (send signals to child processes, safe API)
   - Robustness: `rlimit` (suppress core dumps)
-- **`#![forbid(unsafe_code)]`**: fd passing (optional zero-downtime) goes through `command-fds`/`socket2` wrappers; this crate writes no unsafe code.
+- **`#![forbid(unsafe_code)]`**: the workspace writes no unsafe code (children are spawned via `std::process`, signals via `signal-hook`/`nix`). Zero-downtime fd passing is not implemented (§8); if it is added it will go through a safe wrapper crate, not raw unsafe.
 - The key primitives were validated locally in an equivalent Bun prototype (O_EXCL lock, atomic symlink, sha256, ed25519, child-process signals, streaming download); the Rust side implements them with corresponding safe crates.
 
 ---
@@ -139,7 +139,7 @@ read state.json to get current
       → afterwards handle updates in the background per policy
 ```
 
-If current does not exist and there is neither `[update].manifest` nor a locally available version → error and exit. Offline/air-gapped: pre-place a local manifest + version directories + trusted public key for network-free startup.
+If current does not exist and there is neither `[update].manifest` nor a locally available version → error and exit. Offline/air-gapped: no local manifest is ever read — install the version locally with `lode-cli seed` (or ship `versions/<ver>/` with its `.lode.json` marker) and lode starts `current` with no network; see `docs/dev-local-testing.md`.
 
 ### Update strategy `update.policy` = `off` | `check` | `auto`
 
@@ -160,7 +160,7 @@ target ≠ current and available (stop-start mode):
   3. write state.status=updating → send SIGTERM to the old child process (the app cleans up and exits) → SIGKILL only after STOP_TIMEOUT
   4. atomically switch the current symlink → versions/<target>
   5. spawn the new child process; wait for readiness (§8: readiness=none → alive for the full grace; readiness=state → wait for state.ready="<new LODE_INSTANCE>-0")
-  6. ready → status=running, last_good=target; **a single failure triggers rollback**: readiness timeout / exiting or crashing once within the observation window (health_grace) → switch back to last_good and observe it the same way; if last_good also fails within its grace → lode exits (no further retry loop)
+  6. ready → status=running, last_good=target; **a single failure triggers rollback**: readiness timeout / exiting or crashing once within the observation window (health_grace) → switch back to last_good and observe it the same way; if last_good also fails within its grace → lode **pauses** (status=error, keep-alive, §8) rather than exiting; under `restart = off` it mirror-exits instead
 
 Zero-downtime (reuseport-overlap / socket-activation): start the new process first, **stop the old one only after it becomes ready** (§8), avoiding a gap and premature killing of the old process.
 ```
@@ -233,6 +233,7 @@ All communication goes through **`state.json`** (bidirectional, each side writin
 - **lode writes**: `current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`/`config_generation`.
   - **`last_error` reports *persistent* failures only.** A fetch that fails on the network layer (connect/TLS/redirect/status, or a truncated body) is retried on the next check, so it is written only after **3 consecutive** failures and is cleared by the next successful fetch — a single failed attempt is logged, never synced to the app. Failures that will not fix themselves (a malformed manifest, a bad signature, a full disk, a version that cannot start) are reported on the first strike.
 - **app writes** (requests): `target` (the version to upgrade/downgrade to, or `"latest"`), `restart_nonce` (incremented = restart request).
+- **app-owned** `hold`: set `true` to ask lode **not** to (re)start the process — planned maintenance that must finish before the app comes up. lode reports `status = held` and waits (at boot, after a child exit, and for `restart_nonce`/`target` requests) until it is cleared. It gates a *start* only; a running child is never killed by it.
 - **co-owned** (`readiness=state` handshake, §8): `ready` = `{LODE_INSTANCE}-{phase}`. The app reports it can serve with `-0`; on a staged update lode prompts the running app with `-1`; the app acks "prepared, cut over now" with `-2`. lode reads `-0`/`-2`, writes the `-1` prompt, and clears the field at cut-over. **Backward compatible**: an app may still write the bare `{LODE_INSTANCE}` (legacy serving signal) — it just opts out of the prepare window and cuts over immediately.
 - Typical flow (`policy=check`): lode writes the newly discovered version into `available` → **once the app reads it, it decides on its own to upgrade by writing `target` to that version (or `"latest"`)** → lode applies and hot-updates.
 
@@ -260,10 +261,13 @@ All communication goes through **`state.json`** (bidirectional, each side writin
   "config_generation": 0,
 
   "target": null,
-  "restart_nonce": 0
+  "restart_nonce": 0,
+  "hold": false,
+
+  "ready": "12345-k3x9q2-0"
 }
 ```
-The fields owned by lode vs. the fields owned by the app (`target`/`restart_nonce`) do not overlap; `status` ∈ `starting|running|updating|rolling-back|stopping|stopped|error`; `result` ∈ `good|bad`.
+The fields owned by lode vs. the fields owned by the app (`target`/`restart_nonce`/`hold`) do not overlap; `ready` is co-owned (§8); `status` ∈ `starting|running|held|updating|rolling-back|stopping|stopped|error`; `result` ∈ `good|bad`.
 
 ---
 
@@ -275,7 +279,7 @@ The fields owned by lode vs. the fields owned by the app (`target`/`restart_nonc
   - Termination-class `SIGTERM`/`SIGINT`/`SIGQUIT`: lode initiates a **graceful shutdown** — forward to the child process → wait for it to exit (SIGKILL on timeout) → release the lock → lode exits with the child process's exit code.
   - Passthrough-class `SIGHUP`/`SIGUSR1`/`SIGUSR2`/`SIGWINCH`/`SIGCONT`/`SIGTSTP`/…: **forwarded as-is to the child process** (e.g. an app using `SIGHUP` to reload); lode does not consume them.
   - Optional `signals.restart` (env `LODE_RESTART_SIGNAL`, e.g. `SIGUSR2`): once set, that signal instead **triggers a graceful lode restart** (equivalent to `restart_nonce++`) and is no longer forwarded; **unset by default**, to avoid occupying an app signal (restart goes via state.json/CLI).
-  - `SIGKILL`/`SIGSTOP` cannot be caught (OS restriction); `SIGCHLD` is used by lode to sense child-process exit. The passthrough set can be adjusted with `signals.forward` (env `LODE_FORWARD_SIGNALS`).
+  - `SIGKILL`/`SIGSTOP` cannot be caught (OS restriction); lode does not rely on `SIGCHLD` — it reaps with a non-blocking `waitpid` on its ~200 ms supervise tick (which also harvests re-parented grandchildren). The passthrough set can be adjusted with `signals.forward` (env `LODE_FORWARD_SIGNALS`).
 - **Restart policy `supervise.restart`** (`off`|`on-failure`|`always`, default `on-failure` — **keep-alive**):
   - `on-failure` (default) = restart on **failure** (a non-zero exit, a kill-by-signal, or a failure to even start) with **exponential backoff**; on a clean `exit(0)`, lode follows and exits. **Keep-alive**: after `restart_max` failed retries lode does **not** exit — it **PAUSES** (status=error), staying alive so PID 1 never crash-loops the container. A clean `exit(0)` still exits lode (the app intentionally stopped).
   - `always` = like `on-failure` but also restarts a clean `exit(0)` (a service that should never stop); pauses the same way at the cap.
@@ -307,7 +311,7 @@ A minimal rule:
 | `reuseport-overlap` | start the new process to coexist with the old, then stop the old once the new is healthy → zero-downtime | the app opens `SO_REUSEPORT` |
 
 > **No systemd in the container? It doesn't matter.** socket-activation is a **protocol (environment variables + inherited fds)** that does not depend on the systemd process — **lode acts as the activator itself** (binds the socket, passes the fd, sets `LISTEN_FDS`), and the app only needs to read fd 3. Inside a container, prefer the simpler `reuseport-overlap`, or the default `stop-start`.
-> `socket-activation` requires `LODE_LISTEN` (e.g. `0.0.0.0:3000`); fd passing goes through the `command-fds` wrapper, preserving `#![forbid(unsafe_code)]`.
+> `socket-activation` would require `LODE_LISTEN` (e.g. `0.0.0.0:3000`); it is **not implemented** (the key is inert) and, when it is, fd passing will go through a safe wrapper crate, preserving `#![forbid(unsafe_code)]`.
 > Difference from overseer: overseer is an **in-process library** and **does not auto-restart on crash** (it exits with the same code); lode is an **external general-purpose supervisor** that by default **keeps the app alive** (retry-then-pause, never crash-looping the container) and additionally offers `off` (mirror) + rollback, making it a superset. **Zero-downtime is an optional advanced feature; v1 implements only `stop-start` — `socket-activation`/`reuseport-overlap` fall back to it for now (see the caveat above) and are enabled later as needed.**
 
 ### Readiness / stop handshake (key: don't kill the process before the app is ready)
@@ -369,9 +373,9 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_KEEP_VERSIONS` | `--keep <n>` | `update.keep_versions` | `3` | number of old versions to retain |
 | `LODE_PIN_VERSION` | `--pin <ver>` | `update.pin` | — | lock a version (operator) |
 | **`[http]` — fetch credentials** | | | | |
-| `LODE_HEADERS` | `--header <h>` (repeatable) | `http.headers` | — | HTTP headers passed through to manifest/artifact/runtime downloads (`"Name: Value"`), supporting `${ENV}` expansion, §11 |
-| `LODE_CREDENTIAL_HOSTS` | `--credential-host <host>` | `http.credential_hosts` | — | extra trusted hosts that receive `[http].headers` credentials (same-origin always trusted; runtime download hosts need listing too) |
-| — | `--allow-insecure-http` | `http.allow_insecure` | `false` | allow plain-HTTP fetches (loopback always allowed; credentials travel in the clear) |
+| `LODE_HEADERS` | `--header <h>` (repeatable) | `http.headers` | — | HTTP headers passed through to manifest/artifact/runtime downloads (`"Name: Value"`), supporting `${ENV}` expansion, §11; the env var is **newline-separated** |
+| `LODE_CREDENTIAL_HOSTS` | `--credential-host <host>` | `http.credential_hosts` | — | extra trusted hosts that receive `[http].headers` credentials (same-origin always trusted; runtime download hosts need listing too); the env var is **newline-separated** |
+| `LODE_ALLOW_INSECURE_HTTP` | `--allow-insecure-http` | `http.allow_insecure` | `false` | allow plain-HTTP fetches (loopback always allowed; credentials travel in the clear) |
 | **`[trust]` — signature verification** | | | | |
 | `LODE_REQUIRE_SIGNATURE` | `--require-signature <off\|auto\|enforce>` | `trust.require_signature` | `auto` | signature-verification strength, §6 |
 | `LODE_TRUSTED_KEYS` | `--trusted-keys <list>` | `trust.trusted_keys` | — | trusted public keys `key_id:base64`, comma-separated |
@@ -402,7 +406,7 @@ Key names: `lode.toml` uses snake_case (see `docs/lode.example.toml`); environme
 | `LODE_FORWARD_SIGNALS` | `--forward-signals <list>` | `signals.forward` | (standard set) | the set of signals forwarded to the child process, §8 |
 | `LODE_RESTART_SIGNAL` | `--restart-signal <sig>` | `signals.restart` | — | the signal that triggers a graceful restart (unset by default), §8 |
 
-Child-process environment: pass through the host environment and **strip configuration-class `LODE_*`**; apply the operator's `[env]` table as **defaults** (only for keys the host env doesn't already set); prepend the runtime dir to PATH; then inject the read-only introspection variables `LODE_ACTIVE_VERSION`, `LODE_DIR`, `LODE_INSTANCE` (`{pid}-{nanoid}`, the unique id for this startup that the app suffixes with the handshake phase, §8). Precedence low→high: `[env]` defaults < inherited host env < runtime PATH-prepend < injected `LODE_*`.
+Child-process environment: pass through the host environment and **strip configuration-class `LODE_*`**; apply the operator's `[env]` table as **defaults** (only for keys the host env doesn't already set); prepend the runtime dir to PATH; then inject the read-only introspection variables `LODE_ACTIVE_VERSION`, `LODE_DIR`, `LODE_WORKDIR` (the resolved cwd), `LODE_CONFIG` (the loaded `lode.toml` path; only when a config file was loaded), `LODE_READINESS` (`none`|`state`) and `LODE_INSTANCE` (`{pid}-{nanoid}`, the unique id for this startup that the app suffixes with the handshake phase, §8). Precedence low→high: `[env]` defaults < inherited host env < runtime PATH-prepend < injected `LODE_*`.
 
 ---
 
@@ -474,7 +478,7 @@ The remote manifest is provided by the publisher, in **JSON format** (UTF-8), fe
 tar -czf myapp-linux-x86_64.tar.gz -C build myapp
 lode-cli sign myapp-linux-x86_64.tar.gz --version 1.5.0 --key publisher.key
 #  → prints sha256 + sig + key_id (sig also doubles as the GitHub asset label)
-lode-cli manifest myapp-linux-x86_64.tar.gz --version 1.5.0 \
+lode-cli manifest myapp-linux-x86_64.tar.gz --app myapp --version 1.5.0 \
     --url https://releases.example.com/1.5.0/myapp-linux-x86_64.tar.gz \
     --run ./myapp --key publisher.key --into manifest.json   # upsert the asset by name (--run/--exec are optional)
 lode-cli manifest-sign --into manifest.json --key publisher.key   # §6 catalog signature
@@ -615,13 +619,13 @@ $LODE_DIR/
 - Atomicity: state/manifest temp+rename; version switching is a symlink rename, with no intermediate state.
 - Credentials: tokens/private keys never land in logs/state; URL query strings are redacted; the private key stays only on the publishing side.
 - Process: the child process uses an argv array, not through a shell; `#![forbid(unsafe_code)]`; `rlimit` suppresses core dumps; the panic hook emits structured logs.
-- Offline-capable: with no network, fall back to the locally installed version + local manifest + local public key.
+- Offline-capable: with no network, lode starts the locally installed `current` version (its `.lode.json` marker, or a `lode-cli seed` install); no manifest is read until the next update check.
 
 ---
 
 ## 17. Deliverables
 
-- `src/` etc. — modular Rust source, compiling into a **single static binary `lode`**.
+- `crates/` — the three-crate workspace (`lode-core`, `lode-supervisor`, `lode`), compiling into a **single static binary `lode`**.
 - `Dockerfile` — the universal image (`FROM zzci/ubase` + `COPY lode /usr/bin/lode`); built from prebuilt release binaries.
 - `tests/` — a bun + TypeScript end-to-end test suite (`tests/src`), example apps (`tests/apps/web-rust`, `tests/apps/web-bun`), and docker-compose integration (`tests/compose`).
 - `docs/integration.md` — the end-to-end integration guide (configure `lode.toml` → app contract → publish the manifest).

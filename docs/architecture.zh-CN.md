@@ -70,7 +70,7 @@ zzci/ubase                 │  lode (Rust 静态二进制, 几 MB)   │
   - 日志:`tracing` + `tracing-subscriber`
   - 进程/信号:`std::process` + `signal-hook`(收) + `nix`(向子进程发信号,安全 API)
   - 健壮:`rlimit`(抑制 core dump)
-- **`#![forbid(unsafe_code)]`**:fd 传递(可选无停机)经 `command-fds`/`socket2` 封装,本 crate 不写 unsafe。
+- **`#![forbid(unsafe_code)]`**:整个 workspace 不写 unsafe(子进程经 `std::process` 拉起,信号经 `signal-hook`/`nix`)。无停机 fd 传递尚未实现(§8);将来实现时也会经安全封装 crate,而非裸 unsafe。
 - 关键原语已在等价的 Bun 原型本地验证(O_EXCL 锁、原子软链、sha256、ed25519、子进程信号、流式下载);Rust 侧用对应安全 crate 实现。
 
 ---
@@ -139,7 +139,7 @@ version       = "1.3.14"                                 # 可选:要求此版�
       → 之后按策略在后台处理更新
 ```
 
-current 不存在且既无 `[update].manifest` 也无本地可用版本 → 报错退出。离线/气隙:预放本地 manifest + 版本目录 + 受信公钥即可无网启动。
+current 不存在且既无 `[update].manifest` 也无本地可用版本 → 报错退出。离线/气隙:lode 从不读取本地 manifest —— 用 `lode-cli seed` 在本地安装版本(或连同 `.lode.json` 标记一起放好 `versions/<ver>/`),lode 即可无网启动 `current`;见 `docs/dev-local-testing.md`。
 
 ### 更新策略 `update.policy` = `off` | `check` | `auto`
 
@@ -160,7 +160,7 @@ target ≠ current 且可用(stop-start 模式):
   3. 写 state.status=updating → 给旧子进程 SIGTERM(app 清理后退出)→ STOP_TIMEOUT 超时才 SIGKILL
   4. 原子切 current 软链 → versions/<target>
   5. 起新子进程;等就绪(§8:readiness=none→存活满 grace;readiness=state→等 state.ready="<新 LODE_INSTANCE>-0")
-  6. 就绪 → status=running、last_good=target;**单次失败即回滚**:就绪超时 / 观察期(health_grace)内退出或崩溃一次 → 切回 last_good 并同样观察之;若 last_good 在其 grace 内也失败 → lode 退出(不再循环重试)
+  6. 就绪 → status=running、last_good=target;**单次失败即回滚**:就绪超时 / 观察期(health_grace)内退出或崩溃一次 → 切回 last_good 并同样观察之;若 last_good 在其 grace 内也失败 → lode **暂停**(status=error,keep-alive,§8)而非退出;`restart = off` 时则镜像退出
 
 零停机(reuseport-overlap / socket-activation):先起新进程,**等其就绪后再停旧**(§8),避免空窗与提前杀旧。
 ```
@@ -233,6 +233,7 @@ lode.manifest.v1
 - **lode 写**:`current`/`last_good`/`available`/`status`/`pid`/`last_check`/`last_error`/`history`/`channel`/`config_generation`。
   - **`last_error` 只报告持续性失败**:网络层失败(连接/TLS/重定向/状态码,或响应体没收全)下次检查就会重试,因此要**连续失败 3 次**才写入,且下一次拉取成功即清除——单次失败只记日志,不同步给 app。不会自愈的失败(manifest 格式错、签名不对、磁盘满、新版本起不来)第一次就上报。
 - **app 写**(请求):`target`(想升/降到的版本,或 `"latest"`)、`restart_nonce`(递增=请求重启)。
+- **app 拥有** `hold`:设为 `true` 请求 lode **不要**(重新)启动进程 —— 用于必须在 app 起来之前完成的计划维护。lode 报告 `status = held` 并等待(开机时、子进程退出后、以及 `restart_nonce`/`target` 请求期间都不启动),直到它被清除。它只挡"启动";正在运行的子进程绝不会因此被杀。
 - **双方共写**(`readiness=state` 握手,§8):`ready` = `{LODE_INSTANCE}-{相位}`。app 用 `-0` 表示"我能服务了";暂存升级时 lode 用 `-1` 提示在跑的 app;app 用 `-2` 应答"已准备好,可以切了"。lode 读 `-0`/`-2`、写 `-1` 提示,并在切换时清空该字段。**向后兼容**:app 也可继续写裸 `{LODE_INSTANCE}`(旧就绪信号)——这等于放弃准备窗口、直接切换。
 - 典型流程(`policy=check`):lode 把发现的新版写进 `available` → **app 读到后,自己决定升级就把 `target` 写成该版本(或 `"latest"`)** → lode 应用并热更。
 
@@ -260,10 +261,13 @@ lode.manifest.v1
   "config_generation": 0,
 
   "target": null,
-  "restart_nonce": 0
+  "restart_nonce": 0,
+  "hold": false,
+
+  "ready": "12345-k3x9q2-0"
 }
 ```
-lode 拥有的字段 vs app 拥有的字段(`target`/`restart_nonce`)互不重叠;`status` ∈ `starting|running|updating|rolling-back|stopping|stopped|error`;`result` ∈ `good|bad`。
+lode 拥有的字段 vs app 拥有的字段(`target`/`restart_nonce`/`hold`)互不重叠;`ready` 为共有字段(§8);`status` ∈ `starting|running|held|updating|rolling-back|stopping|stopped|error`;`result` ∈ `good|bad`。
 
 ---
 
@@ -275,7 +279,7 @@ lode 拥有的字段 vs app 拥有的字段(`target`/`restart_nonce`)互不重�
   - 终止类 `SIGTERM`/`SIGINT`/`SIGQUIT`:lode 发起**优雅关停**——转发给子进程 → 等其退出(超时 SIGKILL)→ 释放锁 → lode 以子进程退出码退出。
   - 透传类 `SIGHUP`/`SIGUSR1`/`SIGUSR2`/`SIGWINCH`/`SIGCONT`/`SIGTSTP`/…:**原样转发给子进程**(如 app 用 `SIGHUP` reload),lode 不消费。
   - 可选 `signals.restart`(env `LODE_RESTART_SIGNAL`,如 `SIGUSR2`):设置后该信号改为**触发 lode 优雅重启**(等价 `restart_nonce++`)且不再透传;**默认不设**,以免占用 app 信号(重启走 state.json/CLI)。
-  - `SIGKILL`/`SIGSTOP` 不可捕获(OS 限制);`SIGCHLD` 由 lode 用于感知子进程退出。透传集合可用 `signals.forward`(env `LODE_FORWARD_SIGNALS`)调整。
+  - `SIGKILL`/`SIGSTOP` 不可捕获(OS 限制);lode 不依赖 `SIGCHLD` —— 它在约 200 ms 的监管 tick 上以非阻塞 `waitpid` 收割(同时收割被重新托管的孙进程)。透传集合可用 `signals.forward`(env `LODE_FORWARD_SIGNALS`)调整。
 - **重启策略 `supervise.restart`**(`off`|`on-failure`|`always`,默认 `on-failure` —— **keep-alive**):
   - `on-failure`(默认)= **失败**(非零退出、被信号杀、或根本起不来)时按**指数退避**重启;干净 `exit(0)` 则 lode 跟随退出。**keep-alive**:重试 `restart_max` 次仍失败后 lode **不退出**,而是**暂停**(status=error)、保持存活——PID 1 绝不让容器崩溃重启。干净 `exit(0)` 仍让 lode 退出(应用主动结束)。
   - `always` = 同 `on-failure`,但干净 `exit(0)` 也重试(常驻服务不应退出);同样在上限处暂停。
@@ -307,7 +311,7 @@ lode 拥有的字段 vs app 拥有的字段(`target`/`restart_nonce`)互不重�
 | `reuseport-overlap` | 先起新进程与旧并存,新健康后再停旧 → 零停机 | app 开 `SO_REUSEPORT` |
 
 > **容器里没有 systemd?不影响。** socket-activation 是一套**协议(环境变量 + 继承 fd)**,不依赖 systemd 进程——**lode 自己充当 activator**(绑 socket、传 fd、设 `LISTEN_FDS`),app 只要会读 fd 3 即可。容器内首选更简单的 `reuseport-overlap`,或默认 `stop-start`。
-> `socket-activation` 需 `LODE_LISTEN`(如 `0.0.0.0:3000`);fd 传递经 `command-fds` 封装,保持 `#![forbid(unsafe_code)]`。
+> `socket-activation` 将需要 `LODE_LISTEN`(如 `0.0.0.0:3000`);它**尚未实现**(该键目前无效),实现时 fd 传递也会经安全封装 crate,保持 `#![forbid(unsafe_code)]`。
 > 与 overseer 差异:overseer 是**进程内库**且**不自动重启崩溃**(同码退出);lode 是**外部通用监督器**,默认**保活**(重试后暂停、绝不让容器崩溃重启),并提供 `off`(镜像)+ 回滚,是其超集。**零停机为可选高级特性,v1 仅实现 `stop-start`——`socket-activation`/`reuseport-overlap` 目前回退到它(见上方提示),后续按需启用。**
 
 ### 就绪 / 停止握手(关键:别在 app 没准备好时就杀进程)
@@ -369,9 +373,9 @@ lode 发 `SIGTERM` 后,**在 `stop_timeout` 秒内绝不 SIGKILL**,给 app 充�
 | `LODE_KEEP_VERSIONS` | `--keep <n>` | `update.keep_versions` | `3` | 保留旧版本数 |
 | `LODE_PIN_VERSION` | `--pin <ver>` | `update.pin` | — | 锁定版本(operator) |
 | **`[http]` —— 拉取凭据** | | | | |
-| `LODE_HEADERS` | `--header <h>`(可重复) | `http.headers` | — | 透传给 manifest/artifact/runtime 下载的 HTTP 头(`"Name: Value"`),支持 `${ENV}` 展开,§11 |
-| `LODE_CREDENTIAL_HOSTS` | `--credential-host <host>` | `http.credential_hosts` | — | 接收 `[http].headers` 凭据的额外受信 host(同源始终受信;runtime 下载 host 若需凭据也需列在此) |
-| — | `--allow-insecure-http` | `http.allow_insecure` | `false` | 允许明文 HTTP 拉取(loopback 始终允许;凭据将明文传输) |
+| `LODE_HEADERS` | `--header <h>`(可重复) | `http.headers` | — | 透传给 manifest/artifact/runtime 下载的 HTTP 头(`"Name: Value"`),支持 `${ENV}` 展开,§11;该 env 变量按**换行**分隔 |
+| `LODE_CREDENTIAL_HOSTS` | `--credential-host <host>` | `http.credential_hosts` | — | 接收 `[http].headers` 凭据的额外受信 host(同源始终受信;runtime 下载 host 若需凭据也需列在此);该 env 变量按**换行**分隔 |
+| `LODE_ALLOW_INSECURE_HTTP` | `--allow-insecure-http` | `http.allow_insecure` | `false` | 允许明文 HTTP 拉取(loopback 始终允许;凭据将明文传输) |
 | **`[trust]` —— 验签** | | | | |
 | `LODE_REQUIRE_SIGNATURE` | `--require-signature <off\|auto\|enforce>` | `trust.require_signature` | `auto` | 验签强度,§6 |
 | `LODE_TRUSTED_KEYS` | `--trusted-keys <list>` | `trust.trusted_keys` | — | 受信公钥 `key_id:base64`,逗号分隔 |
@@ -402,7 +406,7 @@ lode 发 `SIGTERM` 后,**在 `stop_timeout` 秒内绝不 SIGKILL**,给 app 充�
 | `LODE_FORWARD_SIGNALS` | `--forward-signals <list>` | `signals.forward` | (标准集) | 透传给子进程的信号集,§8 |
 | `LODE_RESTART_SIGNAL` | `--restart-signal <sig>` | `signals.restart` | — | 触发优雅重启的信号(默认不设),§8 |
 
-子进程环境:透传宿主环境并**剥离配置类 `LODE_*`**;把 operator 的 `[env]` 表作为**默认值**应用(仅对宿主 env 没有的 key);把运行时目录前置到 PATH;再注入只读自省变量 `LODE_ACTIVE_VERSION`、`LODE_DIR`、`LODE_INSTANCE`(`{pid}-{nanoid}`,本次启动唯一 id,由 app 拼上握手相位,§8)。优先级 低→高:`[env]` 默认值 < 继承的宿主 env < 运行时 PATH 前置 < 注入的 `LODE_*`。
+子进程环境:透传宿主环境并**剥离配置类 `LODE_*`**;把 operator 的 `[env]` 表作为**默认值**应用(仅对宿主 env 没有的 key);把运行时目录前置到 PATH;再注入只读自省变量 `LODE_ACTIVE_VERSION`、`LODE_DIR`、`LODE_WORKDIR`(解析后的 cwd)、`LODE_CONFIG`(加载的 `lode.toml` 路径,仅在加载了配置文件时)、`LODE_READINESS`(`none`|`state`)与 `LODE_INSTANCE`(`{pid}-{nanoid}`,本次启动唯一 id,由 app 拼上握手相位,§8)。优先级 低→高:`[env]` 默认值 < 继承的宿主 env < 运行时 PATH 前置 < 注入的 `LODE_*`。
 
 ---
 
@@ -474,7 +478,7 @@ headers = [
 tar -czf myapp-linux-x86_64.tar.gz -C build myapp
 lode-cli sign myapp-linux-x86_64.tar.gz --version 1.5.0 --key publisher.key
 #  → 打印 sha256 + sig + key_id(sig 同时用作 GitHub 资产 label)
-lode-cli manifest myapp-linux-x86_64.tar.gz --version 1.5.0 \
+lode-cli manifest myapp-linux-x86_64.tar.gz --app myapp --version 1.5.0 \
     --url https://releases.example.com/1.5.0/myapp-linux-x86_64.tar.gz \
     --run ./myapp --key publisher.key --into manifest.json   # 按 name upsert 资产(--run/--exec 可选)
 lode-cli manifest-sign --into manifest.json --key publisher.key   # §6 catalog 签名
@@ -615,13 +619,13 @@ $LODE_DIR/
 - 原子性:状态/清单 temp+rename;版本切换软链 rename,无中间态。
 - 凭据:token/私钥不落日志/状态;URL 查询串脱敏;私钥只在发布侧。
 - 进程:子进程用 argv 数组,不经 shell;`#![forbid(unsafe_code)]`;`rlimit` 抑制 core dump;panic hook 打结构化日志。
-- 离线可用:无网回退本地已装版本 + 本地 manifest + 本地公钥。
+- 离线可用:无网时 lode 启动本地已装的 `current` 版本(其 `.lode.json` 标记,或 `lode-cli seed` 安装的版本);下一次更新检查之前不读任何 manifest。
 
 ---
 
 ## 17. 交付物
 
-- `src/` 等 —— Rust 模块化源码,编译产出**单一静态二进制 `lode`**。
+- `crates/` —— 三 crate workspace(`lode-core`、`lode-supervisor`、`lode`),编译产出**单一静态二进制 `lode`**。
 - `Dockerfile` —— 通用镜像(`FROM zzci/ubase` + `COPY lode /usr/bin/lode`);用预构建的发布二进制构建。
 - `tests/` —— bun + TypeScript 端到端测试套件(`tests/src`),示例 app(`tests/apps/web-rust`、`tests/apps/web-bun`)与 docker-compose 集成(`tests/compose`)。
 - `docs/integration.zh-CN.md` —— 端到端集成指南(配置 `lode.toml` → 应用契约 → 发布 manifest)。

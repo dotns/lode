@@ -82,7 +82,6 @@ exec    = "bun"       # `lode <args>` -> bun <args>
 [runtime]
 runtime  = "bun"
 download = "https://example.com/bun-linux-x64.zip"   # used only if bun is absent from PATH
-# format = "zip"   # sha256 = "<hex>"
 ```
 
 > `run = "bun app.ts"` runs `bun app.ts`. `run = "bun run app.ts"` is
