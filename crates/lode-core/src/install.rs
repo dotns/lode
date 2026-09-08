@@ -68,8 +68,7 @@ pub fn install(
         validate_command_override("exec", exec)?;
     }
 
-    verify_integrity(asset, computed_sha)?;
-    verify_identity(cfg, version, asset, computed_sha)?;
+    verify_download(cfg, version, asset, computed_sha)?;
 
     let versions_dir = cfg.global.dir.join("versions");
     fs::create_dir_all(&versions_dir)?;
@@ -479,6 +478,20 @@ fn verify_integrity(asset: &Asset, computed_sha: &str) -> Result<()> {
     }
 }
 
+/// The full download gate — integrity ([`verify_integrity`]) then identity
+/// ([`verify_identity`]) — for a fetched artifact whose sha256 is `computed_sha`.
+/// [`install`] runs it before staging; the self-update path runs it before
+/// swapping the binary.
+pub(crate) fn verify_download(
+    cfg: &Config,
+    version: &str,
+    asset: &Asset,
+    computed_sha: &str,
+) -> Result<()> {
+    verify_integrity(asset, computed_sha)?;
+    verify_identity(cfg, version, asset, computed_sha)
+}
+
 /// Identity: ed25519 over the §1 canonical message (binding the asset filename +
 /// version + digest), enforced per `trust.require_signature`:
 /// - `off` => skip (integrity only).
@@ -627,14 +640,21 @@ pub fn trusted_keys(cfg: &Config) -> Result<Vec<String>> {
     if let Some(path) = cfg.trust.trusted_keys_file.as_deref() {
         let text = fs::read_to_string(path)
             .map_err(|e| Error::Config(format!("read trusted_keys_file {path}: {e}")))?;
-        for line in text.lines() {
-            let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                keys.push(line.to_owned());
-            }
-        }
+        keys.extend(trusted_keys_from_text(&text));
     }
     Ok(keys)
+}
+
+/// Parse the `trusted_keys_file` format: one trusted-key entry per line.
+///
+/// Blank lines and `#` comments are skipped. Also the format of the release-key
+/// list compiled into the `lode` binary for `lode-cli self-update`.
+pub fn trusted_keys_from_text(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 // --- extraction ------------------------------------------------------------
@@ -654,7 +674,12 @@ const MAX_ARCHIVE_ENTRIES: usize = 100_000;
 /// under the filename minus its `.gz` suffix; archives unpack as-is. The launch
 /// command (manifest `run`/`exec` override, else `[command]`) names what to
 /// execute, so nothing here resolves or verifies an entry point.
-fn extract(asset: &Asset, format: &str, temp_path: &Path, dest_dir: &Path) -> Result<()> {
+pub(crate) fn extract(
+    asset: &Asset,
+    format: &str,
+    temp_path: &Path,
+    dest_dir: &Path,
+) -> Result<()> {
     match format {
         "raw" => {
             let dest = safe_join(dest_dir, &asset.name)?;

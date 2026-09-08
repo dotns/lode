@@ -207,6 +207,7 @@ lode.manifest.v1
 ### Trusted public keys / strength
 
 - `LODE_TRUSTED_KEYS` = comma-separated `[<alg>:]<key_id>:<base64 public key>`, where `alg` is `ed25519` (raw 32-byte key; the default when omitted), `ecdsa-p256` or `ecdsa-p384` (SEC1 point, compressed canonical); or `LODE_TRUSTED_KEYS_FILE` (each line `[<alg>:]<key_id> <base64>`). Multiple keys are supported (rotation), of mixed algorithms. `key_id` = the first 16 hex digits of `sha256(public key bytes)`. **The algorithm is pinned on the trusted key**: a signature is checked with that key's algorithm, never with one the manifest names (its `alg` is advisory).
+- Base64 values (public keys, seeds, signatures) are emitted as unpadded **base64url** (RFC 4648 §5, alphabet `A-Z a-z 0-9 - _`); standard base64, padded or not, is accepted on input.
 - `LODE_REQUIRE_SIGNATURE` = `off` (sha256 only) | `auto` (default) | `enforce` (recommended for production). **It gates the per-artifact signature only.** The catalog (manifest-level) signature is *verify-if-present* — verified when a catalog carries one, never required, and so independent of this setting (see *Catalog signature* below).
   - **`auto` is fail-closed once any trusted key is configured**: the *artifact* signature is then required — a missing *or* invalid signature is rejected. Only when **no** trusted key is configured does `auto` skip the artifact check and log the source as **UNVERIFIED**.
   - **`enforce`** always requires trusted keys plus a valid *artifact* signature.
@@ -214,7 +215,7 @@ lode.manifest.v1
 
 ### CLI (publisher)
 
-`lode-cli keygen` / `lode-cli sign <asset> --version <ver> --key <priv> [--run <cmd>] [--exec <cmd>]` (or `--key-env <VAR>`; prints `sha256`/`sig`/`key_id`, where `sig` doubles as the GitHub asset `label`; `--run`/`--exec` bind launch overrides into the signature) / `lode-cli verify <asset> --version <ver> --pubkey <b64> --sig <b64>` / `lode-cli manifest <asset> --version <ver> --url <url> [--run <cmd>] [--exec <cmd>] --key <priv> --into manifest.json` / `lode-cli manifest-sign --into manifest.json --key <priv>` (stamp the catalog's top-level `key_id` + `sig`). The private key stays offline; lode holds only the public key.
+`lode-cli keygen` / `lode-cli sign <asset> --version <ver> --key <priv> [--run <cmd>] [--exec <cmd>]` (or `--key-env <VAR>`; prints `sha256`/`sig`/`key_id`, where `sig` is what you publish beside the asset as `<asset>.sig` — or as the GitHub asset `label`; `--run`/`--exec` bind launch overrides into the signature) / `lode-cli verify <asset> --version <ver> --pubkey <b64> --sig <b64>` / `lode-cli manifest <asset> --version <ver> --url <url> [--run <cmd>] [--exec <cmd>] --key <priv> --into manifest.json` / `lode-cli manifest-sign --into manifest.json --key <priv>` (stamp the catalog's top-level `key_id` + `sig`). The private key stays offline; lode holds only the public key.
 
 ---
 
@@ -477,7 +478,7 @@ The remote manifest is provided by the publisher, in **JSON format** (UTF-8), fe
 # binary (Go/Rust/bun --compile): name the asset so its extension fixes the format
 tar -czf myapp-linux-x86_64.tar.gz -C build myapp
 lode-cli sign myapp-linux-x86_64.tar.gz --version 1.5.0 --key publisher.key
-#  → prints sha256 + sig + key_id (sig also doubles as the GitHub asset label)
+#  → prints sha256 + sig + key_id (publish sig as `<asset>.sig` beside the asset, or as the GitHub asset label)
 lode-cli manifest myapp-linux-x86_64.tar.gz --app myapp --version 1.5.0 \
     --url https://releases.example.com/1.5.0/myapp-linux-x86_64.tar.gz \
     --run ./myapp --key publisher.key --into manifest.json   # upsert the asset by name (--run/--exec are optional)
@@ -509,11 +510,11 @@ The native manifest is the authoritative format (explicit, signable, and placeab
 
 **The release's own assets are the catalog** — there is **no `manifest.json` asset**. The adapter:
 1. selects the release per the table above (latest/prerelease/tag);
-2. maps each release asset to an internal asset: `name` = the asset filename, `sha256` = the asset `digest` (GitHub-computed, re-verified against the downloaded bytes), `sig` = the asset **`label`** (the only free-string slot the API returns), `url` = `browser_download_url`;
+2. maps each release asset to an internal asset: `name` = the asset filename, `sha256` = the asset `digest` (GitHub-computed, re-verified against the downloaded bytes), `sig` = the release's **`<name>.sig`** sidecar asset when the asset has no **`label`** (the label — the only free-string slot the API returns — wins when set), `url` = `browser_download_url`;
 3. afterwards it is exactly the same as native (select the asset whose `name` matches `[update].asset` → verify sha256 + ed25519 → install).
 
-- **Version number**: use the release's `tag_name` (with a leading `v` before a digit stripped) — GitHub is authoritative for the version.
-- **No catalog (manifest-level) signature on GitHub**: freshness comes from tag authority; per-asset `sig` (the label) still protects each download.
+- **Version number**: use the release's `tag_name` (with a leading `v` before a digit stripped) — GitHub is authoritative for the version. A `pin` (or `--version`) given as the raw tag resolves to that same stripped id, so `versions/<id>` and the signed `version` never depend on how the release was selected — publishers sign with the stripped id.
+- **No catalog (manifest-level) signature on GitHub**: freshness comes from tag authority; per-asset `sig` (sidecar or label) still protects each download.
 - **Private repo**: put the GitHub token in `[http].headers` (`Authorization: Bearer <PAT>`), carried by the API and same-host asset downloads.
 
 > The simplest usage needs only `github = "owner/repo"` + `asset = "<filename>"`; `stable` goes straight to `/releases/latest`. Both sources produce the same internal asset list → the same verify/install path. Signing in CI is optional — see the release-workflow recipe in [`docs/source-adapters.md`](source-adapters.md) §5.

@@ -4,7 +4,7 @@
 // the artifact basename, the version, the sha256 AND the optional run/exec
 // launch overrides; NOT platform/format/url). (lode is a multi-call binary;
 // signing lives under the `lode-cli` name — see LODE_CLI_BIN.) The trusted-key
-// string (`key_id:base64`) is fed back into lode via --trusted-keys so
+// string (`key_id:base64url`) is fed back into lode via --trusted-keys so
 // install-time verification can succeed.
 
 import { readFileSync } from "node:fs";
@@ -33,7 +33,7 @@ export class Signer {
     const prefix = join(keysDir, "publisher");
     const r = await run([LODE_CLI_BIN, "keygen", "--out", prefix]);
     if (r.exitCode !== 0) throw new Error(`lode keygen failed (${r.exitCode}): ${r.stderr}`);
-    // `<prefix>.pub` is written as "<key_id> <base64>\n"; `<prefix>.key` is the raw base64 seed.
+    // `<prefix>.pub` is written as "<key_id> <base64url>\n"; `<prefix>.key` is the raw base64url seed.
     const pubLine = readFileSync(`${prefix}.pub`, "utf8").trim();
     const [keyId, pub] = pubLine.split(/\s+/);
     if (!keyId || !pub) throw new Error(`unexpected keygen .pub format: ${pubLine}`);
@@ -45,7 +45,7 @@ export class Signer {
     return `${this.keyId}:${this.pub}`;
   }
 
-  /** Sign one artifact, returning its sha256 + base64 signature. The signature message
+  /** Sign one artifact, returning its sha256 + base64url signature. The signature message
    * binds the asset filename (= `basename(artifactPath)`) + version + sha256 + the
    * optional run/exec launch overrides; lode reconstructs it from the manifest asset
    * `name`/`run`/`exec`, so the name must equal this artifact's basename (and the
@@ -58,7 +58,7 @@ export class Signer {
     const r = await run(cmd);
     if (r.exitCode !== 0) throw new Error(`lode sign failed (${r.exitCode}): ${r.stderr}\n${r.stdout}`);
     const sha = r.stdout.match(/sha256:\s*([0-9a-fA-F]{64})/)?.[1];
-    const sig = r.stdout.match(/sig:\s*([A-Za-z0-9+/=]+)/)?.[1];
+    const sig = r.stdout.match(/sig:\s*([A-Za-z0-9+/=_-]+)/)?.[1];
     if (!sha || !sig) throw new Error(`could not parse sha256/sig from lode sign output:\n${r.stdout}`);
     return { sha256: sha.toLowerCase(), sig };
   }

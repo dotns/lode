@@ -19,8 +19,7 @@ use lode_core::verify::{
     Algorithm, Artifact, PublicKey, artifact_message, sha256_hex_file, verify_signature,
 };
 
-const B64: base64::engine::general_purpose::GeneralPurpose =
-    base64::engine::general_purpose::STANDARD;
+use lode_core::verify::{B64, decode_b64};
 
 /// A publisher's private key, tagged with its algorithm (the secret half of a
 /// [`PublicKey`]). On disk / in an env var it is `<alg>:<base64>` — bare base64 for
@@ -76,7 +75,7 @@ impl SecretKey {
             Some((alg, b64)) => (alg.parse::<Algorithm>()?, b64),
             None => (Algorithm::Ed25519, text),
         };
-        let bytes = B64.decode(b64.trim()).context("base64 decode")?;
+        let bytes = decode_b64(b64)?;
         Self::decode(alg, &bytes)
     }
 
@@ -243,8 +242,8 @@ fn sign_artifact(a: &Artifact<'_>, key: &SecretKey) -> Result<(String, String, S
 /// comes from exactly one of `--key` (file) or `--key-env` (env var, for CI). The
 /// signature (§1) binds the asset filename, the version, the digest and the
 /// optional `--run`/`--exec` launch overrides (which must then be published
-/// verbatim in the manifest asset); it is exactly the string a publisher uploads
-/// as the GitHub asset `label`.
+/// verbatim in the manifest asset); it is exactly the string a publisher ships as
+/// the `<asset>.sig` sidecar (or as the GitHub asset `label`).
 pub(crate) fn sign(
     artifact: &str,
     version: &str,

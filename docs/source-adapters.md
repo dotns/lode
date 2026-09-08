@@ -53,6 +53,11 @@ configs and manifests from before `alg` existed are unchanged.
 | `ecdsa-p256` | SEC1 point; compressed 33 bytes canonical (uncompressed accepted) | 64-byte `r ‖ s` | SHA-256 |
 | `ecdsa-p384` | SEC1 point; compressed 49 bytes canonical (uncompressed accepted) | 96-byte `r ‖ s` | SHA-384 |
 
+- Encoding: every base64 value lode prints — public keys, private seeds,
+  signatures — is **base64url** (RFC 4648 §5, unpadded: `A-Z a-z 0-9 - _`), so it
+  is safe in URLs, filenames and shells. Decoding also accepts standard base64
+  (`+ /`, padded or not), so keys and signatures published before this encoding
+  was adopted keep verifying.
 - `key_id` = first 16 hex chars of `sha256(public_key)` over the canonical
   encoding above.
 - Operators pin publishers in `[trust].trusted_keys` as
@@ -158,7 +163,7 @@ asset  = "myapp-linux-x64.tar.gz"
 | `name` | asset `name` (matched against `asset`) |
 | `version` | release `tag_name` (drop a leading `v` before a digit) |
 | `sha256` | asset `digest` (strip the `sha256:` prefix), re-verified against the downloaded bytes |
-| `sig` | asset **`label`** (the only arbitrary-string slot the API returns) |
+| `sig` | a `<name>.sig` sidecar asset in the same release (its body: the base64 signature); else the asset **`label`** (which wins when both exist) |
 | `url` (runtime) | `browser_download_url` |
 
 - **Version pointer = tag authority.** `channel = stable` → `/releases/latest`;
@@ -177,7 +182,8 @@ releases. Steps:
    (`lode-<os>-<arch>.tar.gz`).
 2. **Create** the release for the tag.
 3. **For each asset, sign-if-keyed then upload:** if `LODE_SIGNING_KEY` is set, sign
-   it and upload with the signature as the asset `label` (`file#label`); otherwise
+   it — with the version lode derives from the tag, i.e. the tag minus its leading
+   `v` — write the signature to `<asset>.sig` and upload both files; otherwise
    upload the bare file and warn that it is unsigned.
 
 ```yaml
@@ -205,8 +211,9 @@ jobs:
           TAG="$GITHUB_REF_NAME"
           for f in dist/lode-*.tar.gz; do
             if [ -n "${LODE_SIGNING_KEY:-}" ]; then
-              sig=$(lode-cli sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY)
-              gh release upload "$TAG" "$f#$sig"      # label = signature
+              lode-cli sign "$f" --version "${TAG#v}" --key-env LODE_SIGNING_KEY \
+                | awk '/^sig:/ {print $2}' > "$f.sig"
+              gh release upload "$TAG" "$f" "$f.sig"  # signature = `.sig` sidecar asset
             else
               gh release upload "$TAG" "$f"           # unsigned
               echo "::warning::LODE_SIGNING_KEY not set — $(basename "$f") uploaded UNSIGNED"
@@ -225,7 +232,16 @@ Notes:
   signed out-of-band offline for the strongest custody).
 - **`lode-cli`** is the multi-call binary built in step 1; sign with the freshly built
   one (other projects install `lode-cli` first).
-- **Unsigned consequences.** An asset with no `label` is unsigned: consumers must run
+- **Sidecar, not label.** GitHub renders an asset's `label` *in place of* its
+  filename, so a signature-as-label turns the release page into base64 blobs. Publish
+  the signature as the `<asset>.sig` sidecar asset instead; lode reads it whenever the
+  asset has no label (a label still wins, so existing releases keep verifying).
+- **Signed version.** Sign with the tag minus its leading `v` (`${TAG#v}`) — the
+  version id lode derives from the tag (table above). It keys `versions/<id>` and is
+  bound into the signature whether the release is reached via `latest` or a `pin` on
+  the raw tag, so one signature verifies on both paths.
+- **Unsigned consequences.** An asset with neither a `.sig` sidecar nor a `label` is
+  unsigned: consumers must run
   `require_signature = off` (or `auto` with no trusted keys → installs **UNVERIFIED**
   with a warning). Under `require_signature = enforce` an unsigned asset is rejected.
 
@@ -322,6 +338,6 @@ trusted_keys = ["<key_id>:<base64-pubkey>"]
 | `manifest.rs` | internal `Manifest` with per-version `assets[]` keyed by `name`; select the asset by `name`; derive `format` from the extension; both adapters (`fetch_github`, `fetch_native`) produce the identical internal model |
 | `config.rs` | `[update].asset`; `manifest`/`github` stay mutually exclusive |
 | `download.rs` | fetch by `url`; attach `[http].headers` only same-origin; cross-check the GitHub `digest` and re-hash the downloaded file against the signed `sha256` |
-| `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256, run, exec)` signature and the GitHub `label` string; native `manifest` assembly + `manifest-sign` over the §2 catalog form |
+| `authoring.rs` / `lode-cli` | `keygen`; `sign` → the `(name, version, sha256, run, exec)` signature (published as the `.sig` sidecar body, or as the GitHub `label`); native `manifest` assembly + `manifest-sign` over the §2 catalog form |
 
 Downstream (`resolve_target`, install, supervise) is shared and source-agnostic.

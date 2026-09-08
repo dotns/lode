@@ -33,6 +33,8 @@ pub mod lock;
 mod logging;
 pub mod manifest;
 pub mod state;
+#[cfg(test)]
+mod stub;
 pub mod verify;
 
 pub use crate::config::{

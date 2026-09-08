@@ -8,7 +8,7 @@
 > different manifest, never an image rebuild.
 
 - **Image:** `docker.io/dotns/lode` ([Docker Hub](https://hub.docker.com/r/dotns/lode))
-- **Binaries:** Linux (x86_64 / aarch64, musl-static) + macOS (x86_64 / arm64) — [Releases](https://github.com/dotns/lode/releases)
+- **Binaries:** Linux (x86_64 / aarch64, musl-static) + macOS (x86_64 / arm64) — [Releases](https://github.com/dotns/lode/releases); upgrade in place with `lode-cli self-update`
 - **Platforms:** Unix only (lode is a process supervisor — PID-1 subreaper, signal forwarding, `exec` passthrough).
 
 ## Start here — by role
@@ -96,6 +96,7 @@ shipped alongside it) it is the operator/publisher toolkit.
 | `lode` | start & supervise the app (`[command].run`); auto-update per policy |
 | `lode <args…>` / `lode -- <args…>` | passthrough: run `[command].exec` + `<args>` (e.g. `lode run db:init`); use `--` when an arg collides with a lode flag |
 | `lode-cli status` / `update` / `rollback` / `restart` / `versions` / `seed` | manage a running instance (via `state.json`); `seed` installs a local version offline for dev/testing |
+| `lode-cli self-update` | replace this lode binary with the newest lode release (verified against the release key built into the binary); restart lode to run it |
 | `lode-cli keygen` / `sign` / `verify` / `manifest` / `manifest-sign` / `init` | publisher/operator tools |
 
 ## Three files

@@ -84,10 +84,15 @@ pub fn locate(cfg: &Config, version: &str) -> Result<Target> {
 fn determine_version(cfg: &Config) -> Result<String> {
     if let Some(pin) = cfg.update.pin.as_deref() {
         // A configured pin keys `versions/<pin>`; reject traversal before it is
-        // used to probe the installed set or bootstrap.
+        // used to probe the installed set or bootstrap. A GitHub pin is the raw
+        // tag while the installed id is the tag minus its leading `v` (see
+        // `manifest::resolve_target`), so accept either form on disk.
         idval::validate_id("version", pin)?;
-        if version_installed(cfg, pin) {
-            return Ok(pin.to_owned());
+        if let Some(installed) = [pin, manifest::strip_v(pin)]
+            .into_iter()
+            .find(|v| version_installed(cfg, v))
+        {
+            return Ok(installed.to_owned());
         }
         return bootstrap(cfg, Some(pin));
     }

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`lode-cli self-update`.** Replaces the running lode binary with the newest stable
+  lode release (or `--version <tag>`, also the deliberate-downgrade path) from
+  `github.com/dotns/lode`, verified under `require_signature = enforce` against the
+  release keys compiled into the binary (`crates/lode/release-keys.txt`;
+  `--release-key <entry>` overrides them for key-rotation recovery). It never reads the
+  app's `lode.toml` / `LODE_*` source or trusted keys. The new binary is probed
+  (`--version` must report the target) and atomically renamed over the executable;
+  a running supervisor keeps the old binary until lode restarts.
+- **GitHub source: `.sig` sidecar assets.** When a release asset carries no `label`,
+  the adapter reads its signature from a `<name>.sig` asset of the same release (a
+  label still wins). Publishers can keep the release page readable — GitHub shows a
+  label *in place of* the filename — by uploading the signature as a sidecar instead.
 - **Selectable signature algorithm.** Publisher keys now carry an `alg`:
   `ed25519` (unchanged default), `ecdsa-p256` (SHA-256, 64-byte `r||s` signature) or
   `ecdsa-p384` (SHA-384, 96-byte `r||s`). `lode-cli keygen --alg <alg>` generates the
@@ -48,6 +60,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--forward-signals`, and a consumed `--restart-signal`) and scenario 29 (the GitHub
   Releases source, driven against a local API stand-in, `tests/src/helpers/githubServer.ts`);
   `tests/README.md` now lists what deliberately stays unit-level.
+
+### Changed
+
+- **Keys and signatures are printed as base64url.** `lode-cli keygen` / `sign` /
+  `manifest` / `manifest-sign` now emit unpadded base64url (RFC 4648 §5: `-` `_`
+  instead of `+` `/`, no `=`), so public keys, seeds and signatures are safe in URLs,
+  filenames and shells. Every decoder accepts both alphabets, padded or not, so
+  existing `trusted_keys` entries, `LODE_SIGNING_KEY` secrets, `.sig` files and
+  manifests keep working. Loaders older than this release decode standard base64
+  only: a publisher whose operators still run them should keep signing with an older
+  `lode-cli` until those hosts upgrade.
+- **Release assets are signed via `.sig` sidecars.** `.github/workflows/release.yml`
+  uploads `lode-<os>-<arch>.tar.gz` plus `lode-<os>-<arch>.tar.gz.sig` instead of
+  carrying the signature in the asset label, so the Releases page shows real filenames
+  again. The GitHub recipes in `docs/source-adapters.md` and `docs/integration.md`
+  follow suit.
+
+### Fixed
+
+- **GitHub source: one version id per release.** A `pin` (or `update --version`) given
+  as the raw tag (`v1.5.0`) now resolves to the same `v`-stripped id (`1.5.0`) that
+  following `latest` yields, instead of registering the raw tag as a second version.
+  `versions/<id>` and the signed `version` therefore no longer depend on how the
+  release was selected, and one signature — made over the stripped id — verifies on
+  both paths. The GitHub release recipes (and lode's own workflow) signed with the raw
+  tag (`--version "$TAG"`), which only ever verified for a pinned install; they now
+  sign `${TAG#v}`. A `versions/v1.5.0` directory from an earlier pinned install keeps
+  being used as is.
 
 ### Dependencies
 

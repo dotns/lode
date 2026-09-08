@@ -7,7 +7,7 @@
 > manifest,**永不重建镜像**。
 
 - **镜像:** `docker.io/dotns/lode`([Docker Hub](https://hub.docker.com/r/dotns/lode))
-- **二进制:** Linux(x86_64 / aarch64,musl 静态)+ macOS(x86_64 / arm64) —— [Releases](https://github.com/dotns/lode/releases)
+- **二进制:** Linux(x86_64 / aarch64,musl 静态)+ macOS(x86_64 / arm64) —— [Releases](https://github.com/dotns/lode/releases);就地升级用 `lode-cli self-update`
 - **平台:** 仅 Unix(lode 是进程监督器 —— PID-1 子进程收割、信号转发、`exec` 直通)。
 
 ## 从这里开始 —— 按角色
@@ -93,6 +93,7 @@ lode 是 **multi-call 二进制**。以 `lode` 调用是加载器,**没有任何
 | `lode` | 启动并监督应用(`[command].run`);按策略自动更新 |
 | `lode <args…>` / `lode -- <args…>` | 直通:执行 `[command].exec` + `<args>`(如 `lode run db:init`);参数与 lode 旗标同名时用 `--` |
 | `lode-cli status` / `update` / `rollback` / `restart` / `versions` / `seed` | 管理运行中的实例(经 `state.json`);`seed` 离线安装本地版本,用于开发/测试 |
+| `lode-cli self-update` | 用最新的 lode release 替换当前这个 lode 二进制(以内置的发布公钥校验);重启 lode 后生效 |
 | `lode-cli keygen` / `sign` / `verify` / `manifest` / `manifest-sign` / `init` | 发布方 / 运维工具 |
 
 ## 三个文件

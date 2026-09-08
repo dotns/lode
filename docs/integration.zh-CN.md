@@ -138,14 +138,15 @@ lode 解析 **channel → version → asset**,校验后安装/运行。每台主
 
 ### 密钥(一次性)
 
-`lode-cli keygen` 打印 `key_id`、`trusted_keys` 条目(`<key_id>:<base64>`,交给运维)、以及
+`lode-cli keygen` 打印 `key_id`、`trusted_keys` 条目(`<key_id>:<base64url>`,交给运维)、以及
 保密种子 —— 离线保存。需要 ECDSA 密钥时传 `--alg ecdsa-p256` 或 `--alg ecdsa-p384`:其条目与
-密钥文件会带 `<alg>:` 前缀,所有 `--key` / `--key-env` / `--pubkey` 都接受该带前缀的形式。
+密钥文件会带 `<alg>:` 前缀,所有 `--key` / `--key-env` / `--pubkey` 都接受该带前缀的形式。打印的值均为无 padding 的 base64url;输入也接受标准 base64。
 
 ### GitHub Releases(`github = "owner/repo"`)
 
 把这份 workflow 放进**你的应用**仓库。它构建你的资产,并**仅当配置了签名密钥时**才对每个
-资产签名、把签名作为资产 `label` 上传。没有 key 时上传未签名版本,所以在你采用签名之前也能用。
+资产签名、把签名作为 `<asset>.sig` sidecar 资产随同上传。没有 key 时上传未签名版本,所以在你
+采用签名之前也能用。
 
 ```yaml
 # .github/workflows/release.yml —— 为 lode 发布你的应用资产
@@ -176,8 +177,9 @@ jobs:
           fi
           for f in dist/*; do
             if [ -n "${LODE_SIGNING_KEY:-}" ]; then
-              sig=$(./lode-cli sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY)
-              gh release upload "$TAG" "$f#$sig" --clobber     # label = 签名
+              ./lode-cli sign "$f" --version "${TAG#v}" --key-env LODE_SIGNING_KEY \
+                | awk '/^sig:/ {print $2}' > "$f.sig"          # 用去掉 `v` 的 tag 签名
+              gh release upload "$TAG" "$f" "$f.sig" --clobber  # 签名 = `.sig` sidecar
             else
               gh release upload "$TAG" "$f" --clobber          # 未签名
             fi
@@ -188,7 +190,8 @@ jobs:
   (离线另存一份),并把公开的 `trusted_keys` 条目交给运维。没设 secret → 资产以未签名上传
   (在你采用签名前没问题;签名分支不会执行)。
 - lode 选 `name` 等于运维 `[update].asset` 的资产;`sha256` 取自资产 `digest`(对字节复验),
-  `version` 取自 tag。`channel = stable` → `/releases/latest`;其它 channel → 最新非草稿
+  `version` 取自 tag 去掉前导 `v`(签名必须绑定的 id,所以上面用 `${TAG#v}`),签名取自
+  `<asset>.sig` sidecar 资产(或资产 `label`,但 GitHub 会用它代替文件名显示)。`channel = stable` → `/releases/latest`;其它 channel → 最新非草稿
   prerelease;`pin` → 指定 tag。无需 `manifest.json` 资源。私有库:token 放 `[http].headers`。
 - 资产命名 `<app>-<os>-<arch>.<ext>`;每台主机的运维把 `[update].asset` 设为本机对应的确切
   文件名。
@@ -211,15 +214,15 @@ manifest 形状 + 逐资产字段表见 [source-adapters.zh-CN.md §6](source-ad
 ### 签名模型(两源通用)
 
 - artifact 签名绑定 **`name`(文件名)/ `version` / `sha256` / `run` / `exec`**。`format` 从文件名后缀推导(`.tar.gz`/`.tgz` → tar.gz、`.gz` → gz、`.zip` → zip、否则 raw)。`run`/`exec` 在存在时绑入签名(缺省为空字符串)——在 `require_signature=auto`(有密钥)或 `enforce` 下,被篡改的目录无法注入恶意启动命令。
-- `require_signature = enforce` 下,每个安装的资产都必须带有效签名(github:`label`;native:
-  `sig` 字段或 `.sig` sidecar)。`auto` 一旦配置了任一受信公钥即 fail-closed;无公钥时安装为
+- `require_signature = enforce` 下,每个安装的资产都必须带有效签名(github:`<asset>.sig`
+  sidecar 资产或 `label`;native:`sig` 字段或 `.sig` sidecar)。`auto` 一旦配置了任一受信公钥即 fail-closed;无公钥时安装为
   **UNVERIFIED** 并告警。
 
 ### 清单
 
 - [ ] 每台主机的 `[update].asset` 写明本平台对应的确切资产文件名。
 - [ ] `sha256` 针对原始文件;`sig` 针对 `name/version/sha256/run/exec`(§1 消息),`key_id` 受信。
-- [ ] github:签名设为资产 **`label`**。native:`sig` 内嵌或 `.sig` sidecar,且最后一次改目录后重新 `manifest-sign`。
+- [ ] github:签名以 **`<asset>.sig`** sidecar 资产上传(或设为 `label`),且针对去掉前导 `v` 的 tag 签名。native:`sig` 内嵌或 `.sig` sidecar,且最后一次改目录后重新 `manifest-sign`。
 - [ ] `channels.<c>.latest` 指向真实版本(native),或 tag/latest 可解析(github)。
 - [ ] 私钥离线;运维只持公开的 `trusted_keys` 并设 `require_signature = enforce`。
 

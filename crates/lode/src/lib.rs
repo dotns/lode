@@ -17,8 +17,8 @@
 //! **Multi-call binary:** [`run`] dispatches on the program name (`argv[0]`).
 //! Invoked as `lode` it is the loader — no subcommands, bare = start, `lode
 //! <args>` = exec passthrough. Invoked as `lode-cli` (a symlink to the same
-//! binary) it is the operator/publisher toolkit (`status`/`update`/… and
-//! `keygen`/`sign`/`verify`/`manifest`/`init`).
+//! binary) it is the operator/publisher toolkit (`status`/`update`/…,
+//! `self-update`, and `keygen`/`sign`/`verify`/`manifest`/`init`).
 
 mod authoring;
 mod cli;
@@ -34,6 +34,11 @@ use lode_core::InitOptions;
 use lode_core::commands;
 
 use crate::cli::{LoaderCli, ToolCli, ToolCommand};
+
+/// The publisher keys `lode-cli self-update` trusts for lode's own releases —
+/// compiled in from `release-keys.txt` (trusted-keys-file format), so a
+/// self-update can never be steered by the app's `[trust]` configuration.
+const RELEASE_KEYS: &str = include_str!("../release-keys.txt");
 
 /// Parse the CLI, resolve configuration, and dispatch to the selected operation.
 ///
@@ -166,6 +171,19 @@ fn run_tool() -> anyhow::Result<ExitCode> {
         }
         ToolCommand::Restart => commands::restart::run(&config_cli::resolve(&cli.globals)?)?,
         ToolCommand::Versions => commands::versions::run(&config_cli::resolve(&cli.globals)?)?,
+        // lode's own update: a self-contained source + trust set (see the command's
+        // docs) — deliberately NOT `config_cli::resolve`, which would pick up the
+        // app's `lode.toml` / `LODE_*` source and trusted keys.
+        ToolCommand::SelfUpdate {
+            version,
+            release_key,
+        } => {
+            let keys = release_key.map_or_else(
+                || lode_core::install::trusted_keys_from_text(RELEASE_KEYS),
+                |key| vec![key],
+            );
+            commands::self_update::run(version.as_deref(), &keys, env!("CARGO_PKG_VERSION"))?;
+        }
         ToolCommand::Seed {
             app_bin,
             version,
@@ -208,4 +226,24 @@ fn init_post_parse(globals: &cli::Globals) {
         .log_level(resolve_log_level(globals))
         .panic_hook(true)
         .install();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `release-keys.txt` must carry at least one entry, and every entry must
+    /// decode as a trusted-key entry: an empty file (or a typo in one) leaves
+    /// `self-update` with no key to verify a release against, which it can only
+    /// report at runtime.
+    #[test]
+    fn built_in_release_keys_decode() {
+        let entries = lode_core::install::trusted_keys_from_text(RELEASE_KEYS);
+        assert!(!entries.is_empty(), "release-keys.txt lists no release key");
+        for entry in entries {
+            lode_core::verify::decode_trusted_key(&entry)
+                .map_err(|e| format!("release-keys.txt entry {entry:?}: {e}"))
+                .unwrap();
+        }
+    }
 }

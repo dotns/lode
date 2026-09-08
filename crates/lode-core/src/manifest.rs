@@ -230,12 +230,11 @@ pub fn allowed_hosts(cfg: &Config) -> Vec<String> {
 
 /// Native source: download the `lode/v1` JSON over HTTP, parse it, then back-fill
 /// any detached `.sig` sidecar (§6) for the install-target asset that carries no
-/// inline `sig` ([`resolve_native_sidecars`]) — the one native-only refinement the
-/// GitHub adapter never needs. It operates on the freshly-parsed, still-owned
-/// manifest, so the downstream `select_asset`/verify/install path stays identical
-/// (and source-agnostic) for both adapters. Rollback protection for the channel
-/// `latest` pointer is source-agnostic and lives in [`resolve_target`] (the
-/// client-side downgrade floor), not here.
+/// inline `sig` ([`resolve_sidecars`]). It operates on the freshly-parsed,
+/// still-owned manifest, so the downstream `select_asset`/verify/install path
+/// stays identical (and source-agnostic) for both adapters. Rollback protection
+/// for the channel `latest` pointer is source-agnostic and lives in
+/// [`resolve_target`] (the client-side downgrade floor), not here.
 fn fetch_native(cfg: &Config, url: &str) -> Result<Manifest> {
     let headers = crate::http::expand_headers(&cfg.http.headers)?;
     // The credential same-origin set (manifest host + `[http].credential_hosts`)
@@ -247,7 +246,7 @@ fn fetch_native(cfg: &Config, url: &str) -> Result<Manifest> {
     let mut manifest = parse(&bytes)?;
     // §6: when a signature is required and the selected asset has no inline `sig`,
     // fall back to its `<url>.sig` sidecar.
-    resolve_native_sidecars(cfg, &mut manifest, &hosts)?;
+    resolve_sidecars(cfg, &mut manifest, &hosts, SidecarLookup::Inferred)?;
     Ok(manifest)
 }
 
@@ -263,24 +262,37 @@ fn signature_required(cfg: &Config) -> Result<bool> {
     })
 }
 
-/// Back-fill detached `.sig` sidecars (§6) into the native manifest for the asset
-/// this host installs (`[update].asset`) in the version(s) its `latest`/`pin`
-/// pointer selects. A sidecar is fetched only when a signature is required and the
-/// asset carries no inline `sig` (which always wins — [`effective_sig`]); the fetch
-/// is best-effort, so a missing or unreachable sidecar simply leaves the asset
-/// unsigned and the downstream [`crate::install`] verification decides per policy
-/// (fail-closed under `enforce`/`auto`+keys). Same-origin credential rules apply to
-/// the sidecar fetch exactly as to the asset download.
+/// Where an asset's detached `.sig` sidecar (§6) may live, per source adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidecarLookup {
+    /// native: the sidecar sits at `<url>.sig` beside the asset; the manifest need
+    /// not list it.
+    Inferred,
+    /// github: the release's own asset list is the catalog, so the sidecar must be
+    /// a `<name>.sig` asset of the same release (§5); nothing is fetched otherwise
+    /// (no speculative 404 against the CDN).
+    Listed,
+}
+
+/// Back-fill detached `.sig` sidecars (§6) into the manifest for the asset this
+/// host installs (`[update].asset`) in the version(s) its `latest`/`pin` pointer
+/// selects. A sidecar is fetched only when a signature is required and the asset
+/// carries no inline `sig` (which always wins); the fetch is best-effort, so a
+/// missing or unreachable sidecar simply leaves the asset unsigned and the
+/// downstream [`crate::install`] verification decides per policy (fail-closed
+/// under `enforce`/`auto`+keys). Same-origin credential rules apply to the sidecar
+/// fetch exactly as to the asset download.
 ///
 /// Scope: only the `latest`/`pin` target asset(s) are pre-resolved (a bounded
 /// number of fetches — at most the channel latest plus the pin). Installing an
 /// *explicit* non-latest, non-pinned version whose asset is sidecar-only (`update
 /// --version X`) is not pre-resolved here; pin that version or give it an inline
-/// `sig`. No-op for the GitHub adapter, which never calls this.
-fn resolve_native_sidecars(
+/// `sig`.
+fn resolve_sidecars(
     cfg: &Config,
     manifest: &mut Manifest,
     allowed_hosts: &[String],
+    lookup: SidecarLookup,
 ) -> Result<()> {
     if !signature_required(cfg)? {
         return Ok(());
@@ -296,37 +308,55 @@ fn resolve_native_sidecars(
         targets.push(latest);
     }
     if let Some(pin) = cfg.update.pin.as_deref() {
-        targets.push(pin.to_owned());
+        targets.push(canonical_id(manifest, pin));
     }
     for version in targets {
         let Some(entry) = manifest.versions.get_mut(&version) else {
             continue;
         };
-        let Some(asset) = entry.assets.iter_mut().find(|a| a.name == asset_name) else {
+        let Some(asset) = entry.assets.iter().find(|a| a.name == asset_name) else {
             continue;
         };
         // Inline `sig` always wins — only reach for a sidecar when it is absent.
-        let sidecar = if asset.sig.is_none() {
-            fetch_sidecar(cfg, asset, allowed_hosts)
-        } else {
-            None
+        if asset.sig.is_some() {
+            continue;
+        }
+        let auth = asset.auth;
+        let Some(url) = sidecar_url(entry, asset, lookup) else {
+            continue;
         };
-        asset.sig = effective_sig(asset.sig.as_deref(), sidecar.as_deref());
+        let sidecar = fetch_sidecar(cfg, &url, auth, allowed_hosts);
+        if let Some(asset) = entry.assets.iter_mut().find(|a| a.name == asset_name) {
+            asset.sig = sidecar;
+        }
     }
     Ok(())
 }
 
-/// Fetch an asset's detached signature sidecar at `<url>.sig` (§6), returning its
-/// trimmed body as the base64 signature, or `None` when the sidecar is absent or
-/// unreachable (best-effort — verification still happens at install). `[http]`
-/// credentials ride the sidecar fetch only when the asset opts in (`auth`) and the
-/// sidecar host is same-origin/allowlisted, reusing [`crate::download`]'s gate so
-/// the rule is identical to the asset download.
-fn fetch_sidecar(cfg: &Config, asset: &Asset, allowed_hosts: &[String]) -> Option<String> {
-    let url = format!("{}.sig", asset.url);
-    let headers = if asset.auth
+/// The URL of `asset`'s sidecar within `entry`: a listed `<name>.sig` sibling asset
+/// wins for both adapters (its own `url`), else the inferred `<url>.sig` under
+/// [`SidecarLookup::Inferred`]; `None` when there is nothing to fetch.
+fn sidecar_url(entry: &VersionEntry, asset: &Asset, lookup: SidecarLookup) -> Option<String> {
+    let sidecar_name = format!("{}.sig", asset.name);
+    if let Some(listed) = entry.assets.iter().find(|a| a.name == sidecar_name) {
+        return Some(listed.url.clone());
+    }
+    match lookup {
+        SidecarLookup::Inferred => Some(format!("{}.sig", asset.url)),
+        SidecarLookup::Listed => None,
+    }
+}
+
+/// Fetch a detached signature sidecar at `url` (§6), returning its trimmed body as
+/// the base64 signature, or `None` when the sidecar is absent or unreachable
+/// (best-effort — verification still happens at install). `[http]` credentials
+/// ride the sidecar fetch only when the asset opts in (`auth`) and the sidecar
+/// host is same-origin/allowlisted, reusing [`crate::download`]'s gate so the rule
+/// is identical to the asset download.
+fn fetch_sidecar(cfg: &Config, url: &str, auth: bool, allowed_hosts: &[String]) -> Option<String> {
+    let headers = if auth
         && !cfg.http.headers.is_empty()
-        && crate::download::host_allowed(&url, allowed_hosts)
+        && crate::download::host_allowed(url, allowed_hosts)
     {
         // Can't build the credentials (e.g. an unset `${ENV}`) → skip the sidecar;
         // the asset download surfaces the real header error.
@@ -335,10 +365,10 @@ fn fetch_sidecar(cfg: &Config, asset: &Asset, allowed_hosts: &[String]) -> Optio
         Vec::new()
     };
     let attach = |host: &str| crate::download::host_in(host, allowed_hosts);
-    match crate::http::get_bytes(&url, &headers, cfg.http.allow_insecure, &attach) {
+    match crate::http::get_bytes(url, &headers, cfg.http.allow_insecure, &attach) {
         Ok(body) => Some(sidecar_signature(&body)),
         Err(e) => {
-            tracing::debug!(error = %e, "native .sig sidecar fetch failed; asset left unsigned");
+            tracing::debug!(error = %e, "`.sig` sidecar fetch failed; asset left unsigned");
             None
         }
     }
@@ -349,12 +379,6 @@ fn fetch_sidecar(cfg: &Config, asset: &Asset, allowed_hosts: &[String]) -> Optio
 /// newline). The §1 verification re-trims, so this only normalises the stored form.
 fn sidecar_signature(body: &[u8]) -> String {
     String::from_utf8_lossy(body).trim_end().to_owned()
-}
-
-/// The signature to use for a native asset: an inline `sig` ALWAYS wins; a detached
-/// sidecar is only the fallback (§6). `None` when neither is present.
-fn effective_sig(inline: Option<&str>, sidecar: Option<&str>) -> Option<String> {
-    inline.or(sidecar).map(ToOwned::to_owned)
 }
 
 /// GitHub source: pick the release for the configured channel/pin via the GitHub
@@ -373,7 +397,17 @@ fn fetch_github(cfg: &Config, repo: &str) -> Result<Manifest> {
     let insecure = cfg.http.allow_insecure;
 
     let release = select_release(base, owner, name, channel, pin, &headers, insecure)?;
-    map_release(&cfg.global.app, release, channel, pin)
+    let mut manifest = map_release(&cfg.global.app, release, channel)?;
+    // §5: a release may ship a signature as a `<name>.sig` sidecar asset instead of
+    // the asset `label` (which GitHub renders in place of the filename); the label
+    // wins when both are present.
+    resolve_sidecars(
+        cfg,
+        &mut manifest,
+        &allowed_hosts(cfg),
+        SidecarLookup::Listed,
+    )?;
+    Ok(manifest)
 }
 
 /// Resolve the release for `channel`/`pin` using GitHub's native endpoints
@@ -444,17 +478,12 @@ fn select_prerelease(releases: Vec<GhRelease>) -> Result<GhRelease> {
 
 /// Map a GitHub release's own asset list onto the internal [`Manifest`] (§5). Each
 /// release asset becomes an [`Asset`] keyed by its filename; the release `tag_name`
-/// (minus a leading `v`) is the version, and `app` is the manifest `name` (it must
-/// match `[global].app`). The result carries one synthesised `channel` whose
-/// `latest` points at that version; a set `pin` (a raw tag) is also registered as a
-/// version id so downstream pin resolution — which is literal (see
-/// [`resolve_target`]) — still resolves to this release.
-fn map_release(
-    app: &str,
-    release: GhRelease,
-    channel: &str,
-    pin: Option<&str>,
-) -> Result<Manifest> {
+/// (minus a leading `v`) is the version — the one id the release is known by, so
+/// the signed `version` is the same whether the release was reached via `latest`
+/// or a `pin` on the raw tag (see [`canonical_id`]) — and `app` is the manifest
+/// `name` (it must match `[global].app`). The result carries one synthesised
+/// `channel` whose `latest` points at that version.
+fn map_release(app: &str, release: GhRelease, channel: &str) -> Result<Manifest> {
     let ver = strip_v(&release.tag_name).to_owned();
     // The release tag becomes a `versions` key (→ a filesystem path); validate it
     // before it can be inserted or used downstream.
@@ -470,13 +499,6 @@ fn map_release(
     };
 
     let mut versions = BTreeMap::new();
-    if let Some(tag) = pin
-        && tag != ver.as_str()
-    {
-        // The raw pin tag is registered as its own version key, so guard it too.
-        validate_id("version", tag)?;
-        versions.insert(tag.to_owned(), entry.clone());
-    }
     versions.insert(ver.clone(), entry);
 
     let mut channels = BTreeMap::new();
@@ -495,8 +517,9 @@ fn map_release(
 
 /// Map one GitHub release asset onto an internal [`Asset`]: filename → `name`;
 /// `browser_download_url` → `url`; `digest` (minus the `sha256:` prefix) → `sha256`;
-/// `label` (the only arbitrary-string slot the API returns) → `sig`; `size` carried
-/// through. GitHub has no slot for the `run`/`exec` launch overrides, so they are
+/// `label` (the only arbitrary-string slot the API returns) → `sig` (a `<name>.sig`
+/// sidecar asset fills it in afterwards when the label is absent —
+/// [`resolve_sidecars`]); `size` carried through. GitHub has no slot for the `run`/`exec` launch overrides, so they are
 /// `None` (the operator's `[command]` decides the launch); credentials may ride the
 /// asset host (gated by `allowed_hosts`), so `auth` is on.
 fn gh_asset_to_asset(a: GhAsset) -> Asset {
@@ -521,7 +544,7 @@ fn gh_asset_to_asset(a: GhAsset) -> Asset {
 
 /// Drop a leading `v` from a release tag when it precedes a digit (the `vX.Y.Z`
 /// convention, e.g. `v1.5.0` → `1.5.0`); any other tag passes through unchanged.
-fn strip_v(tag: &str) -> &str {
+pub(crate) fn strip_v(tag: &str) -> &str {
     tag.strip_prefix('v')
         .filter(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
         .unwrap_or(tag)
@@ -543,8 +566,8 @@ struct GhRelease {
 
 /// One asset attached to a release; `browser_download_url` is fetched through
 /// [`crate::http`] (with `[http].headers`, so a token reaches private repos).
-/// `digest` carries the API's `sha256:<hex>` integrity hash; `label` is the
-/// publisher signature slot (§5).
+/// `digest` carries the API's `sha256:<hex>` integrity hash; `label` is the inline
+/// publisher-signature slot (§5) — a `<name>.sig` sibling asset is the other one.
 #[derive(Debug, Deserialize)]
 struct GhAsset {
     name: String,
@@ -639,7 +662,8 @@ pub fn validate_command_override(kind: &str, value: &str) -> Result<()> {
 /// points `latest` at an older version is refused as a rollback risk. An explicit
 /// concrete version or a `pin` is the operator's deliberate choice and is never
 /// blocked (pass `floor` from the caller's state; it is consulted only on the
-/// `latest`-following branches).
+/// `latest`-following branches). Either may name a raw GitHub tag (`v1.5.0`) for
+/// a catalog keyed by the stripped id (`1.5.0`) — see [`canonical_id`].
 pub fn resolve_target(
     manifest: &Manifest,
     channel: &str,
@@ -653,10 +677,10 @@ pub fn resolve_target(
             guard_downgrade(&latest, floor)?;
             latest
         }
-        Some(version) => version.to_owned(),
+        Some(version) => canonical_id(manifest, version),
         None => {
             if let Some(version) = pin {
-                version.to_owned()
+                canonical_id(manifest, version)
             } else {
                 let latest = channel_latest(manifest, channel)?;
                 guard_downgrade(&latest, floor)?;
@@ -674,6 +698,21 @@ pub fn resolve_target(
         )));
     }
     Ok(want)
+}
+
+/// The catalog key an operator-supplied id (a `pin` or an explicit version) names:
+/// the id itself when the catalog has it, else its `v`-stripped form. The GitHub
+/// adapter keys a release by its tag minus a leading `v` while the operator pins
+/// the raw tag (`pin = "v1.5.0"` fetches `/releases/tags/v1.5.0`), so both must
+/// land on the single id `1.5.0` — the one that keys `versions/<id>` and is bound
+/// into the asset signature. An id the catalog has under neither form passes
+/// through unchanged, for the caller's not-present error.
+fn canonical_id(manifest: &Manifest, id: &str) -> String {
+    if manifest.versions.contains_key(id) {
+        id.to_owned()
+    } else {
+        strip_v(id).to_owned()
+    }
 }
 
 /// Client-side rollback protection: refuse to *follow* the channel `latest` pointer
@@ -953,29 +992,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_sig_inline_always_wins_sidecar_is_fallback() {
-        // Inline `sig` wins even when a sidecar is present.
-        assert_eq!(
-            effective_sig(Some("inline"), Some("sidecar")).as_deref(),
-            Some("inline")
-        );
-        // No inline → fall back to the sidecar.
-        assert_eq!(
-            effective_sig(None, Some("sidecar")).as_deref(),
-            Some("sidecar")
-        );
-        // Inline with no sidecar → inline.
-        assert_eq!(
-            effective_sig(Some("inline"), None).as_deref(),
-            Some("inline")
-        );
-        // Neither → unsigned.
-        assert_eq!(effective_sig(None, None), None);
-    }
-
-    // --- client-side downgrade floor (`latest` pointer) --------------------
-
-    #[test]
     fn downgrade_guard_refuses_latest_below_floor() {
         let m = example(); // channel `stable` latest = 1.5.0
         // The client has already committed to 1.6.0 (floor). A catalog whose `latest`
@@ -1096,7 +1112,7 @@ mod tests {
         let release = select_prerelease(list).unwrap();
         assert_eq!(release.tag_name, "v1.6.0-beta.2");
 
-        let m = map_release("myapp", release, "beta", None).unwrap();
+        let m = map_release("myapp", release, "beta").unwrap();
         assert_eq!(m.schema, "lode/v1");
         assert_eq!(m.name, "myapp"); // from the configured app, not a manifest asset
         assert!(m.key_id.is_none());
@@ -1129,7 +1145,7 @@ mod tests {
     }
 
     #[test]
-    fn map_release_strips_v_and_registers_pin_alias() {
+    fn map_release_strips_v_and_a_raw_tag_pin_resolves_to_that_id() {
         let release: GhRelease = serde_json::from_slice(
             br#"{ "tag_name": "v1.5.0", "assets": [
               { "name": "myapp-linux-x86_64.tar.gz",
@@ -1137,25 +1153,164 @@ mod tests {
                 "digest": "sha256:deadbeef" } ] }"#,
         )
         .unwrap();
-        // A raw-tag pin must also resolve, since `resolve_target`'s pin branch is
-        // literal — both the stripped id and the raw tag key the same release.
-        let m = map_release("myapp", release, "stable", Some("v1.5.0")).unwrap();
+        // The release is known by ONE id, the stripped tag: a pin (or explicit
+        // version) given as the raw tag lands on it too, so `versions/<id>` and the
+        // signed `version` are the same whichever way the release was selected.
+        let m = map_release("myapp", release, "stable").unwrap();
         assert!(m.versions.contains_key("1.5.0"));
-        assert!(m.versions.contains_key("v1.5.0"));
+        assert!(!m.versions.contains_key("v1.5.0"));
         assert_eq!(
             resolve_target(&m, "stable", Some("v1.5.0"), None, None).unwrap(),
-            "v1.5.0"
+            "1.5.0"
+        );
+        assert_eq!(
+            resolve_target(&m, "stable", None, Some("v1.5.0"), None).unwrap(),
+            "1.5.0"
         );
         assert_eq!(
             resolve_target(&m, "stable", None, None, None).unwrap(),
             "1.5.0"
         );
+        // A tag the catalog has under neither form is still "not present".
+        assert!(resolve_target(&m, "stable", Some("v1.4.0"), None, None).is_err());
+    }
+
+    #[test]
+    fn canonical_id_prefers_the_literal_key() {
+        // A native catalog that really keys a version `v2` keeps it verbatim.
+        let m = parse(
+            br#"{ "schema": "lode/v1", "name": "myapp",
+                  "channels": { "stable": { "latest": "v2" } },
+                  "versions": { "v2": { "assets": [
+                    { "name": "a.tar.gz", "url": "https://r/a.tar.gz", "sha256": "00" } ] } } }"#,
+        )
+        .unwrap();
+        assert_eq!(canonical_id(&m, "v2"), "v2");
+        assert_eq!(canonical_id(&m, "v1.0.0"), "1.0.0");
+        assert_eq!(canonical_id(&m, "nightly"), "nightly");
     }
 
     #[test]
     fn map_release_rejects_empty_asset_list() {
         let release: GhRelease =
             serde_json::from_slice(br#"{ "tag_name": "v1.0.0", "assets": [] }"#).unwrap();
-        assert!(map_release("myapp", release, "stable", None).is_err());
+        assert!(map_release("myapp", release, "stable").is_err());
+    }
+
+    // --- `.sig` sidecar resolution over a loopback stub -------------------------
+
+    use crate::stub::Stub;
+
+    /// A GitHub-source config against `base` requiring signatures for `asset`.
+    fn github_cfg(base: &str, asset: &str, require: &str) -> Config {
+        Config::from_toml(&format!(
+            "[global]\napp = \"myapp\"\n[update]\ngithub = \"o/r\"\ngithub_api = \"{base}\"\n\
+             asset = \"{asset}\"\n[trust]\nrequire_signature = \"{require}\"\n"
+        ))
+        .unwrap()
+    }
+
+    /// One `latest` release: `a.tar.gz` (with `label` when given) plus, when asked,
+    /// an `a.tar.gz.sig` sidecar asset served at `/dl/a.tar.gz.sig`.
+    fn github_release_stub(label: Option<&str>, sidecar: bool) -> Stub {
+        let label = label.map(ToOwned::to_owned);
+        Stub::start(move |base| {
+            let mut asset = serde_json::json!({
+                "name": "a.tar.gz",
+                "browser_download_url": format!("{base}/dl/a.tar.gz"),
+                "digest": "sha256:00",
+            });
+            if let Some(label) = label {
+                asset["label"] = serde_json::Value::String(label);
+            }
+            let mut assets = vec![asset];
+            let mut routes = Vec::new();
+            if sidecar {
+                assets.push(serde_json::json!({
+                    "name": "a.tar.gz.sig",
+                    "browser_download_url": format!("{base}/dl/a.tar.gz.sig"),
+                }));
+                routes.push(("/dl/a.tar.gz.sig".to_owned(), b"SIDECAR==\n".to_vec()));
+            }
+            let release = serde_json::json!({ "tag_name": "v1.0.0", "assets": assets });
+            routes.push((
+                "/repos/o/r/releases/latest".to_owned(),
+                release.to_string().into_bytes(),
+            ));
+            routes
+        })
+    }
+
+    fn selected_sig(m: &Manifest) -> Option<String> {
+        select_asset(version_entry(m, "1.0.0").unwrap(), "a.tar.gz")
+            .unwrap()
+            .sig
+            .clone()
+    }
+
+    #[test]
+    fn github_sidecar_asset_supplies_a_missing_signature() {
+        let stub = github_release_stub(None, true);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "enforce")).unwrap();
+        assert_eq!(selected_sig(&m).as_deref(), Some("SIDECAR=="));
+        assert_eq!(
+            stub.served(),
+            vec![
+                "/repos/o/r/releases/latest".to_owned(),
+                "/dl/a.tar.gz.sig".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn github_label_wins_over_a_sidecar_asset() {
+        let stub = github_release_stub(Some("LABEL=="), true);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "enforce")).unwrap();
+        assert_eq!(selected_sig(&m).as_deref(), Some("LABEL=="));
+        // The sidecar is never fetched when the label is present.
+        assert_eq!(stub.served(), vec!["/repos/o/r/releases/latest".to_owned()]);
+    }
+
+    #[test]
+    fn github_fetches_no_sidecar_when_none_is_listed_or_none_is_required() {
+        // No `<name>.sig` asset in the release: nothing to fetch (no blind 404).
+        let stub = github_release_stub(None, false);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "enforce")).unwrap();
+        assert!(selected_sig(&m).is_none());
+        assert_eq!(stub.served(), vec!["/repos/o/r/releases/latest".to_owned()]);
+
+        // Listed, but no signature is required (`off`): not fetched either.
+        let stub = github_release_stub(None, true);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "off")).unwrap();
+        assert!(selected_sig(&m).is_none());
+        assert_eq!(stub.served(), vec!["/repos/o/r/releases/latest".to_owned()]);
+    }
+
+    #[test]
+    fn native_sidecar_is_inferred_beside_the_asset() {
+        let stub = Stub::start(|base| {
+            let manifest = format!(
+                r#"{{ "schema": "lode/v1", "name": "myapp",
+                      "channels": {{ "stable": {{ "latest": "1.0.0" }} }},
+                      "versions": {{ "1.0.0": {{ "assets": [
+                        {{ "name": "a.tar.gz", "url": "{base}/dl/a.tar.gz", "sha256": "00" }} ] }} }} }}"#
+            );
+            vec![
+                ("/manifest.json".to_owned(), manifest.into_bytes()),
+                ("/dl/a.tar.gz.sig".to_owned(), b"NATIVE==\n".to_vec()),
+            ]
+        });
+        let cfg = Config::from_toml(&format!(
+            "[global]\napp = \"myapp\"\n[update]\nmanifest = \"{}/manifest.json\"\n\
+             asset = \"a.tar.gz\"\n[trust]\nrequire_signature = \"enforce\"\n",
+            stub.base
+        ))
+        .unwrap();
+        let m = fetch(&cfg).unwrap();
+        assert_eq!(selected_sig(&m).as_deref(), Some("NATIVE=="));
+        assert_eq!(
+            stub.served(),
+            vec!["/manifest.json".to_owned(), "/dl/a.tar.gz.sig".to_owned()]
+        );
     }
 }

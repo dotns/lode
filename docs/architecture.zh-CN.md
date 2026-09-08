@@ -207,6 +207,7 @@ lode.manifest.v1
 ### 受信公钥 / 强度
 
 - `LODE_TRUSTED_KEYS` = 逗号分隔 `[<alg>:]<key_id>:<base64 公钥>`,其中 `alg` 为 `ed25519`(原始 32 字节公钥;省略时的默认)、`ecdsa-p256` 或 `ecdsa-p384`(SEC1 点,规范形式为压缩);或 `LODE_TRUSTED_KEYS_FILE`(每行 `[<alg>:]<key_id> <base64>`)。支持多把(轮换),算法可混用。`key_id` = `sha256(公钥字节)` 的前 16 位十六进制。**算法钉在受信密钥上**:签名用该密钥的算法验证,绝不用 manifest 声明的算法(其 `alg` 仅为提示)。
+- base64 值(公钥、种子、签名)统一输出为无 padding 的 **base64url**(RFC 4648 §5,字母表 `A-Z a-z 0-9 - _`);输入同时接受标准 base64,有无 padding 均可。
 - `LODE_REQUIRE_SIGNATURE` = `off`(仅 sha256) | `auto`(默认) | `enforce`(生产推荐)。**它只门控 per-artifact 签名。** 目录(manifest 级)签名是 *present 才验* —— 目录携带时才验,永不强制,因此与此设置无关(见下方*目录签名*)。
   - **`auto` 一旦配置了任一受信公钥即变为 fail-closed**:此时 *artifact* 签名成为必需 —— 缺签名*或*验签失败都拒绝。仅当**未**配置任何受信公钥时,`auto` 才跳过 artifact 验签,并把来源记为 **UNVERIFIED**。
   - **`enforce`** 始终要求受信公钥,且 *artifact* 签名必须有效。
@@ -214,7 +215,7 @@ lode.manifest.v1
 
 ### CLI(发布者)
 
-`lode-cli keygen` / `lode-cli sign <asset> --version <ver> --key <priv> [--run <cmd>] [--exec <cmd>]`(或 `--key-env <VAR>`;打印 `sha256`/`sig`/`key_id`,其中 `sig` 同时用作 GitHub 资产 `label`;`--run`/`--exec` 把启动命令覆盖绑入签名)/ `lode-cli verify <asset> --version <ver> --pubkey <b64> --sig <b64>` / `lode-cli manifest <asset> --version <ver> --url <url> [--run <cmd>] [--exec <cmd>] --key <priv> --into manifest.json` / `lode-cli manifest-sign --into manifest.json --key <priv>`(为目录写入顶层 `key_id` + `sig`)。私钥离线,lode 只持公钥。
+`lode-cli keygen` / `lode-cli sign <asset> --version <ver> --key <priv> [--run <cmd>] [--exec <cmd>]`(或 `--key-env <VAR>`;打印 `sha256`/`sig`/`key_id`,其中 `sig` 即随资产发布的 `<asset>.sig` 内容 —— 或 GitHub 资产 `label`;`--run`/`--exec` 把启动命令覆盖绑入签名)/ `lode-cli verify <asset> --version <ver> --pubkey <b64> --sig <b64>` / `lode-cli manifest <asset> --version <ver> --url <url> [--run <cmd>] [--exec <cmd>] --key <priv> --into manifest.json` / `lode-cli manifest-sign --into manifest.json --key <priv>`(为目录写入顶层 `key_id` + `sig`)。私钥离线,lode 只持公钥。
 
 ---
 
@@ -477,7 +478,7 @@ headers = [
 # 二进制（Go/Rust/bun --compile）：给资产命名,让扩展名确定 format
 tar -czf myapp-linux-x86_64.tar.gz -C build myapp
 lode-cli sign myapp-linux-x86_64.tar.gz --version 1.5.0 --key publisher.key
-#  → 打印 sha256 + sig + key_id(sig 同时用作 GitHub 资产 label)
+#  → 打印 sha256 + sig + key_id(把 sig 作为 `<asset>.sig` 随资产发布,或作为 GitHub 资产 label)
 lode-cli manifest myapp-linux-x86_64.tar.gz --app myapp --version 1.5.0 \
     --url https://releases.example.com/1.5.0/myapp-linux-x86_64.tar.gz \
     --run ./myapp --key publisher.key --into manifest.json   # 按 name upsert 资产(--run/--exec 可选)
@@ -509,11 +510,11 @@ lode-cli sign hello.js --version 1.0.0 --key publisher.key
 
 **release 自身的资产即 catalog** —— **没有 `manifest.json` 资产**。适配器:
 1. 按上表选出 release(latest/prerelease/tag);
-2. 把每个 release 资产映射为内部资产:`name`=资产文件名、`sha256`=资产 `digest`(GitHub 计算,再对下载字节复核)、`sig`=资产 **`label`**(API 返回的唯一自由字符串槽)、`url`=`browser_download_url`;
+2. 把每个 release 资产映射为内部资产:`name`=资产文件名、`sha256`=资产 `digest`(GitHub 计算,再对下载字节复核)、`sig`=资产无 **`label`** 时取该 release 的 **`<name>.sig`** sidecar 资产(label —— API 返回的唯一自由字符串槽 —— 存在时优先)、`url`=`browser_download_url`;
 3. 之后与 native 完全相同(选 `name` 与 `[update].asset` 匹配的资产 → 校验 sha256+ed25519 → 安装)。
 
-- **版本号**:用 release 的 `tag_name`(数字前的 `v` 前缀去掉)—— 以 GitHub 为准。
-- **GitHub 无 catalog(顶层)签名**:新鲜度由 tag 权威保证;每资产 `sig`(label)仍保护各自下载。
+- **版本号**:用 release 的 `tag_name`(数字前的 `v` 前缀去掉)—— 以 GitHub 为准。以原始 tag 给出的 `pin`(或 `--version`)也解析到这个去掉 `v` 的 id,因此 `versions/<id>` 与签名绑定的 `version` 不取决于 release 是怎么被选中的 —— 发布方用去掉 `v` 的 id 签名。
+- **GitHub 无 catalog(顶层)签名**:新鲜度由 tag 权威保证;每资产 `sig`(sidecar 或 label)仍保护各自下载。
 - **私有 repo**:`[http].headers` 放 GitHub token(`Authorization: Bearer <PAT>`),API 与同主机资产下载都带。
 
 > 最简用法只需 `github = "owner/repo"` + `asset = "<filename>"`,`stable` 直接走 `/releases/latest`。两源都产出相同的内部资产列表 → 同一校验/安装路径。CI 签名可选 —— 见 [`docs/source-adapters.zh-CN.md`](source-adapters.zh-CN.md) §5 的 release workflow 配方。

@@ -1,0 +1,17 @@
+# lode release signing keys — the publisher keys `lode-cli self-update` trusts.
+#
+# One trusted-key entry per line, exactly as `lode-cli keygen` prints on its
+# `trustedKeys:` line: `<key_id>:<base64url>` for ed25519, or
+# `<alg>:<key_id>:<base64url>` for an ECDSA key (standard base64 is accepted
+# too). Blank lines and `#` comments are ignored. The private half lives only in
+# the `LODE_SIGNING_KEY` repository secret that .github/workflows/release.yml
+# signs with.
+#
+# Rotation: add the successor key here and ship a release with BOTH keys listed
+# before the successor starts signing, so binaries built before the rotation can
+# still verify the release that carries it. A binary that trusts none of the
+# current keys recovers with:
+#   lode-cli self-update --release-key '<key_id>:<base64>'
+
+# ed25519, generated 2026-09-08. Signs every lode release from v0.3.0 on.
+abab440385ba33b3:X832KLj_G4CI5kSEcduU_vOf-80zi5naaGAnJ8MNK-0

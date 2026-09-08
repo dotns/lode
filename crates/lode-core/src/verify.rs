@@ -20,8 +20,38 @@ use base64::Engine as _;
 use ed25519_dalek::Verifier as _;
 use sha2::{Digest as _, Sha256};
 
-const B64: base64::engine::general_purpose::GeneralPurpose =
-    base64::engine::general_purpose::STANDARD;
+/// The encoding lode emits for keys and signatures: base64url (RFC 4648 §5)
+/// without padding.
+///
+/// Its alphabet (`A-Z a-z 0-9 - _`) is safe in URLs, filenames and shells, unlike
+/// standard base64's `+`, `/` and `=`. Decoding goes through [`decode_b64`], which
+/// also accepts the standard alphabet with or without padding, so keys, signatures
+/// and manifests published before this encoding was adopted keep verifying
+/// unchanged.
+pub const B64: base64::engine::general_purpose::GeneralPurpose =
+    base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+/// Decode base64 in either alphabet — standard (`+/`) or URL-safe (`-_`) — with
+/// or without `=` padding, and with surrounding whitespace ignored.
+///
+/// The input is normalised onto the standard alphabet and decoded strictly (no
+/// stray bits, no interior whitespace), so the two spellings of one value decode
+/// identically and anything else is rejected.
+pub fn decode_b64(text: &str) -> Result<Vec<u8>> {
+    let normalised: String = text
+        .trim()
+        .trim_end_matches('=')
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            other => other,
+        })
+        .collect();
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(normalised)
+        .context("base64 decode")
+}
 
 /// Signature algorithm of a publisher key.
 ///
@@ -233,9 +263,7 @@ pub fn sha256_hex_file(path: &Path) -> Result<String> {
 /// signature does not validate (including one of the wrong shape for the key).
 pub fn verify_signature(public: &str, message: &[u8], sig_b64: &str) -> Result<bool> {
     let key = decode_trusted_key(public)?;
-    let sig_bytes = B64
-        .decode(sig_b64.trim())
-        .context("decode signature base64")?;
+    let sig_bytes = decode_b64(sig_b64).context("decode signature")?;
     Ok(key.verify(message, &sig_bytes))
 }
 
@@ -389,13 +417,13 @@ fn parse_trusted_key(entry: &str) -> Result<(Algorithm, &str)> {
 /// the public component.
 pub fn decode_trusted_key(entry: &str) -> Result<PublicKey> {
     let (alg, b64) = parse_trusted_key(entry)?;
-    let bytes = B64.decode(b64).context("base64 decode")?;
+    let bytes = decode_b64(b64)?;
     PublicKey::decode(alg, &bytes)
 }
 
 /// Decode a base64 32-byte key (an ed25519 public key or private seed).
 pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
-    let bytes = B64.decode(b64.trim()).context("base64 decode")?;
+    let bytes = decode_b64(b64)?;
     let arr: [u8; 32] = bytes
         .as_slice()
         .try_into()
@@ -825,5 +853,50 @@ mod tests {
         assert_eq!(trusted_key_id(&public_b64).as_deref(), Some(id.as_str()));
         // A malformed entry yields None rather than erroring.
         assert!(trusted_key_id("not-base64-!!!").is_none());
+    }
+
+    #[test]
+    fn decode_b64_accepts_both_alphabets_with_or_without_padding() {
+        // 256 bytes: every 6-bit group occurs, so both `+`/`/` (standard) and
+        // `-`/`_` (url-safe) appear, and the length forces `==` padding.
+        let bytes: Vec<u8> = (0..=255).collect();
+        let standard = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert!(standard.contains('+') && standard.contains('/') && standard.ends_with("=="));
+        let urlsafe = B64.encode(&bytes);
+        assert!(!urlsafe.contains(['+', '/', '=']));
+        assert!(urlsafe.contains('-') && urlsafe.contains('_'));
+
+        assert_eq!(decode_b64(&standard).unwrap(), bytes);
+        assert_eq!(decode_b64(standard.trim_end_matches('=')).unwrap(), bytes);
+        assert_eq!(decode_b64(&urlsafe).unwrap(), bytes);
+        assert_eq!(decode_b64(&format!("  {urlsafe}==\n")).unwrap(), bytes);
+        // Garbage and interior whitespace are still rejected.
+        assert!(decode_b64("not-base64-!!!").is_err());
+        assert!(decode_b64("AB CD").is_err());
+    }
+
+    #[test]
+    fn standard_base64_keys_and_signatures_still_verify() {
+        // Entries, seeds and signatures produced before base64url was adopted
+        // (standard alphabet, padded) verify exactly like the url-safe form, in
+        // any mix.
+        let standard = base64::engine::general_purpose::STANDARD;
+        let signing = SigningKey::from_bytes(&[3u8; 32]);
+        let public = signing.verifying_key().to_bytes();
+        let message = b"lode.artifact.v1\na.tar.gz\n1.0.0\nabc\n\n";
+        let sig_standard = standard.encode(signing.sign(message).to_bytes());
+        let sig_urlsafe = B64.encode(signing.sign(message).to_bytes());
+        let entry_standard = format!("{}:{}", key_id(&public), standard.encode(public));
+        let entry_urlsafe = format!("{}:{}", key_id(&public), B64.encode(public));
+        for entry in [&entry_standard, &entry_urlsafe] {
+            for sig in [&sig_standard, &sig_urlsafe] {
+                assert!(
+                    verify_signature(entry, message, sig).unwrap(),
+                    "{entry} / {sig}"
+                );
+            }
+        }
+        assert_eq!(decode_key(&standard.encode(public)).unwrap(), public);
+        assert_eq!(decode_key(&B64.encode(public)).unwrap(), public);
     }
 }

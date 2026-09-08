@@ -82,6 +82,13 @@ welcome to notify us if lode's use of a dependency is exploitable.
   manifest cannot redirect tokens to an attacker.
 - **HTTPS by default:** plain-http remote fetches are refused unless
   `allow_insecure` is set; loopback http is always allowed.
+- **Self-update:** `lode-cli self-update` fetches lode's own releases from
+  `github.com/dotns/lode` only, always under `require_signature = enforce`
+  against the release keys compiled into the binary
+  (`crates/lode/release-keys.txt`); the app's `lode.toml` / `LODE_*` source
+  and trusted keys are never consulted. The verified binary is probed
+  (`--version` must report the target) and atomically renamed over the
+  running executable, which keeps its old inode until lode restarts.
 
 ## Artifact extraction safety
 

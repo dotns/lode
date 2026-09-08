@@ -7,8 +7,9 @@
 //!   starts and supervises the app; `lode <args>` is transparent passthrough
 //!   (exec-replace into the app). See [`LoaderCli`].
 //! - invoked as **`lode-cli`** (a symlink to the same binary) → the operator /
-//!   publisher multitool: management (`status`/`update`/…) and authoring
-//!   (`keygen`/`sign`/`verify`/`manifest`/`init`). See [`ToolCli`].
+//!   publisher multitool: management (`status`/`update`/…), lode's own
+//!   `self-update`, and authoring (`keygen`/`sign`/`verify`/`manifest`/`init`).
+//!   See [`ToolCli`].
 //!
 //! [`Globals`] (shared options) fall back to `LODE_*` env vars; the full
 //! precedence (CLI > env > TOML > default) is resolved in [`crate::config_cli`].
@@ -352,6 +353,20 @@ pub(crate) enum ToolCommand {
     Restart,
     /// List locally installed versions.
     Versions,
+    /// Update THIS lode binary: download the newest lode release (or `--version`),
+    /// verify it against the release keys built into the binary, and replace the
+    /// running executable in place. Restart lode to run the new version. Never
+    /// reads the app's `lode.toml` / `LODE_*` source.
+    SelfUpdate {
+        /// Release tag to install (e.g. `v0.3.0`) instead of the newest stable
+        /// release; also the way to downgrade deliberately.
+        #[arg(long = "version")]
+        version: Option<String>,
+        /// Trust this release-key entry (`<key_id>:<base64>`, as printed by
+        /// `keygen`) instead of the built-in list — key-rotation recovery.
+        #[arg(long = "release-key")]
+        release_key: Option<String>,
+    },
     /// Dev/testing: install a LOCAL executable (or archive) as a version — no
     /// manifest, no download, no signature check — and activate it, so bare `lode`
     /// runs it fully offline. Scaffolds a sourceless `lode.toml` if the data dir has
@@ -379,7 +394,8 @@ pub(crate) enum ToolCommand {
         #[arg(long, default_value = "ed25519")]
         alg: String,
     },
-    /// Sign an asset (emit sha256 + signature; the signature is the GitHub `label`).
+    /// Sign an asset (emit sha256 + signature; publish the signature as a
+    /// `<asset>.sig` sidecar next to the asset, or as the GitHub asset `label`).
     /// Provide the key with exactly one of `--key` (file) or `--key-env` (env var).
     Sign {
         /// Path to the asset file (its basename is the signed `name`).

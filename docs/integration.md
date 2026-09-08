@@ -156,16 +156,18 @@ reference implementation; any tooling that produces the same signature works.
 
 ### Keys (once)
 
-`lode-cli keygen` prints `key_id`, the `trusted_keys` entry (`<key_id>:<base64>`,
+`lode-cli keygen` prints `key_id`, the `trusted_keys` entry (`<key_id>:<base64url>`,
 hand to operators), and the secret seed — keep it offline. Pass `--alg ecdsa-p256`
 or `--alg ecdsa-p384` for an ECDSA key: its entry and key file are then tagged
 `<alg>:…`, and every `--key` / `--key-env` / `--pubkey` accepts that tagged form.
+Printed values are unpadded base64url; standard base64 is accepted on input as well.
 
 ### GitHub Releases (`github = "owner/repo"`)
 
 Drop this workflow into **your app's** repo. It builds your assets and — **only if a
-signing key is configured** — signs each one and uploads the signature as the asset
-`label`. With no key it uploads unsigned, so it works before you adopt signing.
+signing key is configured** — signs each one and uploads the signature beside it as a
+`<asset>.sig` sidecar asset. With no key it uploads unsigned, so it works before you
+adopt signing.
 
 ```yaml
 # .github/workflows/release.yml — publish your app's assets for lode
@@ -196,8 +198,9 @@ jobs:
           fi
           for f in dist/*; do
             if [ -n "${LODE_SIGNING_KEY:-}" ]; then
-              sig=$(./lode-cli sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY)
-              gh release upload "$TAG" "$f#$sig" --clobber     # label = signature
+              ./lode-cli sign "$f" --version "${TAG#v}" --key-env LODE_SIGNING_KEY \
+                | awk '/^sig:/ {print $2}' > "$f.sig"          # sign the tag minus its `v`
+              gh release upload "$TAG" "$f" "$f.sig" --clobber  # signature = `.sig` sidecar
             else
               gh release upload "$TAG" "$f" --clobber          # unsigned
             fi
@@ -209,7 +212,10 @@ jobs:
   `trusted_keys` entry. No secret set → assets upload unsigned (fine until you adopt it;
   the sign branch never runs).
 - lode picks the asset whose `name` equals the operator's `[update].asset`; `sha256`
-  comes from the asset `digest` (re-verified against the bytes), `version` from the tag.
+  comes from the asset `digest` (re-verified against the bytes), `version` from the tag
+  minus its leading `v` (the id the signature must bind — hence `${TAG#v}` above), and
+  the signature from the `<asset>.sig` sidecar asset (or the asset `label`, which
+  GitHub would show in place of the filename).
   `channel = stable` → `/releases/latest`; other channels → newest non-draft prerelease;
   `pin` → a specific tag. No `manifest.json` asset is needed. Private repo: token in
   `[http].headers`.
@@ -238,7 +244,8 @@ entirely.
 
 - The artifact signature binds **`name` (filename) / `version` / `sha256` / `run` / `exec`**. `format` is derived from the filename extension (`.tar.gz`/`.tgz` → tar.gz, `.gz` → gz, `.zip` → zip, else raw). `run`/`exec` are bound into the signature when present (empty string otherwise) — a tampered catalog cannot inject malicious launch commands under `require_signature = auto` (with keys) or `enforce`.
 - Under `require_signature = enforce`, every installed asset must carry a valid
-  signature (github: the `label`; native: the `sig` field or a `.sig` sidecar).
+  signature (github: a `<asset>.sig` sidecar asset or the `label`; native: the `sig`
+  field or a `.sig` sidecar).
   `auto` is fail-closed once any trusted key is configured; without keys it installs
   **UNVERIFIED** with a warning.
 
@@ -246,7 +253,7 @@ entirely.
 
 - [ ] each host's `[update].asset` names the exact asset filename for its platform.
 - [ ] `sha256` is of the raw file; `sig` is over `name/version/sha256/run/exec` (the §1 message) with a trusted `key_id`.
-- [ ] github: signature set as the asset **`label`**. native: `sig` inline or a `.sig` sidecar, and the catalog re-signed (`manifest-sign`) after the final edit.
+- [ ] github: signature uploaded as the **`<asset>.sig`** sidecar asset (or set as the `label`), made over the tag minus its leading `v`. native: `sig` inline or a `.sig` sidecar, and the catalog re-signed (`manifest-sign`) after the final edit.
 - [ ] `channels.<c>.latest` points at a real version (native), or tag/latest resolves (github).
 - [ ] private key offline; operators hold only the public `trusted_keys` with `require_signature = enforce`.
 

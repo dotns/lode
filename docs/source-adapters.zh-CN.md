@@ -46,6 +46,9 @@ lode.artifact.v1
 | `ecdsa-p384` | SEC1 点;规范形式为压缩 49 字节(也接受非压缩) | 96 字节 `r ‖ s` | SHA-384 |
 
 - `key_id` = 对上述规范编码求 `sha256(公钥)` 的前 16 个 hex 字符。
+- 编码:lode 打印的所有 base64 值(公钥、私钥种子、签名)均为 **base64url**(RFC 4648 §5,
+  无 padding:`A-Z a-z 0-9 - _`),可安全放进 URL、文件名和 shell。解码同时接受标准 base64
+  (`+ /`,有无 padding 均可),之前发布的密钥与签名照常校验。
 - 操作者在 `[trust].trusted_keys` 里以 `<alg>:<key_id>:<base64公钥>` 钉住发布者;ed25519 省略 `<alg>:` 前缀(`<key_id>:<base64公钥>`,即原有形式)。`lode-cli keygen --alg <alg>` 直接打印可粘贴的条目。
 - **算法绑定在受信密钥上,绝不取自 manifest。** lode 用每把受信密钥所钉住的算法验签;manifest 里可选的 `alg` 字段仅为提示。密钥字节换个算法标签就无法解码,因此任何签名都不可能用操作者未给该密钥钉住的算法来验证。
 - 签名:`sig = base64(sign(私钥, message))` —— 各算法签的消息字节完全相同。
@@ -127,7 +130,7 @@ asset  = "myapp-linux-x64.tar.gz"
 | `name` | 资产 `name`(与 `asset` 匹配) |
 | `version` | release `tag_name`(数字前的前导 `v` 去掉) |
 | `sha256` | 资产 `digest`(去 `sha256:` 前缀),再对下载字节复验 |
-| `sig` | 资产 **`label`**(API 唯一回传的任意字符串槽) |
+| `sig` | 同一 release 里的 `<name>.sig` sidecar 资产(其内容即 base64 签名);否则资产 **`label`**(两者都有时 label 优先) |
 | `url`(运行期) | `browser_download_url` |
 
 - **版本指针 = tag 权威。** `channel = stable` → `/releases/latest`;其它 channel → 最新
@@ -143,8 +146,9 @@ secret 非空)时才签,否则回退为上传未签名资产 —— 这样 fork 
 
 1. **构建**各目标的资产到 `dist/`,按约定命名(`lode-<os>-<arch>.tar.gz`)。
 2. 为该 tag **创建** release。
-3. **逐个资产:有 key 才签,然后上传**:若 `LODE_SIGNING_KEY` 已设,签名并把签名作为资产
-   `label` 上传(`file#label`);否则上传裸文件并告警「未签名」。
+3. **逐个资产:有 key 才签,然后上传**:若 `LODE_SIGNING_KEY` 已设,用 lode 从 tag 推导的
+   版本号(tag 去掉前导 `v`)签名,把签名写入 `<asset>.sig`,两个文件一起上传;否则上传裸文件
+   并告警「未签名」。
 
 ```yaml
 # .github/workflows/release.yml
@@ -171,8 +175,9 @@ jobs:
           TAG="$GITHUB_REF_NAME"
           for f in dist/lode-*.tar.gz; do
             if [ -n "${LODE_SIGNING_KEY:-}" ]; then
-              sig=$(lode-cli sign "$f" --version "$TAG" --key-env LODE_SIGNING_KEY)
-              gh release upload "$TAG" "$f#$sig"      # label = 签名
+              lode-cli sign "$f" --version "${TAG#v}" --key-env LODE_SIGNING_KEY \
+                | awk '/^sig:/ {print $2}' > "$f.sig"
+              gh release upload "$TAG" "$f" "$f.sig"  # 签名 = `.sig` sidecar 资产
             else
               gh release upload "$TAG" "$f"           # 未签名
               echo "::warning::LODE_SIGNING_KEY 未设置 —— $(basename "$f") 以未签名上传"
@@ -189,7 +194,13 @@ jobs:
   受保护的仓库/组织 secret(或离线带外签名,获得最强托管)。
 - **`lode-cli`** 是第 1 步构建出的 multi-call 二进制;用刚构建的它来签(其它项目需先安装
   `lode-cli`)。
-- **未签名的后果。** 没有 `label` 的资产即未签名:消费端必须用 `require_signature = off`
+- **用 sidecar,不用 label。** GitHub 会用资产的 `label` **代替文件名**显示,签名放进 label
+  会让 release 页面变成一排 base64。把签名作为 `<asset>.sig` sidecar 资产上传;资产没有 label
+  时 lode 读取它(有 label 仍以 label 优先,已发布的版本照常校验)。
+- **签名的版本号。** 用 tag 去掉前导 `v` 的形式签名(`${TAG#v}`)——这是 lode 从 tag 推导的
+  版本 id(见上表)。它既是 `versions/<id>` 的键,也是签名绑定的 `version`;无论经 `latest`
+  还是 `pin` 原始 tag 选中该 release,同一个签名都能通过。
+- **未签名的后果。** 既没有 `.sig` sidecar 也没有 `label` 的资产即未签名:消费端必须用 `require_signature = off`
   (或 `auto` 且无受信密钥 → 安装为 **UNVERIFIED** 并告警)。`require_signature = enforce` 下
   未签名资产会被拒绝。
 
@@ -282,6 +293,6 @@ trusted_keys = ["<key_id>:<base64-公钥>"]
 | `manifest.rs` | 内部 `Manifest`,每版 `assets[]` 按 `name`;按 `name` 选资产;从后缀推 `format`;两个适配器(`fetch_github`、`fetch_native`)产出完全相同的内部模型 |
 | `config.rs` | `[update].asset`;`manifest`/`github` 保持互斥 |
 | `download.rs` | 按 `url` 拉取;`[http].headers` 仅同源附加;交叉校验 GitHub `digest` 并对下载文件重新 hash 比对签名里的 `sha256` |
-| `authoring.rs` / `lode-cli` | `keygen`;`sign` → `(name, version, sha256, run, exec)` 签名与 GitHub `label` 字符串;native `manifest` 组装 + `manifest-sign` 走 §2 目录形式 |
+| `authoring.rs` / `lode-cli` | `keygen`;`sign` → `(name, version, sha256, run, exec)` 签名(发布为 `.sig` sidecar 内容,或 GitHub `label`);native `manifest` 组装 + `manifest-sign` 走 §2 目录形式 |
 
 下游(`resolve_target`、install、supervise)共享、与源无关。
