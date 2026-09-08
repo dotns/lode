@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **GitHub source: an unlabelled asset is unsigned, not signed with the empty
+  string.** The API returns `"label": ""` — not `null` — for an asset uploaded
+  without a label, and the adapter carried that through as a present signature.
+  That both suppressed the `<name>.sig` sidecar fallback added in 0.3.0 and made
+  verification fail on the empty string with a misleading "did not match any
+  trusted key", so `lode-cli self-update` (and any `github`-source app whose
+  release signs via sidecars) could not install the 0.3.0 release. A blank label
+  now decays to "no signature", restoring the sidecar fallback.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added

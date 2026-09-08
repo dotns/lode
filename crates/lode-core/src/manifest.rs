@@ -532,7 +532,12 @@ fn gh_asset_to_asset(a: GhAsset) -> Asset {
         name: a.name,
         url: a.browser_download_url,
         sha256,
-        sig: a.label,
+        // An asset with no label comes back as `"label": ""`, not `null`, so a
+        // blank label MUST decay to "unsigned". Kept as `Some("")` it would read
+        // as a present signature: the `<name>.sig` sidecar fallback would be
+        // skipped and verification would then fail on the empty string with a
+        // misleading "did not match any trusted key".
+        sig: a.label.filter(|label| !label.trim().is_empty()),
         key_id: None,
         alg: None,
         run: None,
@@ -1260,6 +1265,29 @@ mod tests {
                 "/dl/a.tar.gz.sig".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn github_empty_label_is_unsigned_and_falls_back_to_the_sidecar() {
+        // The API returns `"label": ""` — not `null` — for an unlabelled asset.
+        // Carried through as a present-but-blank signature it suppresses the
+        // sidecar fetch and then fails verification on the empty string; that is
+        // the shape that broke `self-update` against the real v0.3.0 release.
+        let stub = github_release_stub(Some(""), true);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "enforce")).unwrap();
+        assert_eq!(selected_sig(&m).as_deref(), Some("SIDECAR=="));
+        assert_eq!(
+            stub.served(),
+            vec![
+                "/repos/o/r/releases/latest".to_owned(),
+                "/dl/a.tar.gz.sig".to_owned()
+            ]
+        );
+
+        // Blank and no sidecar => plainly unsigned, never `Some("")`.
+        let stub = github_release_stub(Some("   "), false);
+        let m = fetch(&github_cfg(&stub.base, "a.tar.gz", "enforce")).unwrap();
+        assert!(selected_sig(&m).is_none());
     }
 
     #[test]
