@@ -126,8 +126,8 @@ belong to unrelated projects) — depend on a release tag of this repository:
 
 ```toml
 [dependencies]
-lode-core = { git = "https://github.com/dotns/lode", tag = "v0.3.1" }        # config + Engine (no clap, no signals)
-lode-supervisor = { git = "https://github.com/dotns/lode", tag = "v0.3.1" }  # + the supervise loop, driven by an injected SignalSource
+lode-core = { git = "https://github.com/dotns/lode", tag = "v0.3.2" }        # config + Engine (no clap, no signals)
+lode-supervisor = { git = "https://github.com/dotns/lode", tag = "v0.3.2" }  # + the supervise loop, driven by an injected SignalSource
 ```
 
 ```bash
