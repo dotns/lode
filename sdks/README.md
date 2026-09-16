@@ -8,7 +8,7 @@ locking rules.
 | File | Language | Dependencies |
 |---|---|---|
 | [`lode.ts`](lode.ts) | TypeScript / JavaScript (Bun or Node) | none (node:fs builtins; real `flock(2)` via `bun:ffi` under Bun) |
-| [`lode.go`](lode.go) | Go (Unix) | none (stdlib only) |
+| [`lode.go`](lode.go) | Go (+ `lock_unix.go` / `lock_other.go`) | none (stdlib only) |
 | [`lode.rs`](lode.rs) | Rust (Unix) | `serde` (derive) + `serde_json` |
 
 Drop the file for your language into your project and import it. Each is a faithful
@@ -233,5 +233,6 @@ lode.watch(std::time::Duration::from_secs(1), &stop, lode::Handlers {
   for any data dir (`new Lode({ lodeDir })` / `lode.New(dir, "")` / `Lode::new`)
   and issue `requestUpdate` / `reboot` / `rollback` — they just can't
   report readiness (that needs the child's `LODE_INSTANCE`).
-- **Unix only** for Go/Rust (lode runs as PID 1). The TS SDK loads on any platform
-  but is meant for the Unix lode runtime.
+- **Unix only** for Rust (lode runs as PID 1). The Go and TS SDKs compile/load on any
+  platform — `flock(2)` is used where it exists — but are meant for the Unix lode
+  runtime; off it `IsSupervised()` is false and the request helpers do nothing useful.
