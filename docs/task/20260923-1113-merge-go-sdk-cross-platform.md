@@ -1,6 +1,6 @@
 # 20260923-1113-merge-go-sdk-cross-platform Merge PR #1 and fix integration findings
 
-- **status**: in_progress
+- **status**: completed
 - **priority**: P2
 - **owner**: pr1-review/session-20260923
 - **createdAt**: 2026-09-23 11:13
@@ -17,7 +17,7 @@ Acceptance criteria:
 
 ## ActiveForm
 
-Reviewing and merging PR #1 with follow-up fixes.
+Merged PR #1 and shipped the follow-up fixes; CI is green.
 
 ## Dependencies
 
@@ -42,4 +42,9 @@ Reviewing and merging PR #1 with follow-up fixes.
 - GREEN: 20 lock tests pass; workspace `cargo test` passes (180 lode-core lib tests plus other crates); fmt, Clippy `-D warnings`, and `cargo build --bins --locked` pass on Rust 1.96.0.
 - Under plain multi-threaded `cargo test`, two pre-existing tests that write and then exec a script (`runtime_version_probe_matches_and_rejects`, `replace_executable_swaps_in_the_probed_binary_and_keeps_its_mode`) fail intermittently. The cause looks like ETXTBSY. This is unrelated to this change, and CI's nextest runs each test in its own process.
 - CI on 6f2aa97 passed every job except `cargo audit + deny`. It flagged RUSTSEC-2026-0285, a new advisory against rustls 0.23.40. Ran `cargo update -p rustls` (lockfile only: rustls 0.23.45, rustls-webpki 0.103.15, aws-lc-rs 1.18.1, aws-lc-sys 0.45.0, plus pkg-config). Clippy, the workspace tests, and the release build pass again.
+
+## Final Verification
+
+- CI run 35854448876 on 134a9f5 passed all seven jobs (rustfmt, clippy, test, bun e2e, release build, cargo audit + deny, typos).
+- Not done: `sdks/vX.Y.Z` module tags, which are a release-policy decision; `check_nonce` and `last_request_result`, which are state.json contract features that need their own design.
 

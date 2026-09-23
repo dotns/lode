@@ -1,6 +1,6 @@
 # 20260923-1113-merge-go-sdk-cross-platform Merge PR #1 and fix integration findings
 
-- **status**: in-progress
+- **status**: completed
 - **createdAt**: 2026-09-23 11:13
 - **approvedAt**: 2026-09-23 11:13
 - **relatedTask**: 20260923-1113-merge-go-sdk-cross-platform
@@ -32,4 +32,9 @@ Documenting the two-line format instead would keep a nonstandard pid file for no
 The user explicitly asked to review, fix, and merge PR #1, including the other bugs, so no further approval is needed for this scope.
 
 ## Results
+
+- PR #1 squash-merged (7cd5223). The docs follow-up (4c4b524) landed on main because the contributor fork could not be pushed to.
+- `lode.pid` is now pid-only (6f2aa97). Legacy two-line files still read.
+- rustls was bumped to 0.23.45 for RUSTSEC-2026-0285 (134a9f5). The new advisory had turned the audit job red.
+- CI on 134a9f5 is green across all jobs.
 
