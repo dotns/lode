@@ -2,7 +2,10 @@
 // Wraps the state.json contract: read status, request upgrade/restart/rollback,
 // report readiness, subscribe to lode's notifications. The SDK only *signals* lode
 // (writes target/restart_nonce/ready under state.json.lock); lode does the heavy
-// fetch→verify→install→observe. Stdlib only, Unix. Contract: ../docs/integration.md §2.
+// fetch→verify→install→observe. Stdlib only. Contract: ../docs/integration.md §2.
+//
+// lode supervises Unix only, so the state.json.lock flock(2) lives in lock_unix.go; the package
+// still builds everywhere (a cross-platform app can vendor it and call IsSupervised).
 package lode
 
 import (
@@ -107,14 +110,9 @@ func (c *Client) Read() (*State, error) {
 // keys); unknown keys round-trip verbatim (numbers via json.Number, no precision
 // loss). The request/readiness helpers below wrap it.
 func (c *Client) Update(patch func(map[string]any)) (*State, error) {
-	// Best-effort flock(2) on the sibling lock file, matching lode's own RMW lock.
-	if lf, err := os.OpenFile(c.lockPath(), os.O_CREATE|os.O_APPEND, 0o644); err == nil {
-		defer lf.Close()
-		fd := int(lf.Fd())
-		if syscall.Flock(fd, syscall.LOCK_EX) == nil {
-			defer syscall.Flock(fd, syscall.LOCK_UN)
-		}
-	}
+	// Best-effort flock(2) on the sibling lock file, matching lode's own RMW lock
+	// (lock_unix.go; a no-op where flock(2) does not exist).
+	defer lockState(c.lockPath())()
 
 	m := map[string]any{}
 	if b, err := os.ReadFile(c.statePath()); err == nil && len(b) > 0 {
