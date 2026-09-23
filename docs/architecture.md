@@ -344,7 +344,7 @@ After lode sends `SIGTERM`, it **absolutely will not SIGKILL within `stop_timeou
 
 ## 9. PID protection
 
-- `$LODE_DIR/lode.pid`, atomically created with O_EXCL (`create_new`), containing the lode pid + the application name.
+- `$LODE_DIR/lode.pid`, atomically created with O_EXCL (`create_new`), containing only the lode pid (a plain pid file: `kill -TERM "$(cat lode.pid)"` works). Only the first line is parsed, so files written by older versions (pid + app name) still read.
 - Already exists → probe liveness (`nix::sys::signal::kill(pid, None)` / `kill -0`): alive → the current process exits (single instance); `ESRCH` → delete the stale lock and take over.
 - Delete the lock on normal exit/signal receipt.
 

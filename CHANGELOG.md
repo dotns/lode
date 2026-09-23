@@ -5,6 +5,20 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- `lode.pid` now holds only the pid, so `kill -TERM "$(cat lode.pid)"` works.
+  The app name on the second line is gone; files written by older versions
+  still read, since only the first line is parsed.
+
+### Fixed
+
+- **Go SDK builds on platforms without `flock(2)`** (e.g. Windows) so a
+  cross-platform app can vendor it and branch on `IsSupervised()`. The lock
+  moved to `lock_unix.go` / `lock_other.go`; Unix behavior is unchanged (#1).
+
 ## [0.3.2] - 2026-09-10
 
 ### Fixed

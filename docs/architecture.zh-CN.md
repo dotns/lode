@@ -344,7 +344,7 @@ lode 发 `SIGTERM` 后,**在 `stop_timeout` 秒内绝不 SIGKILL**,给 app 充�
 
 ## 9. PID 保护
 
-- `$LODE_DIR/lode.pid`,以 O_EXCL(`create_new`)原子创建,含 lode pid + 应用名。
+- `$LODE_DIR/lode.pid`,以 O_EXCL(`create_new`)原子创建,只含 lode pid(标准 pid 文件,`kill -TERM "$(cat lode.pid)"` 可用)。只解析第一行,旧版本写入的(pid + 应用名)文件仍可读取。
 - 已存在 → 探活(`nix::sys::signal::kill(pid, None)` / `kill -0`):存活→当前进程退出(单实例);`ESRCH`→ 删僵尸锁后接管。
 - 正常退出/收信号时删锁。
 

@@ -2548,7 +2548,7 @@ impl<'c> Supervisor<'c> {
 
 /// Acquire the single-instance PID lock (RAII; released on drop).
 fn lock_acquire(cfg: &Config) -> Result<lode_core::lock::LockGuard> {
-    lode_core::lock::acquire(&cfg.global.dir, &cfg.global.app)
+    lode_core::lock::acquire(&cfg.global.dir)
 }
 
 /// Become a child subreaper so re-parented grandchildren are reaped by us (PID 1

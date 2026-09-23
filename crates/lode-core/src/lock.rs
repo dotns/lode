@@ -4,7 +4,8 @@
 //! concurrent supervisors from acquiring the same data directory. The guard holds
 //! it for the full run, and the kernel releases it even after a forced exit.
 //! The sibling `lode.pid` is created with `O_EXCL` ([`File::create_new`]) and records
-//! the holder's pid and app name. This also preserves exclusion of legacy
+//! the holder's pid (only the first line is parsed, so legacy files that also
+//! carry the app name still read). This also preserves exclusion of legacy
 //! supervisors that only use PID files. When it exists we probe the recorded pid with
 //! `kill(pid, None)`. On Linux/Android we also inspect `/proc/<pid>/exe`: an
 //! unrelated executable or an exited process means the lock is stale even when
@@ -51,12 +52,12 @@ impl Drop for LockGuard {
     }
 }
 
-/// Acquire the single-instance lock for `app` under `dir`.
+/// Acquire the single-instance lock under `dir`.
 ///
 /// Returns [`Error::Lock`] when another live lode already holds it. A stale lock
 /// (holder dead or unrelated, file corrupt, or recording our own pid) is reclaimed
 /// transparently.
-pub fn acquire(dir: &Path, app: &str) -> Result<LockGuard> {
+pub fn acquire(dir: &Path) -> Result<LockGuard> {
     fs::create_dir_all(dir)?;
     let path = dir.join("lode.pid");
     let lock_path = dir.join("lode.pid.lock");
@@ -79,7 +80,7 @@ pub fn acquire(dir: &Path, app: &str) -> Result<LockGuard> {
         match File::create_new(&path) {
             Ok(mut file) => {
                 let guard = LockGuard { path, _lock: lock };
-                write!(file, "{}\n{app}\n", std::process::id())?;
+                writeln!(file, "{}", std::process::id())?;
                 file.sync_all()?;
                 return Ok(guard);
             }
@@ -293,7 +294,7 @@ mod tests {
             .unwrap();
             None
         } else {
-            Some(acquire(&dir, "myapp").unwrap())
+            Some(acquire(&dir).unwrap())
         };
         let mut line = String::new();
         std::io::stdin().read_line(&mut line).unwrap();
@@ -311,15 +312,13 @@ mod tests {
         let dir = scratch("create");
         let path = dir.join("lode.pid");
         {
-            let _guard = acquire(&dir, "myapp").unwrap();
+            let _guard = acquire(&dir).unwrap();
             assert!(path.is_file());
-            let text = std::fs::read_to_string(&path).unwrap();
-            let mut lines = text.lines();
+            // A plain pid file, so `kill "$(cat lode.pid)"` works.
             assert_eq!(
-                lines.next().unwrap().trim().parse::<u32>().unwrap(),
-                std::process::id()
+                std::fs::read_to_string(&path).unwrap(),
+                format!("{}\n", std::process::id())
             );
-            assert_eq!(lines.next().unwrap(), "myapp");
         }
         assert!(!path.exists(), "drop must remove the lock file");
         let _ = std::fs::remove_dir_all(&dir);
@@ -329,7 +328,7 @@ mod tests {
     fn refuses_lock_held_by_live_other_process() {
         let dir = scratch("contended");
         let child = holder_child(&dir);
-        let result = acquire(&dir, "myapp");
+        let result = acquire(&dir);
         assert!(matches!(result, Err(Error::Lock(_))));
         assert_eq!(live_holder(&dir), Some(child.0.id()));
         drop(child);
@@ -339,15 +338,15 @@ mod tests {
     #[test]
     fn refuses_second_acquisition_in_same_process() {
         let dir = scratch("same-process");
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         let original = std::fs::read_to_string(dir.join("lode.pid")).unwrap();
-        assert!(matches!(acquire(&dir, "otherapp"), Err(Error::Lock(_))));
+        assert!(matches!(acquire(&dir), Err(Error::Lock(_))));
         assert_eq!(
             std::fs::read_to_string(dir.join("lode.pid")).unwrap(),
             original
         );
         drop(guard);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -358,13 +357,13 @@ mod tests {
         let child = holder_child(&dir);
         let path = dir.join("lode.pid");
         std::fs::write(&path, "not-a-pid\n").unwrap();
-        assert!(matches!(acquire(&dir, "otherapp"), Err(Error::Lock(_))));
+        assert!(matches!(acquire(&dir), Err(Error::Lock(_))));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "not-a-pid\n");
         std::fs::remove_file(&path).unwrap();
-        assert!(matches!(acquire(&dir, "otherapp"), Err(Error::Lock(_))));
+        assert!(matches!(acquire(&dir), Err(Error::Lock(_))));
         assert!(!path.exists());
         drop(child);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -375,12 +374,12 @@ mod tests {
 
         let dir = scratch("stable-inode");
         let path = dir.join("lode.pid.lock");
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         let inode = std::fs::metadata(&path).unwrap().ino();
         drop(guard);
         assert!(!dir.join("lode.pid").exists());
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
@@ -393,7 +392,7 @@ mod tests {
         assert!(!dir.join("lode.pid.lock").exists());
         let original = std::fs::read_to_string(dir.join("lode.pid")).unwrap();
         for _ in 0..2 {
-            assert!(matches!(acquire(&dir, "otherapp"), Err(Error::Lock(_))));
+            assert!(matches!(acquire(&dir), Err(Error::Lock(_))));
             assert_eq!(live_holder(&dir), Some(child.0.id()));
             assert_eq!(
                 std::fs::read_to_string(dir.join("lode.pid")).unwrap(),
@@ -401,7 +400,7 @@ mod tests {
             );
         }
         drop(child);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -411,9 +410,9 @@ mod tests {
         let dir = scratch("acquire-error");
         let path = dir.join("lode.pid");
         std::fs::create_dir(&path).unwrap();
-        assert!(acquire(&dir, "myapp").is_err());
+        assert!(acquire(&dir).is_err());
         std::fs::remove_dir(&path).unwrap();
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -433,7 +432,7 @@ mod tests {
                 .unwrap(),
         );
         std::fs::write(dir.join("lode.pid"), format!("{}\nmyapp\n", child.0.id())).unwrap();
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         assert!(process_alive(Pid::from_raw(
             i32::try_from(child.0.id()).unwrap()
         )));
@@ -453,7 +452,7 @@ mod tests {
             "forced exit leaves the PID file"
         );
         assert_eq!(live_holder(&dir), None);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -471,7 +470,7 @@ mod tests {
         // Signal zero still succeeds for a zombie, but it no longer runs lode.
         assert!(process_alive(pid));
         assert_eq!(live_holder(&dir), None);
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         drop(guard);
         drop(child);
         let _ = std::fs::remove_dir_all(&dir);
@@ -483,7 +482,7 @@ mod tests {
         for pid in [0, -1] {
             std::fs::write(dir.join("lode.pid"), format!("{pid}\nmyapp\n")).unwrap();
             assert_eq!(live_holder(&dir), None);
-            let guard = acquire(&dir, "myapp").unwrap();
+            let guard = acquire(&dir).unwrap();
             drop(guard);
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -500,14 +499,11 @@ mod tests {
             format!("{}\noldapp\n", std::process::id()),
         )
         .unwrap();
-        let guard = acquire(&dir, "myapp").unwrap();
-        let text = std::fs::read_to_string(dir.join("lode.pid")).unwrap();
-        let mut lines = text.lines();
+        let guard = acquire(&dir).unwrap();
         assert_eq!(
-            lines.next().unwrap().trim().parse::<u32>().unwrap(),
-            std::process::id()
+            std::fs::read_to_string(dir.join("lode.pid")).unwrap(),
+            format!("{}\n", std::process::id())
         );
-        assert_eq!(lines.next().unwrap(), "myapp");
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -517,7 +513,7 @@ mod tests {
         let dir = scratch("stale");
         // A high, almost-certainly-unused pid → kill reports ESRCH → stale.
         std::fs::write(dir.join("lode.pid"), "2000000000\noldapp\n").unwrap();
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         let text = std::fs::read_to_string(dir.join("lode.pid")).unwrap();
         assert_eq!(
             text.lines().next().unwrap().trim().parse::<u32>().unwrap(),
@@ -531,7 +527,7 @@ mod tests {
     fn reclaims_corrupt_lock() {
         let dir = scratch("corrupt");
         std::fs::write(dir.join("lode.pid"), "not-a-pid\n").unwrap();
-        let guard = acquire(&dir, "myapp").unwrap();
+        let guard = acquire(&dir).unwrap();
         assert!(dir.join("lode.pid").is_file());
         drop(guard);
         let _ = std::fs::remove_dir_all(&dir);
