@@ -41,4 +41,5 @@ Reviewing and merging PR #1 with follow-up fixes.
 - RED: `acquire_creates_and_drop_releases` and `reclaims_lock_recording_own_pid` failed on the two-line `lode.pid`.
 - GREEN: 20 lock tests pass; workspace `cargo test` passes (180 lode-core lib tests plus other crates); fmt, Clippy `-D warnings`, and `cargo build --bins --locked` pass on Rust 1.96.0.
 - Under plain multi-threaded `cargo test`, two pre-existing tests that write and then exec a script (`runtime_version_probe_matches_and_rejects`, `replace_executable_swaps_in_the_probed_binary_and_keeps_its_mode`) fail intermittently. The cause looks like ETXTBSY. This is unrelated to this change, and CI's nextest runs each test in its own process.
+- CI on 6f2aa97 passed every job except `cargo audit + deny`. It flagged RUSTSEC-2026-0285, a new advisory against rustls 0.23.40. Ran `cargo update -p rustls` (lockfile only: rustls 0.23.45, rustls-webpki 0.103.15, aws-lc-rs 1.18.1, aws-lc-sys 0.45.0, plus pkg-config). Clippy, the workspace tests, and the release build pass again.
 

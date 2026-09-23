@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-platform app can vendor it and branch on `IsSupervised()`. The lock
   moved to `lock_unix.go` / `lock_other.go`; Unix behavior is unchanged (#1).
 
+### Security
+
+- Bump `rustls` to 0.23.45 for RUSTSEC-2026-0285 (TLS 1.3 handshake messages
+  accepted across encryption level boundaries).
+
 ## [0.3.2] - 2026-09-10
 
 ### Fixed
