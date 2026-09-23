@@ -1,4 +1,4 @@
-// Package lode is a single-file Go SDK for the `lode` supervisor (github.com/dotns/lode).
+// Package lode is a dependency-free Go SDK for the `lode` supervisor (github.com/dotns/lode).
 // Wraps the state.json contract: read status, request upgrade/restart/rollback,
 // report readiness, subscribe to lode's notifications. The SDK only *signals* lode
 // (writes target/restart_nonce/ready under state.json.lock); lode does the heavy

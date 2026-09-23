@@ -10,14 +10,14 @@ does under lode:
 | 2 | **READ** (读取变量) | read `LODE_ACTIVE_VERSION` / `LODE_DIR` / `LODE_INSTANCE` + host env (`PORT`, operator `[env]`) → `GET /env` |
 | 3 | **UPGRADE** (升级) | *passive*: readiness + `SIGTERM` so lode's update/rollback is seamless · *active*: `POST /upgrade`, `POST /restart` · *maintenance*: `POST /hold` / `/release` (set `state.hold` → lode won't (re)start the app) · *reload*: an operator editing `lode.toml` while the app runs does **not** auto-restart it — lode bumps `state.config_generation`; the app applies it at its own pace |
 
-Each demo integrates through the single-file **SDK** in [`../sdks`](../sdks), so it
+Each demo integrates through the **SDK** in [`../sdks`](../sdks), so it
 never hand-rolls the `state.json` format or locking: **Bun** imports `lode.ts`,
-**Rust** includes `lode.rs` via `#[path]`, **Go** imports `lode.go` through a local
+**Rust** includes `lode.rs` via `#[path]`, **Go** imports the `sdks` module through a local
 `replace`.
 
 ```
 examples/
-├── go/    main.go · go.mod · lode.toml          (imports ../../sdks/lode.go; static binary)
+├── go/    main.go · go.mod · lode.toml          (imports ../../sdks module; static binary)
 ├── bun/   app.ts · package.ts · lode.toml       (imports ../../sdks/lode.ts; bundles → dist/app.js)
 └── rust/  src/main.rs · Cargo.toml · lode.toml  (#[path]-includes ../../sdks/lode.rs; tiny_http + serde)
 ```

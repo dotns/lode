@@ -11,8 +11,9 @@ locking rules.
 | [`lode.go`](lode.go) | Go (+ `lock_unix.go` / `lock_other.go`) | none (stdlib only) |
 | [`lode.rs`](lode.rs) | Rust (Unix) | `serde` (derive) + `serde_json` |
 
-Drop the file for your language into your project and import it. Each is a faithful
-port of the same API.
+Drop the file for your language into your project and import it (for Go, the three
+`.go` files, or `go get github.com/dotns/lode/sdks`). Each is a faithful port of the
+same API.
 
 ## What the SDK does — and doesn't
 
@@ -178,7 +179,7 @@ lode.watch({
 ### Go
 
 ```go
-import "yourmod/lode" // wherever you dropped lode.go
+import "yourmod/lode" // wherever you dropped the .go files (or github.com/dotns/lode/sdks)
 
 c, err := lode.FromEnv()
 if err != nil { /* not under lode */ }

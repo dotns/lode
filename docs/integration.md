@@ -69,7 +69,7 @@ See [`lode.example.toml`](lode.example.toml) for every option and `[runtime]`/`[
 
 What *your app* implements. Any language — read/write one JSON file and handle `SIGTERM`.
 
-> **Prefer the SDKs.** Single-file clients in [`../sdks`](../sdks) (TypeScript / Go /
+> **Prefer the SDKs.** Dependency-light clients in [`../sdks`](../sdks) (TypeScript / Go /
 > Rust) wrap this whole contract — read status; request upgrade / restart / rollback;
 > `hold`/`release` for maintenance; report readiness; `watch` lode's notifications —
 > with the correct atomic, `state.json.lock`-serialised writes. The raw contract below

@@ -1,7 +1,7 @@
 // Package main is a lode demo app (Go). See ../README.md.
 //
 // It conforms to the lode app contract via the SDK (github.com/dotns/lode/sdks,
-// a local replace to ../../sdks/lode.go) and shows the three things an app does
+// a local replace to ../../sdks) and shows the three things an app does
 // under lode:
 //
 //  1. START   — bind $PORT and serve; lode runs this binary as its child.

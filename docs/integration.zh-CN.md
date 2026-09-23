@@ -67,7 +67,7 @@ restart      = "on-failure" # on-failure(默认,keep-alive:重试后暂停)| alw
 
 *你的应用*要实现的部分。任意语言 —— 读写一个 JSON 文件 + 处理 `SIGTERM`。
 
-> **优先用 SDK。** [`../sdks`](../sdks) 下有单文件客户端(TypeScript / Go / Rust),封装了整个契约 —— 读状态;请求升级 / 重启 / 回退;维护用 `hold`/`release`;上报就绪;`watch` 监听 lode 的通知 —— 且写入都是原子、经 `state.json.lock` 串行化的。下面的原始契约正是它们的实现(也是你移植到其它语言所需的全部)。
+> **优先用 SDK。** [`../sdks`](../sdks) 下有轻依赖客户端(TypeScript / Go / Rust),封装了整个契约 —— 读状态;请求升级 / 重启 / 回退;维护用 `hold`/`release`;上报就绪;`watch` 监听 lode 的通知 —— 且写入都是原子、经 `state.json.lock` 串行化的。下面的原始契约正是它们的实现(也是你移植到其它语言所需的全部)。
 
 **lode 注入的环境变量:** `LODE_ACTIVE_VERSION`(当前版本)、`LODE_DIR`(lode 自己的目录 ——
 `state.json` 在 `$LODE_DIR/state.json`)、`LODE_WORKDIR`(app 的运行目录,即其 cwd)、
